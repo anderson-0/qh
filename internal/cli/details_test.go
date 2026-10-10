@@ -95,3 +95,33 @@ func TestWorkspaceFlag(t *testing.T) {
 		t.Fatalf("QH_WORKSPACE: %q", out)
 	}
 }
+
+func TestUnknownWorkspaceIsRefused(t *testing.T) {
+	home, db := t.TempDir(), testutil.SQLiteFixture(t)
+	const want = `error[unknown_source]: no workspace named "nosuch"`
+	for _, args := range [][]string{
+		{"conn", "ls"},
+		{"conn", "add", "x", "--engine", "sqlite", "--dsn", db},
+		{"log"},
+		{"key", "ls"},
+	} {
+		_, errOut, code := run(t, home, "", append([]string{"--workspace", "nosuch"}, args...)...)
+		if code != 1 || !strings.HasPrefix(errOut, want) || !strings.Contains(errOut, "qh workspace create") {
+			t.Errorf("%v: %d %q", args, code, errOut)
+		}
+	}
+	t.Setenv("QH_WORKSPACE", "nosuch")
+	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 1 || !strings.HasPrefix(errOut, want) {
+		t.Errorf("QH_WORKSPACE: %d %q", code, errOut)
+	}
+	if _, errOut, code := run(t, home, "", "mcp"); code != 1 || !strings.HasPrefix(errOut, want) {
+		t.Errorf("mcp: %d %q", code, errOut)
+	}
+	t.Setenv("QH_WORKSPACE", "")
+	if out, errOut, code := run(t, home, "", "--workspace", "nosuch", "workspace", "create", "nosuch"); code != 0 {
+		t.Errorf("workspace create: %d %q %q", code, out, errOut)
+	}
+	if out, errOut, code := run(t, home, "", "--workspace", "nosuch", "conn", "ls"); code != 0 {
+		t.Errorf("conn ls after create: %d %q %q", code, out, errOut)
+	}
+}

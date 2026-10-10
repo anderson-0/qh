@@ -166,3 +166,11 @@ func TestAllowedNamespaces(t *testing.T) {
 		t.Fatalf("namespaces = %v", info.AllowedNamespaces)
 	}
 }
+
+func TestCreateConnectionInUnknownWorkspace(t *testing.T) {
+	h := newHarness(t)
+	_, _, err := h.svc.CreateConnection(context.Background(), "nosuch", ConnInput{Name: "x", Engine: "sqlite", DSN: testutil.SQLiteFixture(t)}, false)
+	if !strings.HasPrefix(errText(err), `error[unknown_source]: no workspace named "nosuch"`) {
+		t.Fatalf("got %q", errText(err))
+	}
+}

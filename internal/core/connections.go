@@ -282,6 +282,9 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 			return nil, nil, qerr.New(qerr.Invalid, fmt.Sprintf("a connection named %q already exists", in.Name)).
 				WithHint("Edit it, or choose another name")
 		}
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil, noWorkspace(ws)
+		}
 		return nil, nil, err
 	}
 	return toInfo(rec, info), tr, nil

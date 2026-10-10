@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -48,6 +49,19 @@ func workspaceOf(cmd *cobra.Command) (string, bool) {
 		return v, true
 	}
 	return ws, false
+}
+
+// requireWorkspace fails when the local store has no workspace ws.
+func requireWorkspace(ctx context.Context, a *app, ws string) error {
+	ok, err := a.svc.WorkspaceExists(ctx, ws)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return qerr.New(qerr.UnknownSource, fmt.Sprintf("no workspace named %q", ws)).
+			WithHint("Create it with qh workspace create, or check --workspace and QH_WORKSPACE")
+	}
+	return nil
 }
 
 // refuseRemote stops a local-only command from ignoring --server.
@@ -103,6 +117,11 @@ func newRoot(version string) *cobra.Command {
 				return err
 			}
 			defer a.Close()
+			if !strings.HasPrefix(cmd.CommandPath(), "qh workspace") {
+				if err := requireWorkspace(cmd.Context(), a, ws); err != nil {
+					return err
+				}
+			}
 			return fn(cmd, &localBackend{a: a, ws: ws}, args)
 		}
 	}

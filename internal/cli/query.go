@@ -94,6 +94,9 @@ func mcpCmd(home *string, version string) *cobra.Command {
 				pruneQueryLog(ctx, a.svc, retention)
 			}
 			ws, _ := workspaceOf(cmd)
+			if err := requireWorkspace(ctx, a, ws); err != nil {
+				return err
+			}
 			srv := mcpserver.New(a.svc, func(context.Context) string { return ws }, version)
 			err = srv.Run(ctx, &mcp.StdioTransport{})
 			if errors.Is(err, context.Canceled) {

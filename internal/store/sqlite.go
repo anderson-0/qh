@@ -215,6 +215,9 @@ func (s *SQLite) CreateConnection(ctx context.Context, c *Connection) error {
 	if isUnique(err) {
 		return ErrExists
 	}
+	if isForeignKey(err) {
+		return ErrNotFound // the workspace does not exist
+	}
 	if err != nil {
 		return err
 	}

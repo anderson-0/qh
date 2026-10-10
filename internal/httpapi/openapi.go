@@ -1,5 +1,14 @@
 package httpapi
 
-import "net/http"
+import (
+	_ "embed"
+	"net/http"
+)
 
-func serveOpenAPI(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotImplemented) }
+//go:embed openapi.json
+var openapiDoc []byte
+
+func serveOpenAPI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(openapiDoc)
+}

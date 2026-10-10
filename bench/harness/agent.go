@@ -124,8 +124,8 @@ func capOutput(out string) (string, bool) {
 
 // Run asks one question. The model may call the server's tools until it
 // calls submit_answer, stops, or reaches maxTurns replies.
-func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth [][]any, run, maxTurns int) Result {
-	r := Result{Dataset: ds, Server: srv.Name(), Question: q.ID, Kind: q.Kind, Run: run}
+func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth [][]any, run, maxTurns int) (r Result) {
+	r = Result{Dataset: ds, Server: srv.Name(), Question: q.ID, Kind: q.Kind, Run: run}
 	start := time.Now()
 	defer func() { r.WallMS = time.Since(start).Milliseconds() }()
 	tools := append(ToolDefs(srv.Tools()), SubmitTool)
@@ -148,6 +148,10 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 				var in struct{ Rows [][]any }
 				if err := json.Unmarshal(c.Input, &in); err != nil {
 					results = append(results, ToolResult{ID: c.ID, IsError: true, Content: "rows must be an array of arrays: " + err.Error()})
+					continue
+				}
+				if in.Rows == nil { // rows missing or null, e.g. input cut off at max_tokens
+					results = append(results, ToolResult{ID: c.ID, IsError: true, Content: "rows must be an array of arrays: rows is missing or null"})
 					continue
 				}
 				r.Submitted, r.Answer = true, in.Rows

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -127,5 +128,38 @@ func TestCapOutputKeepsRunesWhole(t *testing.T) {
 	got, cut := capOutput(in)
 	if !cut || !utf8.ValidString(got) || len(got) > OutputCap+len(TruncationNote) || !strings.HasSuffix(got, TruncationNote) {
 		t.Fatalf("cut=%v valid=%v len=%d", cut, utf8.ValidString(got), len(got))
+	}
+}
+
+// slowModel sleeps in Start, then submits.
+type slowModel struct{ script }
+
+func (s *slowModel) Start(ctx context.Context, sys, user string, tools []ToolDef) (*Reply, error) {
+	time.Sleep(20 * time.Millisecond)
+	return s.script.Start(ctx, sys, user, tools)
+}
+
+func TestRunRecordsWallTime(t *testing.T) {
+	m := &slowModel{script{replies: []*Reply{{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}}}}}
+	if r := Run(context.Background(), m, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10); r.WallMS < 20 {
+		t.Fatalf("WallMS %d", r.WallMS)
+	}
+}
+
+func TestRunRejectsSubmitWithoutRows(t *testing.T) {
+	for _, in := range []string{`{}`, `{"rows":null}`} {
+		s := &script{replies: []*Reply{
+			{Calls: []ToolCall{call("a", "submit_answer", in)}},
+			{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}},
+		}}
+		r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10)
+		if !s.sent[0][0].IsError || !strings.Contains(s.sent[0][0].Content, "rows must be an array of arrays") || !r.Correct || r.Turns != 2 {
+			t.Fatalf("%s: %+v / %+v", in, r, s.sent)
+		}
+	}
+	// a lone bad submit must not count as submitted
+	s := &script{replies: []*Reply{{Calls: []ToolCall{call("a", "submit_answer", `{}`)}}, {}}}
+	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10); r.Submitted || r.Correct {
+		t.Fatalf("%+v", r)
 	}
 }

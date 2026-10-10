@@ -40,8 +40,13 @@ func classify(ctx context.Context, err error) error {
 		switch me.Number {
 		case 3024, 1969, 1317: // max_execution_time, max_statement_time, interrupted
 			return timeoutErr(err)
-		case 1792, 1290: // read-only transaction, --read-only server
+		case 1792: // read-only transaction
 			return readOnlyErr()
+		case 1290: // "running with the --read-only option"; other options (e.g. --secure-file-priv) share the code
+			if m := strings.ToLower(me.Message); strings.Contains(m, "read-only") || strings.Contains(m, "read only") {
+				return readOnlyErr()
+			}
+			return qerr.Wrap(qerr.QueryError, me.Message, err)
 		case 1054:
 			e := qerr.Wrap(qerr.QueryError, me.Message, err)
 			if m := unknownColumn.FindStringSubmatch(me.Message); m != nil {
@@ -58,7 +63,7 @@ func classify(ctx context.Context, err error) error {
 				e.UnknownTable = name
 			}
 			return e
-		case 1045, 1044, 1049:
+		case 1045: // 1044 and 1049 can also come from a statement (a table in another database), so they stay query errors here
 			return connectErr(err)
 		}
 		return qerr.Wrap(qerr.QueryError, me.Message, err)

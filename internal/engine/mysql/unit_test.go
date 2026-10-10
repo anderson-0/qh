@@ -252,3 +252,38 @@ func TestReadOnlyRejectsFileWrites(t *testing.T) {
 		t.Errorf("per-call read-only: %v", err)
 	}
 }
+
+func TestClassify1290OnlyReadOnlyWhenServerIsReadOnly(t *testing.T) {
+	ctx := context.Background()
+	for _, msg := range []string{
+		"The MySQL server is running with the --read-only option so it cannot execute this statement",
+		"The MariaDB server is running with the --read-only option so it cannot execute this statement",
+		"The MySQL server is running with the --super-read-only option so it cannot execute this statement",
+		"The server is in read only mode",
+	} {
+		if e := qerr.From(classify(ctx, &gomysql.MySQLError{Number: 1290, Message: msg})); e.Category != qerr.ReadOnly {
+			t.Errorf("%q: %v", msg, e.Category)
+		}
+	}
+	msg := "The MySQL server is running with the --secure-file-priv option so it cannot execute this statement"
+	e := qerr.From(classify(ctx, &gomysql.MySQLError{Number: 1290, Message: msg}))
+	if e.Category != qerr.QueryError || !strings.Contains(e.Error(), "--secure-file-priv") {
+		t.Errorf("secure-file-priv: %v", e)
+	}
+}
+
+func TestClassifyStatementRaised1044And1049AreQueryErrors(t *testing.T) {
+	ctx := context.Background()
+	for _, me := range []*gomysql.MySQLError{
+		{Number: 1044, Message: "Access denied for user 'u'@'%' to database 'other'"},
+		{Number: 1049, Message: "Unknown database 'nope'"},
+	} {
+		e := qerr.From(classify(ctx, me))
+		if e.Category != qerr.QueryError || !strings.Contains(e.Error(), me.Message) {
+			t.Errorf("%d: %v", me.Number, e)
+		}
+		if c := qerr.From(connectErr(me)).Category; c != qerr.ConnectionFailed {
+			t.Errorf("connectErr %d: %v", me.Number, c)
+		}
+	}
+}

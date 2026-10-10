@@ -177,3 +177,24 @@ func TestRunnerReportsAbortedRuns(t *testing.T) {
 		}
 	}
 }
+
+func TestRunWithTimeoutIsAFailedRunNotAnAbort(t *testing.T) {
+	cfg := Config{MaxTurns: 5, RunTimeout: 50 * time.Millisecond}
+	r := runWithTimeout(context.Background(), cfg, blockModel{}, &fakeServer{}, "chinook", q1, nil, 1)
+	if r.Aborted || r.Submitted || r.Error != "run timed out after 50ms" {
+		t.Fatalf("%+v", r)
+	}
+	// an interrupt of the whole benchmark is not a timeout
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cfg.RunTimeout = time.Hour
+	if r := runWithTimeout(ctx, cfg, blockModel{}, &fakeServer{}, "chinook", q1, nil, 1); !r.Aborted || strings.Contains(r.Error, "timed out") {
+		t.Fatalf("%+v", r)
+	}
+	if got := runTimeoutText(10 * time.Minute); got != "10m" {
+		t.Fatalf("%q", got)
+	}
+	if DefaultRunTimeout != 10*time.Minute {
+		t.Fatal(DefaultRunTimeout)
+	}
+}

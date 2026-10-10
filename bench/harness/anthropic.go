@@ -27,7 +27,7 @@ type anthropicModel struct {
 
 // NewAnthropic returns a factory of conversations with model.
 func NewAnthropic(apiKey, model, effort string) ModelFactory {
-	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6))
+	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6), option.WithRequestTimeout(requestTimeout))
 	return func() Model { return &anthropicModel{client: client, model: model, effort: effort} }
 }
 
@@ -139,7 +139,7 @@ func countParams(model string, defs []ToolDef, system string) anthropic.MessageC
 // instructions add to every request. The instructions go in the system prompt
 // of the measured call only, so they are part of the difference.
 func CountToolTokens(ctx context.Context, apiKey, model string, tools []ToolDef, instructions string) (int64, error) {
-	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6))
+	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6), option.WithRequestTimeout(requestTimeout))
 	count := func(defs []ToolDef, system string) (int64, error) {
 		res, err := client.Messages.CountTokens(ctx, countParams(model, defs, system))
 		if err != nil {

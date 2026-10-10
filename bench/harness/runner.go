@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,8 +18,9 @@ type Config struct {
 	TokenBudget                      int64 // input+output tokens one run may spend; 0 = no ceiling
 	SkipAgent, SkipTokens, SkipMicro bool
 	APIKey                           string
-	Raw                              io.Writer // one JSON Result per line, written as each run finishes
-	Log                              io.Writer // progress; may be nil
+	RunTimeout                       time.Duration // wall-time limit of one conversation; 0 means DefaultRunTimeout
+	Raw                              io.Writer     // one JSON Result per line, written as each run finishes
+	Log                              io.Writer     // progress; may be nil
 }
 
 // Deps are the parts tests replace.
@@ -27,6 +29,40 @@ type Deps struct {
 	StartServer  func(ctx context.Context, server string, conns []Conn) (Server, error)
 	StartDataset func(ctx context.Context, name string) (*Dataset, func(), error)
 	CountTokens  func(ctx context.Context, tools []ToolDef, instructions string) (int64, error)
+}
+
+// DefaultRunTimeout is how long one conversation may take. A run that exceeds
+// it is a failed run, not an aborted one.
+const DefaultRunTimeout = 10 * time.Minute
+
+// requestTimeout bounds each attempt of one API request.
+const requestTimeout = 5 * time.Minute
+
+// runTimeoutText renders d as "10m" rather than "10m0s".
+func runTimeoutText(d time.Duration) string {
+	t := d.String()
+	if strings.HasSuffix(t, "m0s") {
+		t = strings.TrimSuffix(t, "0s")
+	}
+	if strings.HasSuffix(t, "h0m") {
+		t = strings.TrimSuffix(t, "0m")
+	}
+	return t
+}
+
+// runWithTimeout is Run under the per-run timeout.
+func runWithTimeout(ctx context.Context, cfg Config, m Model, srv Server, ds string, q Question, truth [][]any, run int) Result {
+	d := cfg.RunTimeout
+	if d <= 0 {
+		d = DefaultRunTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	r := Run(runCtx, m, srv, ds, q, truth, run, RunOpts{MaxTurns: cfg.MaxTurns, TokenBudget: cfg.TokenBudget})
+	if runCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil && !r.Submitted {
+		r.Aborted, r.Error = false, "run timed out after "+runTimeoutText(d)
+	}
+	return r
 }
 
 // DefaultDeps wires the real model, servers and datasets.
@@ -150,7 +186,7 @@ func runDataset(ctx context.Context, cfg Config, deps Deps, name string, record 
 						continue // drain: nothing new starts after an interrupt
 					}
 					q, run := qs[j[0]], j[1]
-					res := Run(ctx, deps.Models(), srv, name, q, truths[j[0]], run, RunOpts{MaxTurns: cfg.MaxTurns, TokenBudget: cfg.TokenBudget})
+					res := runWithTimeout(ctx, cfg, deps.Models(), srv, name, q, truths[j[0]], run)
 					if ctx.Err() != nil {
 						continue // possibly cut short by the interrupt: not a measurement
 					}

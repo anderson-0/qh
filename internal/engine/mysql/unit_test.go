@@ -194,3 +194,36 @@ func TestClassify(t *testing.T) {
 		t.Errorf("connect deadline: %v", c)
 	}
 }
+
+func TestParseConfigTLSServerNameFromURLHost(t *testing.T) {
+	cfg, err := parseConfig("mysql://u:p@db.example.com:3307/x?tls=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TLS == nil || cfg.TLS.ServerName != "db.example.com" || cfg.Addr != "db.example.com:3307" {
+		t.Fatalf("tls host: addr=%q tls=%+v", cfg.Addr, cfg.TLS)
+	}
+	cfg, err = parseConfig("mysql://u:p@[::1]/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "[::1]:3306" {
+		t.Fatalf("ipv6 addr: %q", cfg.Addr)
+	}
+}
+
+func TestParseConfigDropsSessionParams(t *testing.T) {
+	cfg, err := parseConfig("mysql://u:p@h/db?sql_select_limit=5&Max_Execution_Time=0&transaction_read_only=0&sql_mode=ANSI")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range cfg.Params {
+		switch strings.ToLower(k) {
+		case "sql_select_limit", "max_execution_time", "max_statement_time", "time_zone", "transaction_read_only", "tx_read_only", "autocommit":
+			t.Fatalf("session param %q kept: %+v", k, cfg.Params)
+		}
+	}
+	if cfg.Params["sql_mode"] != "ANSI" {
+		t.Fatalf("sql_mode dropped: %+v", cfg.Params)
+	}
+}

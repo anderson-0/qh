@@ -41,18 +41,6 @@ func isURL(u *url.URL) bool { return u.Scheme == "mysql" || u.Scheme == "mariadb
 func parseRaw(dsn string) (*gomysql.Config, error) {
 	dsn = strings.TrimSpace(dsn)
 	if u, err := url.Parse(dsn); err == nil && isURL(u) {
-		params := "/"
-		if u.RawQuery != "" {
-			params = "/?" + u.RawQuery
-		}
-		cfg, err := gomysql.ParseDSN(params)
-		if err != nil {
-			return nil, invalidDSN()
-		}
-		if u.User != nil {
-			cfg.User = u.User.Username()
-			cfg.Passwd, _ = u.User.Password()
-		}
 		host := u.Hostname()
 		if host == "" {
 			host = "127.0.0.1"
@@ -61,8 +49,20 @@ func parseRaw(dsn string) (*gomysql.Config, error) {
 		if port == "" {
 			port = "3306"
 		}
-		cfg.Net = "tcp"
-		cfg.Addr = net.JoinHostPort(host, port)
+		// Parse with the real address so the driver derives TLS.ServerName
+		// from it; a DSN without an address would default to 127.0.0.1.
+		native := "tcp(" + net.JoinHostPort(host, port) + ")/"
+		if u.RawQuery != "" {
+			native += "?" + u.RawQuery
+		}
+		cfg, err := gomysql.ParseDSN(native)
+		if err != nil {
+			return nil, invalidDSN()
+		}
+		if u.User != nil {
+			cfg.User = u.User.Username()
+			cfg.Passwd, _ = u.User.Password()
+		}
 		cfg.DBName = strings.TrimPrefix(u.Path, "/")
 		return cfg, nil
 	}
@@ -89,7 +89,25 @@ func parseConfig(dsn string) (*gomysql.Config, error) {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 10 * time.Second
 	}
+	for k := range cfg.Params {
+		if sessionParams[strings.ToLower(k)] {
+			delete(cfg.Params, k)
+		}
+	}
 	return cfg, nil
+}
+
+// sessionParams are server variables qh controls itself. The driver runs any
+// unknown DSN parameter as SET name=value on connect, so a user could
+// otherwise undo the read-only, row-cap or timeout settings.
+var sessionParams = map[string]bool{
+	"sql_select_limit":      true,
+	"max_execution_time":    true,
+	"max_statement_time":    true,
+	"time_zone":             true,
+	"transaction_read_only": true,
+	"tx_read_only":          true,
+	"autocommit":            true,
 }
 
 func (Engine) Inspect(dsn string) (engine.DSNInfo, error) {

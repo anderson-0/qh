@@ -31,7 +31,7 @@ func (Engine) Dialect() sqlx.Dialect { return sqlx.MySQL }
 
 func invalidDSN() error {
 	return qerr.New(qerr.Invalid, "invalid mysql connection string").
-		WithHint("Use mysql://user:password@host:3306/database or user:password@tcp(host:3306)/database")
+		WithHint("Use mysql://user:password@host:3306/database or user:password@tcp(host:3306)/database; special characters in the password must be percent-encoded (@ as %40, / as %2F)")
 }
 
 func isURL(u *url.URL) bool { return u.Scheme == "mysql" || u.Scheme == "mariadb" }
@@ -53,7 +53,9 @@ func parseRaw(dsn string) (*gomysql.Config, error) {
 		// from it; a DSN without an address would default to 127.0.0.1.
 		native := "tcp(" + net.JoinHostPort(host, port) + ")/"
 		if u.RawQuery != "" {
-			native += "?" + u.RawQuery
+			// The driver splits its DSN at the last "/", so a raw "/" in a
+			// value (time_zone=Europe/Paris) would break parsing. Re-encode.
+			native += "?" + u.Query().Encode()
 		}
 		cfg, err := gomysql.ParseDSN(native)
 		if err != nil {

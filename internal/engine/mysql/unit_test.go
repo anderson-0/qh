@@ -287,3 +287,27 @@ func TestClassifyStatementRaised1044And1049AreQueryErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRawQueryValuesWithSlashes(t *testing.T) {
+	for _, dsn := range []string{
+		"mysql://u:p@h/db?time_zone=Europe%2FParis",
+		"mysql://u:p@h/db?time_zone=Europe/Paris",
+	} {
+		cfg, err := parseRaw(dsn)
+		if err != nil {
+			t.Errorf("%s: %v", dsn, err)
+			continue
+		}
+		if cfg.Params["time_zone"] != "Europe/Paris" || cfg.DBName != "db" {
+			t.Errorf("%s: params=%v db=%q", dsn, cfg.Params, cfg.DBName)
+		}
+		// qh owns the session time zone, so parseConfig drops it.
+		if cfg, err := parseConfig(dsn); err != nil || cfg.Params["time_zone"] != "" {
+			t.Errorf("%s: parseConfig params=%v err=%v", dsn, cfg.Params, err)
+		}
+	}
+	_, err := parseRaw("mysql://u:p%zz@h/db")
+	if err == nil || !strings.Contains(err.Error(), "percent-encoded") {
+		t.Errorf("hint: %v", err)
+	}
+}

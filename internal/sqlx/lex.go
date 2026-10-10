@@ -141,10 +141,7 @@ func tokenize(s string, d Dialect) ([]token, error) {
 			toks = append(toks, token{kWord, strings.ToLower(s[i:j])})
 			i = j
 		case c >= '0' && c <= '9':
-			j := i + 1
-			for j < n && (isIdentPart(s[j]) || s[j] == '.') {
-				j++
-			}
+			j := scanNumber(s, i)
 			toks = append(toks, token{kOther, s[i:j]})
 			i = j
 		default:
@@ -153,6 +150,38 @@ func tokenize(s string, d Dialect) ([]token, error) {
 		}
 	}
 	return toks, nil
+}
+
+// scanNumber returns the index just past the numeric literal starting at i:
+// digits, an optional '.', more digits, and an optional exponent. Anything
+// else (a letter, '_', '$') starts the next token. MySQL ends a number the
+// same way, so "1.5INTO OUTFILE" is the number 1.5 followed by the keyword
+// INTO; swallowing the letters would hide the keyword from the classifier.
+func scanNumber(s string, i int) int {
+	n := len(s)
+	j := i
+	for j < n && s[j] >= '0' && s[j] <= '9' {
+		j++
+	}
+	if j < n && s[j] == '.' {
+		j++
+		for j < n && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+	}
+	if j < n && (s[j] == 'e' || s[j] == 'E') {
+		k := j + 1
+		if k < n && (s[k] == '+' || s[k] == '-') {
+			k++
+		}
+		if k < n && s[k] >= '0' && s[k] <= '9' {
+			for k < n && s[k] >= '0' && s[k] <= '9' {
+				k++
+			}
+			j = k
+		}
+	}
+	return j
 }
 
 // lineEnd reports whether c ends a "--" or "#" line comment. Postgres also

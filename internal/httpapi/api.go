@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -77,7 +80,51 @@ func New(cfg Config) http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeProblem(w, http.StatusNotFound, "not_found", "no such endpoint", "See /api/v1/openapi.json")
 	})
-	return a.recoverPanics(a.logRequests(mux))
+	var h http.Handler = mux
+	if cfg.Auth == nil {
+		h = a.localOnly(h)
+	}
+	return a.recoverPanics(a.logRequests(h))
+}
+
+const localDetail = "Use http://127.0.0.1:8765, or run server mode with --http and API keys"
+
+// isLoopbackHost reports whether host (without a port) is localhost or a
+// loopback IP literal.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
+}
+
+// hostOnly strips an optional port and IPv6 brackets from a host[:port].
+func hostOnly(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return strings.Trim(hostport, "[]")
+}
+
+// localOnly protects local mode, which has no API keys: it refuses requests
+// addressed to a non-loopback Host (DNS rebinding) and browser requests from
+// a non-loopback Origin (cross-site requests).
+func (a *api) localOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(hostOnly(r.Host)) {
+			writeProblem(w, http.StatusForbidden, "forbidden", "local mode only accepts requests addressed to localhost", localDetail)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !isLoopbackHost(u.Hostname()) {
+				writeProblem(w, http.StatusForbidden, "forbidden", "local mode does not accept cross-origin browser requests", localDetail)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (a *api) routes() []route {

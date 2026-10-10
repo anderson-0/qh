@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -186,4 +187,51 @@ func TestPerKeyLimit(t *testing.T) {
 		t.Fatalf("another key was blocked: %d %s", r.status, r.body)
 	}
 	wg.Wait()
+}
+
+func TestLocalModeRejectsForeignHostAndOrigin(t *testing.T) {
+	local := newEnv(t, false, nil)
+	get := func(e *env, token, host, origin string) reply {
+		t.Helper()
+		req, _ := http.NewRequest("GET", e.srv.URL+"/api/v1/connections", nil)
+		if host != "" {
+			req.Host = host
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return reply{status: res.StatusCode, header: res.Header, body: string(b)}
+	}
+	const prefix = "local mode only accepts requests addressed to localhost"
+	expectProblem(t, get(local, "", "evil.example", ""), 403, "forbidden", prefix)
+	expectProblem(t, get(local, "", "evil.example:8765", ""), 403, "forbidden", prefix)
+	expectProblem(t, get(local, "", "", "https://evil.example"), 403, "forbidden", "local mode does not accept cross-origin browser requests")
+	expectProblem(t, get(local, "", "", "null"), 403, "forbidden", "local mode does not accept cross-origin browser requests")
+	expectProblem(t, get(local, "", "", "ftp://localhost"), 403, "forbidden", "local mode does not accept cross-origin browser requests")
+	for _, c := range []struct{ host, origin string }{
+		{"", ""},
+		{"", "http://localhost:3000"},
+		{"LocalHost:8765", ""},
+		{"[::1]:8765", ""},
+		{"[::1]", "http://[::1]:3000"},
+		{"127.0.0.1:8765", "https://127.0.0.1"},
+	} {
+		if r := get(local, "", c.host, c.origin); r.status != 200 {
+			t.Fatalf("host %q origin %q: %d %s", c.host, c.origin, r.status, r.body)
+		}
+	}
+	// Server mode relies on keys, so the guard does not apply.
+	server := newEnv(t, true, nil)
+	if r := get(server, server.key(t, "default", "query"), "evil.example", "https://evil.example"); r.status != 200 {
+		t.Fatalf("server mode: %d %s", r.status, r.body)
+	}
 }

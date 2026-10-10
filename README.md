@@ -79,7 +79,7 @@ Server mode refuses database addresses on loopback and link-local ranges (includ
 to block more (for example your private ranges). SQLite is off unless you pass `--sqlite-root DIR`; files must
 then live under `DIR`. Each API key may run 4 queries at once; extra requests get HTTP 429.
 
-Without `--http`, `qh serve` runs in local mode on `127.0.0.1:8765` with no keys, for tools on your own machine.
+Without `--http`, `qh serve` runs in local mode on `127.0.0.1:8765` with no keys, for tools on your own machine. Local mode has no keys, so it only accepts requests addressed to localhost and refuses cross-origin browser requests.
 
 ## Read-only safety
 

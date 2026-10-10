@@ -21,7 +21,7 @@ type Report struct {
 // Summary aggregates the results of one dataset (or "all") and server.
 type Summary struct {
 	Dataset, Server                                         string
-	Runs, Errors, Truncations                               int
+	Runs, Aborted, Errors, Truncations                      int
 	Accuracy                                                float64
 	AvgTotal, AvgInput, AvgOutput, AvgToolCalls, AvgWallSec float64
 }
@@ -35,6 +35,10 @@ func Summarize(results []Result) []Summary {
 		if s == nil {
 			s = &Summary{Dataset: k.ds, Server: k.srv}
 			acc[k] = s
+		}
+		if r.Aborted {
+			s.Aborted++
+			return
 		}
 		s.Runs++
 		if r.Correct {
@@ -55,6 +59,10 @@ func Summarize(results []Result) []Summary {
 	}
 	var out []Summary
 	for _, s := range acc {
+		if s.Runs == 0 {
+			out = append(out, *s)
+			continue
+		}
 		n := float64(s.Runs)
 		s.Accuracy /= n
 		s.AvgInput /= n
@@ -93,17 +101,17 @@ func overall(results []Result, server string) (Summary, bool) {
 func Criteria(r *Report) []Criterion {
 	qh, okQ := overall(r.Results, "qh")
 	db, okD := overall(r.Results, "dbhub")
-	both := okQ && okD && db.AvgTotal > 0
+	both := okQ && okD && qh.Runs > 0 && db.Runs > 0 && db.AvgTotal > 0
 	var cs []Criterion
 	c := Criterion{Name: "tokens", Label: "Fewer total tokens per task", Target: "≥ 40% fewer than dbhub", Result: "not measured"}
 	if both {
 		cut := 1 - qh.AvgTotal/db.AvgTotal
-		c.Known, c.Pass, c.Result = true, cut >= 0.40, fmt.Sprintf("%.0f%% fewer", cut*100)
+		c.Known, c.Pass, c.Result = true, cut >= 0.40, fmt.Sprintf("%.1f%% fewer", cut*100)
 	}
 	cs = append(cs, c)
 	c = Criterion{Name: "accuracy", Label: "Accuracy", Target: "≥ dbhub", Result: "not measured"}
 	if both {
-		c.Known, c.Pass, c.Result = true, qh.Accuracy >= db.Accuracy, fmt.Sprintf("%.0f%% vs %.0f%%", qh.Accuracy*100, db.Accuracy*100)
+		c.Known, c.Pass, c.Result = true, qh.Accuracy >= db.Accuracy, fmt.Sprintf("%.1f%% vs %.1f%%", qh.Accuracy*100, db.Accuracy*100)
 	}
 	cs = append(cs, c)
 	c = Criterion{Name: "tool calls", Label: "Tool calls per task", Target: "fewer than dbhub", Result: "not measured"}
@@ -142,10 +150,10 @@ func (r *Report) Markdown() string {
 	for _, c := range Criteria(r) {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", c.Label, c.Target, c.Result, mark(c))
 	}
-	b.WriteString("\n## Results by dataset\n\n| Dataset | Server | Accuracy | Avg total tokens | Avg input | Avg output | Avg tool calls | Avg wall (s) | Runs | Errors | Truncated outputs |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("\n## Results by dataset\n\n| Dataset | Server | Accuracy | Avg total tokens | Avg input | Avg output | Avg tool calls | Avg wall (s) | Runs | Aborted | Errors | Truncated outputs |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range Summarize(r.Results) {
-		fmt.Fprintf(&b, "| %s | %s | %.0f%% | %.0f | %.0f | %.0f | %.1f | %.1f | %d | %d | %d |\n", s.Dataset, s.Server, s.Accuracy*100,
-			s.AvgTotal, s.AvgInput, s.AvgOutput, s.AvgToolCalls, s.AvgWallSec, s.Runs, s.Errors, s.Truncations)
+		fmt.Fprintf(&b, "| %s | %s | %.0f%% | %.0f | %.0f | %.0f | %.1f | %.1f | %d | %d | %d | %d |\n", s.Dataset, s.Server, s.Accuracy*100,
+			s.AvgTotal, s.AvgInput, s.AvgOutput, s.AvgToolCalls, s.AvgWallSec, s.Runs, s.Aborted, s.Errors, s.Truncations)
 	}
 	if len(r.ToolTokens) > 0 {
 		b.WriteString("\n## Tool-definition tokens by number of connections\n\n| Connections | qh | dbhub |\n|---|---|---|\n")

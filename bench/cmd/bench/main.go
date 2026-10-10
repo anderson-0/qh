@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/anderson-0/qh/bench/harness"
@@ -30,13 +31,19 @@ func main() {
 	flag.BoolVar(&cfg.SkipMicro, "skip-micro", false, "skip the micro-benchmarks")
 	flag.StringVar(&out, "out", "results", "results directory")
 	flag.Parse()
-	cfg.Datasets, cfg.Servers = strings.Split(datasets, ","), strings.Split(servers, ",")
+	var err error
+	if cfg.Datasets, err = parseList("datasets", datasets, "pagila", "sakila", "chinook"); err != nil {
+		usage(err)
+	}
+	if cfg.Servers, err = parseList("servers", servers, "qh", "dbhub"); err != nil {
+		usage(err)
+	}
 	cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	if cfg.APIKey == "" && (!cfg.SkipAgent || !cfg.SkipTokens) {
 		fmt.Fprintln(os.Stderr, "bench: ANTHROPIC_API_KEY is required for model runs and token counting (or pass -skip-agent -skip-tokens)")
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	dir := filepath.Join(out, time.Now().Format("2006-01-02T150405"))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -62,6 +69,29 @@ func main() {
 		fail(err)
 	}
 	fmt.Println(path)
+}
+
+// parseList splits a comma-separated flag, trims each entry and rejects
+// empty and unknown names.
+func parseList(flagName, value string, allowed ...string) ([]string, error) {
+	var out []string
+	for _, v := range strings.Split(value, ",") {
+		v = strings.TrimSpace(v)
+		ok := false
+		for _, a := range allowed {
+			ok = ok || v == a
+		}
+		if !ok {
+			return nil, fmt.Errorf("-%s: unknown name %q (use any of: %s)", flagName, v, strings.Join(allowed, ", "))
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func usage(err error) {
+	fmt.Fprintln(os.Stderr, "bench:", err)
+	os.Exit(2)
 }
 
 func fail(err error) {

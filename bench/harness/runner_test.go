@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // answerModel submits the right answer for chinook-01 on the first turn.
@@ -89,6 +91,89 @@ func TestRunnerWritesRawIncrementally(t *testing.T) {
 		var r Result
 		if err := json.Unmarshal([]byte(l), &r); err != nil || r.Server != "qh" {
 			t.Fatalf("raw line %q: %v", l, err)
+		}
+	}
+}
+
+// blockModel never answers: it waits for the context to end.
+type blockModel struct{}
+
+func (blockModel) Start(ctx context.Context, _, _ string, _ []ToolDef) (*Reply, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (blockModel) Continue(context.Context, []ToolResult) (*Reply, error) {
+	return nil, errors.New("unused")
+}
+
+// cancelOnWrite cancels the run when the first raw line is written.
+type cancelOnWrite struct {
+	bytes.Buffer
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnWrite) Write(p []byte) (int, error) {
+	n, err := c.Buffer.Write(p)
+	c.cancel()
+	return n, err
+}
+
+func TestRunnerStopsCleanlyOnInterrupt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("downloads Chinook")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	raw := &cancelOnWrite{cancel: cancel}
+	deps := fakeDeps(false)
+	var started atomic.Int32
+	deps.Models = func() Model {
+		if started.Add(1) == 1 {
+			return answerModel{}
+		}
+		return blockModel{}
+	}
+	cfg := Config{Model: "fake", Datasets: []string{"chinook", "pagila"}, Servers: []string{"qh", "dbhub"}, Runs: 3, Limit: 3,
+		Parallel: 2, MaxTurns: 5, Raw: raw}
+	done := make(chan struct{})
+	var rep *Report
+	var err error
+	go func() { rep, err = RunBenchmark(ctx, cfg, deps); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("RunBenchmark did not return after the interrupt")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Results) != 1 || strings.Count(raw.String(), "\n") != 1 {
+		t.Fatalf("%d results, raw %q", len(rep.Results), raw.String())
+	}
+	if len(rep.ToolTokens) != 0 || len(rep.ColdSchema) != 0 {
+		t.Fatalf("later phases ran: %+v %+v", rep.ToolTokens, rep.ColdSchema)
+	}
+	if !strings.Contains(strings.Join(rep.Notes, "\n"), "interrupted; results are partial") {
+		t.Fatalf("notes: %v", rep.Notes)
+	}
+}
+
+func TestRunnerReportsAbortedRuns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("downloads Chinook")
+	}
+	cfg := Config{Model: "fake", Datasets: []string{"chinook"}, Servers: []string{"qh", "dbhub"}, Runs: 2, Limit: 1,
+		Parallel: 1, MaxTurns: 5, SkipMicro: true, SkipTokens: true}
+	rep, err := RunBenchmark(context.Background(), cfg, fakeDeps(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(rep.Notes, "\n"), "0 qh and 2 dbhub runs were aborted") {
+		t.Fatalf("notes: %v", rep.Notes)
+	}
+	for _, c := range Criteria(rep) {
+		if c.Known {
+			t.Errorf("criterion known although dbhub never ran: %+v", c)
 		}
 	}
 }

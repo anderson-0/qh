@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,27 @@ func TestRunRejectsSubmitWithoutRows(t *testing.T) {
 	// a lone bad submit must not count as submitted
 	s := &script{replies: []*Reply{{Calls: []ToolCall{call("a", "submit_answer", `{}`)}}, {}}}
 	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10); r.Submitted || r.Correct {
+		t.Fatalf("%+v", r)
+	}
+}
+
+type errModel struct{}
+
+func (errModel) Start(context.Context, string, string, []ToolDef) (*Reply, error) {
+	return nil, errors.New("529 overloaded")
+}
+func (errModel) Continue(context.Context, []ToolResult) (*Reply, error) {
+	return nil, errors.New("unused")
+}
+
+func TestRunModelErrorIsAborted(t *testing.T) {
+	r := Run(context.Background(), errModel{}, &fakeServer{}, "chinook", q1, nil, 1, 5)
+	if !r.Aborted || !strings.Contains(r.Error, "529") {
+		t.Fatalf("%+v", r)
+	}
+	// Model behaviour failures are not aborts.
+	s := &script{replies: []*Reply{{Calls: nil, Usage: Usage{Input: 1, Output: 1}}}}
+	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, nil, 1, 5); r.Aborted || r.Error == "" {
 		t.Fatalf("%+v", r)
 	}
 }

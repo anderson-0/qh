@@ -107,6 +107,9 @@ type Result struct {
 	Truncations  int     `json:"truncations"`
 	WallMS       int64   `json:"wall_ms"`
 	Error        string  `json:"error,omitempty"`
+	// Aborted marks a run that did not really happen (server start failure,
+	// model API error): it is excluded from every average.
+	Aborted bool `json:"aborted,omitempty"`
 }
 
 // capOutput cuts out to at most OutputCap bytes without splitting a UTF-8
@@ -132,7 +135,7 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 	reply, err := m.Start(ctx, SystemPrompt, PromptFor(q), tools)
 	for {
 		if err != nil {
-			r.Error = "model: " + err.Error()
+			r.Error, r.Aborted = "model: "+err.Error(), true
 			return r
 		}
 		r.Turns++

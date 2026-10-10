@@ -55,12 +55,48 @@ func TestSummaryAndCriteria(t *testing.T) {
 	}
 }
 
+func TestAbortedRunsAreExcluded(t *testing.T) {
+	r := sampleReport()
+	// qh never started for two more runs; they must not count anywhere.
+	r.Results = append(r.Results,
+		Result{Dataset: "chinook", Server: "qh", Question: "chinook-03", Kind: "lookup", Run: 1, Error: "start qh: boom", Aborted: true},
+		Result{Dataset: "chinook", Server: "qh", Question: "chinook-04", Kind: "lookup", Run: 1, Error: "model: 529", Aborted: true})
+	for _, s := range Summarize(r.Results) {
+		if s.Dataset == "all" && s.Server == "qh" && (s.Runs != 2 || s.Aborted != 2 || s.Accuracy != 1 || s.AvgTotal != 1000 || s.AvgToolCalls != 2 || s.Errors != 0) {
+			t.Fatalf("aborted runs leaked into %+v", s)
+		}
+	}
+	if !strings.Contains(r.Markdown(), "| Runs | Aborted |") {
+		t.Fatal("markdown lacks the Aborted column")
+	}
+
+	// qh failed to start at all: nothing may pass on the strength of zero tokens.
+	var failed []Result
+	for _, x := range sampleReport().Results {
+		if x.Server == "dbhub" {
+			failed = append(failed, x)
+		} else {
+			failed = append(failed, Result{Dataset: x.Dataset, Server: "qh", Question: x.Question, Run: 1, Error: "start qh: boom", Aborted: true})
+		}
+	}
+	r = sampleReport()
+	r.Results = failed
+	for _, c := range Criteria(r) {
+		switch c.Name {
+		case "tokens", "accuracy", "tool calls":
+			if c.Known || c.Pass || c.Result != "not measured" {
+				t.Errorf("criterion %q with no qh runs: %+v", c.Name, c)
+			}
+		}
+	}
+}
+
 func TestMarkdown(t *testing.T) {
 	md := sampleReport().Markdown()
 	for _, want := range []string{
 		"# qh vs dbhub benchmark — 2026-10-11",
 		"| chinook | qh | 100% |",
-		"| Fewer total tokens per task | ≥ 40% fewer than dbhub | 50% fewer | ✅ |",
+		"| Fewer total tokens per task | ≥ 40% fewer than dbhub | 50.0% fewer | ✅ |",
 		"| Cold schema build, 1,000 tables | < 1 s | 0.40 s | ✅ |",
 		"| 5 | 400 | 2500 |",
 		"| chinook-01 | lookup | 1/1 | 1/1 |",

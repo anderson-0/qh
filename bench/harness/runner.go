@@ -70,18 +70,34 @@ func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
 	}
 	if !cfg.SkipAgent {
 		for _, name := range cfg.Datasets {
-			if err := runDataset(ctx, cfg, deps, name, record); err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			if err := runDataset(ctx, cfg, deps, name, record); err != nil && ctx.Err() == nil {
 				rep.Notes = append(rep.Notes, fmt.Sprintf("dataset %s: %v", name, err))
 			}
 		}
 	}
-	if !cfg.SkipTokens {
+	if !cfg.SkipTokens && ctx.Err() == nil {
 		if err := toolTokens(ctx, cfg, deps, rep); err != nil {
 			rep.Notes = append(rep.Notes, "tool tokens: "+err.Error())
 		}
 	}
-	if !cfg.SkipMicro {
+	if !cfg.SkipMicro && ctx.Err() == nil {
 		micro(ctx, cfg, deps, rep)
+	}
+	aborted := map[string]int{}
+	for _, r := range rep.Results {
+		if r.Aborted {
+			aborted[r.Server]++
+		}
+	}
+	if len(aborted) > 0 {
+		rep.Notes = append(rep.Notes, fmt.Sprintf("%d qh and %d dbhub runs were aborted (server start or model API failures) and are excluded from every figure",
+			aborted["qh"], aborted["dbhub"]))
+	}
+	if ctx.Err() != nil {
+		rep.Notes = append(rep.Notes, "interrupted; results are partial")
 	}
 	return rep, nil
 }
@@ -106,11 +122,17 @@ func runDataset(ctx context.Context, cfg Config, deps Deps, name string, record 
 		}
 	}
 	for _, server := range cfg.Servers {
+		if ctx.Err() != nil {
+			return nil
+		}
 		srv, err := deps.StartServer(ctx, server, []Conn{ConnFor(ds)})
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			for _, q := range qs {
 				for run := 1; run <= cfg.Runs; run++ {
-					record(Result{Dataset: name, Server: server, Question: q.ID, Kind: q.Kind, Run: run, Error: err.Error()})
+					record(Result{Dataset: name, Server: server, Question: q.ID, Kind: q.Kind, Run: run, Error: err.Error(), Aborted: true})
 				}
 			}
 			continue
@@ -123,14 +145,26 @@ func runDataset(ctx context.Context, cfg Config, deps Deps, name string, record 
 			go func() {
 				defer wg.Done()
 				for j := range jobs {
+					if ctx.Err() != nil {
+						continue // drain: nothing new starts after an interrupt
+					}
 					q, run := qs[j[0]], j[1]
-					record(Run(ctx, deps.Models(), srv, name, q, truths[j[0]], run, cfg.MaxTurns))
+					res := Run(ctx, deps.Models(), srv, name, q, truths[j[0]], run, cfg.MaxTurns)
+					if ctx.Err() != nil {
+						continue // possibly cut short by the interrupt: not a measurement
+					}
+					record(res)
 				}
 			}()
 		}
+	feed:
 		for i := range qs {
 			for run := 1; run <= cfg.Runs; run++ {
-				jobs <- [2]int{i, run}
+				select {
+				case jobs <- [2]int{i, run}:
+				case <-ctx.Done():
+					break feed
+				}
 			}
 		}
 		close(jobs)
@@ -148,7 +182,7 @@ func toolTokens(ctx context.Context, cfg Config, deps Deps, rep *Report) error {
 	}
 	defer stop()
 	for _, server := range cfg.Servers {
-		for k := 1; k <= 5; k++ {
+		for k := 1; k <= 5 && ctx.Err() == nil; k++ {
 			var conns []Conn
 			for i := 1; i <= k; i++ {
 				c := ConnFor(ds)

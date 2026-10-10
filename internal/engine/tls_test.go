@@ -17,6 +17,8 @@ func TestTLSValidate(t *testing.T) {
 		{TLS{}, "tls.mode is required"},
 		{TLS{Mode: "prefer"}, `unknown tls.mode "prefer"`},
 		{TLS{Mode: TLSDisable, CA: f.CA}, "tls.mode disable takes no other tls settings"},
+		{TLS{Mode: TLSRequire, CA: f.CA}, "tls.ca and tls.server_name need mode verify-ca or verify-full"},
+		{TLS{Mode: TLSRequire, ServerName: "db.internal"}, "tls.ca and tls.server_name need mode verify-ca or verify-full"},
 		{TLS{Mode: TLSRequire, Cert: f.ClientCert}, "tls.cert and tls.key must be given together"},
 		{TLS{Mode: TLSVerifyFull, CA: "not pem"}, "tls.ca contains no PEM certificate"},
 		{TLS{Mode: TLSRequire, Cert: f.ClientCert, Key: f.ServerKey}, "tls.cert and tls.key are not a valid PEM certificate and key pair"},
@@ -33,6 +35,7 @@ func TestTLSValidate(t *testing.T) {
 	good := []TLS{
 		{Mode: TLSDisable},
 		{Mode: TLSRequire},
+		{Mode: TLSRequire, Cert: f.ClientCert, Key: f.ClientKey},
 		{Mode: TLSVerifyCA, CA: f.CA},
 		{Mode: TLSVerifyFull, CA: f.CA, Cert: f.ClientCert, Key: f.ClientKey, ServerName: "db.internal"},
 	}

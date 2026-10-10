@@ -61,6 +61,9 @@ func (t *TLS) Validate() error {
 	if t.Mode == TLSDisable && (t.CA != "" || t.Cert != "" || t.Key != "" || t.ServerName != "") {
 		return tlsInvalid("tls.mode disable takes no other tls settings")
 	}
+	if t.Mode == TLSRequire && (t.CA != "" || t.ServerName != "") {
+		return tlsInvalid("tls.ca and tls.server_name need mode verify-ca or verify-full; require does not check the certificate")
+	}
 	if (t.Cert == "") != (t.Key == "") {
 		return tlsInvalid("tls.cert and tls.key must be given together")
 	}

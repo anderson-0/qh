@@ -130,9 +130,9 @@ func Bootstrap(ctx context.Context, st store.Store, fixed string) (token string,
 	k := &store.APIKey{ID: store.NewID(), Scopes: []string{ScopeAdmin}, Name: "bootstrap"}
 	if fixed != "" {
 		prefix, secret, ok := ParseToken(strings.TrimSpace(fixed))
-		if !ok {
-			return "", false, qerr.New(qerr.Invalid, "QH_BOOTSTRAP_ADMIN_KEY is not a valid qh API key").
-				WithHint("Generate one with qh key create, or unset it to have one generated")
+		if !ok || len(secret) < 32 {
+			return "", false, qerr.New(qerr.Invalid, "QH_BOOTSTRAP_ADMIN_KEY must be a qh_ key with a secret of at least 32 characters").
+				WithHint("Generate one with qh key create, or leave it unset to have qh generate one")
 		}
 		k.Prefix, k.Hash = prefix, HashSecret(secret)
 	} else {

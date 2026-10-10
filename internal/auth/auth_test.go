@@ -177,6 +177,20 @@ func TestBootstrap(t *testing.T) {
 	if _, _, err := Bootstrap(ctx, newStore(t), "not-a-key"); err == nil || !strings.Contains(err.Error(), "QH_BOOTSTRAP_ADMIN_KEY") {
 		t.Fatalf("bad fixed key: %v", err)
 	}
+	for _, weak := range []string{"qh_aaaaaaaa_a", "qh_aaaaaaaa_" + strings.Repeat("b", 31)} {
+		wst := newStore(t)
+		_, created, err := Bootstrap(ctx, wst, weak)
+		if err == nil || qerr.From(err).Category != qerr.Invalid || created || !strings.Contains(err.Error(), "QH_BOOTSTRAP_ADMIN_KEY") {
+			t.Fatalf("weak fixed key %q: created=%v err=%v", weak, created, err)
+		}
+		if n, _ := wst.CountKeys(ctx); n != 0 {
+			t.Fatalf("weak fixed key %q left %d keys behind", weak, n)
+		}
+	}
+	edge := "qh_aaaaaaaa_" + strings.Repeat("b", 32)
+	if _, created, err := Bootstrap(ctx, newStore(t), edge); err != nil || !created {
+		t.Fatalf("32-character fixed key: created=%v err=%v", created, err)
+	}
 }
 
 func TestParseExpiry(t *testing.T) {

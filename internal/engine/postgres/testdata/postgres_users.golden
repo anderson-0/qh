@@ -1,0 +1,9 @@
+public.users ~3 rows: App users
+  id bigint PK
+  email text NN  # Login email
+  name text
+  bio text
+  avatar bytea
+  created_at timestamp
+  ← orders.user_id
+  idx unique(email)

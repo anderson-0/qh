@@ -1,0 +1,9 @@
+main.users
+  id integer PK
+  email text NN
+  name text
+  bio text
+  avatar blob
+  created_at text
+  ← orders.user_id
+  idx unique(email)

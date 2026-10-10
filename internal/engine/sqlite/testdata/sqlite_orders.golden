@@ -1,0 +1,8 @@
+main.orders
+  id integer PK
+  user_id integer NN → users.id
+  status text NN
+  total numeric(12,2)
+  note text
+  ← order_items.order_id
+  idx (user_id)

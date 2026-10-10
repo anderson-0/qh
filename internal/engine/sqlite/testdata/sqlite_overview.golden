@@ -1,0 +1,2 @@
+main: 3 tables, 1 view
+  order_items · orders · paid_orders (view) · users

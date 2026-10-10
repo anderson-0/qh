@@ -63,6 +63,9 @@ func TestAnthropicRequestIsWellFormed(t *testing.T) {
 	var got struct {
 		Model        string `json:"model"`
 		MaxTokens    int    `json:"max_tokens"`
+		CacheControl struct {
+			Type string `json:"type"`
+		} `json:"cache_control"`
 		OutputConfig struct {
 			Effort string `json:"effort"`
 		} `json:"output_config"`
@@ -86,6 +89,9 @@ func TestAnthropicRequestIsWellFormed(t *testing.T) {
 	}
 	if got.MaxTokens != 16000 || got.OutputConfig.Effort != "high" {
 		t.Fatalf("max_tokens %d, effort %q: %s", got.MaxTokens, got.OutputConfig.Effort, b)
+	}
+	if got.CacheControl.Type != "ephemeral" {
+		t.Fatalf("no top-level cache_control: %s", b)
 	}
 	q := got.Tools[0]
 	if q.Name != "query" || q.Description != "run SQL" || q.InputSchema.Type != "object" ||

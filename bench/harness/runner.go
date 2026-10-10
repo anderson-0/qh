@@ -14,6 +14,7 @@ type Config struct {
 	Model, Effort, DBHubVersion      string
 	Datasets, Servers                []string
 	Runs, Limit, Parallel, MaxTurns  int
+	TokenBudget                      int64 // input+output tokens one run may spend; 0 = no ceiling
 	SkipAgent, SkipTokens, SkipMicro bool
 	APIKey                           string
 	Raw                              io.Writer // one JSON Result per line, written as each run finishes
@@ -149,7 +150,7 @@ func runDataset(ctx context.Context, cfg Config, deps Deps, name string, record 
 						continue // drain: nothing new starts after an interrupt
 					}
 					q, run := qs[j[0]], j[1]
-					res := Run(ctx, deps.Models(), srv, name, q, truths[j[0]], run, cfg.MaxTurns)
+					res := Run(ctx, deps.Models(), srv, name, q, truths[j[0]], run, RunOpts{MaxTurns: cfg.MaxTurns, TokenBudget: cfg.TokenBudget})
 					if ctx.Err() != nil {
 						continue // possibly cut short by the interrupt: not a measurement
 					}

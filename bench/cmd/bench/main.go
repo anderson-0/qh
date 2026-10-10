@@ -27,6 +27,7 @@ func main() {
 	flag.IntVar(&cfg.Limit, "limit", 0, "questions per dataset (0 = all)")
 	flag.IntVar(&cfg.Parallel, "parallel", 4, "concurrent model conversations per server")
 	flag.IntVar(&cfg.MaxTurns, "max-turns", 30, "model replies per question")
+	flag.Int64Var(&cfg.TokenBudget, "token-budget", 1_000_000, "input+output tokens one conversation may spend (0 = no ceiling)")
 	flag.BoolVar(&cfg.SkipAgent, "skip-agent", false, "skip the model runs")
 	flag.BoolVar(&cfg.SkipTokens, "skip-tokens", false, "skip tool-definition token counting")
 	flag.BoolVar(&cfg.SkipMicro, "skip-micro", false, "skip the micro-benchmarks")

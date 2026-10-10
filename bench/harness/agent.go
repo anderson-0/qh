@@ -128,9 +128,16 @@ func capOutput(out string) (string, bool) {
 	return out[:cut] + TruncationNote, true
 }
 
+// RunOpts bounds one run.
+type RunOpts struct {
+	MaxTurns    int   // model replies allowed
+	TokenBudget int64 // input plus output tokens allowed over the run; 0 means no ceiling
+}
+
 // Run asks one question. The model may call the server's tools until it
-// calls submit_answer, stops, or reaches maxTurns replies.
-func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth [][]any, run, maxTurns int) (r Result) {
+// calls submit_answer, stops, reaches opts.MaxTurns replies or spends
+// opts.TokenBudget tokens.
+func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth [][]any, run int, opts RunOpts) (r Result) {
 	r = Result{Dataset: ds, Server: srv.Name(), Question: q.ID, Kind: q.Kind, Run: run}
 	start := time.Now()
 	defer func() { r.WallMS = time.Since(start).Milliseconds() }()
@@ -145,6 +152,10 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 		r.InputTokens += reply.Usage.Input
 		r.OutputTokens += reply.Usage.Output
 		r.StopReasons = append(r.StopReasons, reply.StopReason)
+		if opts.TokenBudget > 0 && r.InputTokens+r.OutputTokens > opts.TokenBudget {
+			r.Error = fmt.Sprintf("token budget exceeded (%d tokens)", r.InputTokens+r.OutputTokens)
+			return r
+		}
 		if len(reply.Calls) == 0 {
 			switch reply.StopReason {
 			case "max_tokens":
@@ -184,8 +195,8 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 		if r.Submitted {
 			return r
 		}
-		if r.Turns >= maxTurns {
-			r.Error = fmt.Sprintf("turn limit (%d) reached without submit_answer", maxTurns)
+		if r.Turns >= opts.MaxTurns {
+			r.Error = fmt.Sprintf("turn limit (%d) reached without submit_answer", opts.MaxTurns)
 			return r
 		}
 		reply, err = m.Continue(ctx, results)

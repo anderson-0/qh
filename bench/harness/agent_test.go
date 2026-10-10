@@ -65,7 +65,7 @@ func TestRunSubmitsCorrectAnswer(t *testing.T) {
 		{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[3503]]}`)}, Usage: Usage{Input: 150, Output: 10}},
 	}}
 	srv := &fakeServer{out: "n\n3503\n"}
-	r := Run(context.Background(), s, srv, "chinook", q1, [][]any{{int64(3503)}}, 1, 10)
+	r := Run(context.Background(), s, srv, "chinook", q1, [][]any{{int64(3503)}}, 1, RunOpts{MaxTurns: 10})
 	if !r.Correct || !r.Submitted || r.ToolCalls != 1 || r.Turns != 2 || r.InputTokens != 250 || r.OutputTokens != 30 || r.Error != "" {
 		t.Fatalf("%+v", r)
 	}
@@ -79,14 +79,14 @@ func TestRunSubmitsCorrectAnswer(t *testing.T) {
 
 func TestRunWrongAnswer(t *testing.T) {
 	s := &script{replies: []*Reply{{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[3502]]}`)}}}}
-	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(3503)}}, 1, 10); r.Correct || !r.Submitted {
+	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(3503)}}, 1, RunOpts{MaxTurns: 10}); r.Correct || !r.Submitted {
 		t.Fatalf("%+v", r)
 	}
 }
 
 func TestRunStopsWithoutSubmit(t *testing.T) {
 	s := &script{replies: []*Reply{{}}}
-	r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10)
+	r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10})
 	if r.Correct || r.Submitted || r.Error != "the model stopped without calling submit_answer" {
 		t.Fatalf("%+v", r)
 	}
@@ -94,7 +94,7 @@ func TestRunStopsWithoutSubmit(t *testing.T) {
 
 func TestRunTurnLimit(t *testing.T) {
 	s := &script{} // always calls query
-	r := Run(context.Background(), s, &fakeServer{out: "x"}, "chinook", q1, [][]any{{int64(1)}}, 1, 3)
+	r := Run(context.Background(), s, &fakeServer{out: "x"}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 3})
 	if r.Correct || r.Turns != 3 || r.Error != "turn limit (3) reached without submit_answer" {
 		t.Fatalf("%+v", r)
 	}
@@ -105,7 +105,7 @@ func TestRunCapsToolOutput(t *testing.T) {
 		{Calls: []ToolCall{call("a", "query", `{}`)}},
 		{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}},
 	}}
-	r := Run(context.Background(), s, &fakeServer{out: strings.Repeat("x", 250000)}, "chinook", q1, [][]any{{int64(1)}}, 1, 10)
+	r := Run(context.Background(), s, &fakeServer{out: strings.Repeat("x", 250000)}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10})
 	got := s.sent[0][0].Content
 	if r.Truncations != 1 || len(got) != OutputCap+len(TruncationNote) || !strings.HasSuffix(got, TruncationNote) {
 		t.Fatalf("truncations %d, len %d", r.Truncations, len(got))
@@ -118,7 +118,7 @@ func TestRunPassesToolErrorsAndBadSubmits(t *testing.T) {
 		{Calls: []ToolCall{call("b", "submit_answer", `{"rows":"3503"}`)}},
 		{Calls: []ToolCall{call("c", "submit_answer", `{"rows":[[3503]]}`)}},
 	}}
-	r := Run(context.Background(), s, &fakeServer{out: "error[query_error]: no such column", isErr: true}, "chinook", q1, [][]any{{int64(3503)}}, 1, 10)
+	r := Run(context.Background(), s, &fakeServer{out: "error[query_error]: no such column", isErr: true}, "chinook", q1, [][]any{{int64(3503)}}, 1, RunOpts{MaxTurns: 10})
 	if !r.Correct || !s.sent[0][0].IsError || !s.sent[1][0].IsError || !strings.Contains(s.sent[1][0].Content, "rows must be an array of arrays") {
 		t.Fatalf("%+v / %+v", r, s.sent)
 	}
@@ -142,7 +142,7 @@ func (s *slowModel) Start(ctx context.Context, sys, user string, tools []ToolDef
 
 func TestRunRecordsWallTime(t *testing.T) {
 	m := &slowModel{script{replies: []*Reply{{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}}}}}
-	if r := Run(context.Background(), m, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10); r.WallMS < 20 {
+	if r := Run(context.Background(), m, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10}); r.WallMS < 20 {
 		t.Fatalf("WallMS %d", r.WallMS)
 	}
 }
@@ -153,14 +153,14 @@ func TestRunRejectsSubmitWithoutRows(t *testing.T) {
 			{Calls: []ToolCall{call("a", "submit_answer", in)}},
 			{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}},
 		}}
-		r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10)
+		r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10})
 		if !s.sent[0][0].IsError || !strings.Contains(s.sent[0][0].Content, "rows must be an array of arrays") || !r.Correct || r.Turns != 2 {
 			t.Fatalf("%s: %+v / %+v", in, r, s.sent)
 		}
 	}
 	// a lone bad submit must not count as submitted
 	s := &script{replies: []*Reply{{Calls: []ToolCall{call("a", "submit_answer", `{}`)}}, {}}}
-	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, 10); r.Submitted || r.Correct {
+	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10}); r.Submitted || r.Correct {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -175,13 +175,13 @@ func (errModel) Continue(context.Context, []ToolResult) (*Reply, error) {
 }
 
 func TestRunModelErrorIsAborted(t *testing.T) {
-	r := Run(context.Background(), errModel{}, &fakeServer{}, "chinook", q1, nil, 1, 5)
+	r := Run(context.Background(), errModel{}, &fakeServer{}, "chinook", q1, nil, 1, RunOpts{MaxTurns: 5})
 	if !r.Aborted || !strings.Contains(r.Error, "529") {
 		t.Fatalf("%+v", r)
 	}
 	// Model behaviour failures are not aborts.
 	s := &script{replies: []*Reply{{Calls: nil, Usage: Usage{Input: 1, Output: 1}}}}
-	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, nil, 1, 5); r.Aborted || r.Error == "" {
+	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, nil, 1, RunOpts{MaxTurns: 5}); r.Aborted || r.Error == "" {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -194,9 +194,26 @@ func TestRunReportsWhyTheModelStopped(t *testing.T) {
 		"":           "the model stopped without calling submit_answer",
 	} {
 		s := &script{replies: []*Reply{{StopReason: stop, Usage: Usage{Input: 1, Output: 1}}}}
-		r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, nil, 1, 5)
+		r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, nil, 1, RunOpts{MaxTurns: 5})
 		if r.Error != want || r.Aborted || len(r.StopReasons) != 1 || r.StopReasons[0] != stop {
 			t.Errorf("stop %q: %+v", stop, r)
 		}
+	}
+}
+
+func TestRunStopsAtTheTokenBudget(t *testing.T) {
+	s := &script{replies: []*Reply{
+		{Calls: []ToolCall{call("a", "query", `{}`)}, Usage: Usage{Input: 400, Output: 100}},
+		{Calls: []ToolCall{call("b", "query", `{}`)}, Usage: Usage{Input: 450, Output: 100}},
+		{Calls: []ToolCall{call("c", "submit_answer", `{"rows":[[1]]}`)}, Usage: Usage{Input: 10, Output: 10}},
+	}}
+	r := Run(context.Background(), s, &fakeServer{out: "x"}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10, TokenBudget: 1000})
+	if r.Error != "token budget exceeded (1050 tokens)" || r.Aborted || r.Submitted || r.Turns != 2 || r.InputTokens != 850 {
+		t.Fatalf("%+v", r)
+	}
+	// no budget: unlimited
+	s = &script{replies: []*Reply{{Calls: []ToolCall{call("c", "submit_answer", `{"rows":[[1]]}`)}, Usage: Usage{Input: 5000000}}}}
+	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10}); !r.Correct {
+		t.Fatalf("%+v", r)
 	}
 }

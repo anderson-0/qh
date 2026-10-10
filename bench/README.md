@@ -24,11 +24,24 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
 
 ```bash
 make bench                                   # everything; writes bench/results/<timestamp>/report.md
-make bench ARGS="-limit 3 -runs 1"           # a quick, cheap smoke run
+make bench ARGS="-limit 1 -runs 1"           # first: a cheap smoke run (6 conversations)
+make bench ARGS="-limit 3 -runs 1"           # a larger sample
 make bench ARGS="-skip-agent -skip-tokens"   # micro-benchmarks only, no API key needed
 ```
 
-A full run makes about 540 model conversations: 90 questions × 3 runs × 2 servers. Check your API budget before starting.
+Run the `-limit 1 -runs 1` smoke run before a full run: it checks your API key, the model id and both servers for a few cents.
+
+## Cost and time
+
+A full run makes about 540 model conversations: 90 questions × 3 runs × 2 servers. Every request uses prompt caching, so a conversation re-reads its growing prefix at the cache-read price. Assuming a handful of turns per conversation, a few thousand tokens of tool output per turn and Sonnet 5.5 list prices, expect the order of magnitude:
+
+- **Cost:** tens to low hundreds of dollars for the whole run. dbhub conversations cost more than qh ones, because its tool definitions and its uncapped row output are larger.
+- **Time:** 1.5 to 3 hours at `-parallel 4` (the default), plus a few minutes for the datasets and the micro-benchmarks.
+
+These are estimates, not quotes; check your API budget before a full run. Two flags bound the spend:
+
+- `-token-budget` (default 1,000,000) stops one conversation once its input plus output tokens, cache reads included, pass the ceiling. The run is recorded as failed ("token budget exceeded"), not aborted, so it counts against its server.
+- `-effort` (default `high`) is sent as `output_config.effort` on every request. `low` or `medium` cost less but change what is measured.
 
 `raw.jsonl` gets one line per finished run, so an interrupted run keeps what it measured.
 

@@ -63,11 +63,13 @@ func toolParam(t ToolDef) anthropic.ToolParam {
 // uses the same parameters.
 func (m *anthropicModel) newParams() anthropic.MessageNewParams {
 	return anthropic.MessageNewParams{
-		Model:        anthropic.Model(m.model),
-		MaxTokens:    maxTokens,
-		System:       []anthropic.TextBlockParam{{Text: m.system}},
-		Messages:     m.messages,
-		Tools:        m.tools,
+		Model:     anthropic.Model(m.model),
+		MaxTokens: maxTokens,
+		System:    []anthropic.TextBlockParam{{Text: m.system}},
+		Messages:  m.messages,
+		Tools:     m.tools,
+		// Cache the whole prefix (tools, system, messages so far): every turn re-sends it.
+		CacheControl: anthropic.NewCacheControlEphemeralParam(),
 		OutputConfig: anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(m.effort)},
 	}
 }

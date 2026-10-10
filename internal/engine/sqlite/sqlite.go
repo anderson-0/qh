@@ -133,13 +133,10 @@ func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine
 }
 
 func (c *conn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
-	access, err := sqlx.Classify(q, sqlx.SQLite)
-	if err != nil {
+	// Classify rejects pragma assignments, which SQLite applies while
+	// preparing the statement, even under EXPLAIN.
+	if _, err := sqlx.Classify(q, sqlx.SQLite); err != nil {
 		return nil, err
-	}
-	// SQLite applies pragmas while preparing the statement, even under EXPLAIN.
-	if sqlx.FirstKeyword(q, sqlx.SQLite) == "pragma" && access != sqlx.Read {
-		return nil, readOnlyErr()
 	}
 	r, err := c.run(ctx, "EXPLAIN QUERY PLAN "+q, engine.QueryOpts{MaxRows: 500, Timeout: o.Timeout})
 	if err != nil {

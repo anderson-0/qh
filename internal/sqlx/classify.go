@@ -144,7 +144,7 @@ func Classify(sql string, d Dialect) (Access, error) {
 			if d == SQLite && readPragma(inner) {
 				return Read, nil
 			}
-			return Write, nil
+			return 0, pragmaErr()
 		}
 		if words["analyze"] && anyOf(words, "insert", "update", "delete", "merge", "create", "drop", "alter", "truncate", "into") {
 			return Write, nil
@@ -156,9 +156,16 @@ func Classify(sql string, d Dialect) (Access, error) {
 		if d == SQLite && readPragma(t) {
 			return Read, nil
 		}
-		return Write, nil
+		return 0, pragmaErr()
 	}
 	return Write, nil // unknown statements fail closed
+}
+
+// pragmaErr rejects every pragma that is not a known read pragma, in any
+// mode: pragmas change connection state that outlives the statement.
+func pragmaErr() error {
+	return qerr.New(qerr.Invalid, "PRAGMA assignments are not supported").
+		WithHint("Only read pragmas such as table_info or index_list can be queried")
 }
 
 // explainInner returns the tokens of the statement an EXPLAIN describes: t

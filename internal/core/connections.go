@@ -188,6 +188,9 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 		return nil, nil, err
 	}
 	eng, _ := engine.Get(in.Engine)
+	if err := s.checkDSN(eng, in.DSN); err != nil {
+		return nil, nil, err
+	}
 	info, err := eng.Inspect(in.DSN)
 	if err != nil {
 		return nil, nil, scrub(err, in.DSN)
@@ -254,6 +257,9 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 		return nil, nil, err
 	}
 	eng, _ := engine.Get(in.Engine)
+	if err := s.checkDSN(eng, in.DSN); err != nil {
+		return nil, nil, err
+	}
 	info, err := eng.Inspect(in.DSN)
 	if err != nil {
 		return nil, nil, scrub(err, in.DSN)
@@ -298,7 +304,11 @@ func (s *Service) info(rec *store.Connection) *ConnInfo {
 	var di engine.DSNInfo
 	if in, err := s.load(rec); err == nil {
 		if eng, err := engine.Get(rec.Engine); err == nil {
-			di, _ = eng.Inspect(in.DSN)
+			if s.checkDSN(eng, in.DSN) != nil {
+				di.Redacted = "<connection string refused by this server>"
+			} else {
+				di, _ = eng.Inspect(in.DSN)
+			}
 		}
 	}
 	if di.Redacted == "" {
@@ -375,6 +385,9 @@ func (s *Service) TestInput(ctx context.Context, in ConnInput) (*TestResult, err
 		return nil, err
 	}
 	eng, _ := engine.Get(in.Engine)
+	if err := s.checkDSN(eng, in.DSN); err != nil {
+		return nil, err
+	}
 	info, err := eng.Inspect(in.DSN)
 	if err != nil {
 		return nil, scrub(err, in.DSN)

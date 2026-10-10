@@ -87,6 +87,13 @@ type Engine interface {
 	Open(ctx context.Context, spec ConnSpec) (Conn, error)
 }
 
+// ServerDSNChecker is implemented by engines that restrict what a connection
+// string may contain in server mode. CheckServerDSN must not connect or read
+// files, and its error must not quote dsn.
+type ServerDSNChecker interface {
+	CheckServerDSN(dsn string) error
+}
+
 // Conn is an open connection pool to one database. Methods return
 // *qerr.Error values for every error they can classify.
 type Conn interface {

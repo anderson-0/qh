@@ -59,6 +59,19 @@ func (s *Service) allowEngine(name string) error {
 	return nil
 }
 
+// checkDSN applies the engine's server-mode limits on connection strings
+// (for Postgres: no settings that read server files or PG* defaults). Local
+// mode accepts everything the engine does.
+func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
+	if s.opts.Dial == nil {
+		return nil
+	}
+	if c, ok := eng.(engine.ServerDSNChecker); ok {
+		return c.CheckServerDSN(dsn)
+	}
+	return nil
+}
+
 // connSpec builds the spec engines open, carrying the server's options.
 func (s *Service) connSpec(id string, version int64, eng, dsn string, mode engine.Mode, poolSize int) engine.ConnSpec {
 	return engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize,
@@ -101,6 +114,9 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	}
 	eng, err := engine.Get(rec.Engine)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.checkDSN(eng, in.DSN); err != nil {
 		return nil, err
 	}
 	info, _ := eng.Inspect(in.DSN)

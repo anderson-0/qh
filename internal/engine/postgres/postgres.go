@@ -10,6 +10,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,10 +83,135 @@ func redact(dsn string) string {
 	return kvPassword.ReplaceAllString(dsn, "${1}***")
 }
 
-func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
-	cfg, err := pgxpool.ParseConfig(spec.DSN)
+// serverKeys are the only settings a connection string may carry in server
+// mode. Everything else is refused, in particular the keys that make pgconn
+// read server files (passfile, service, servicefile, sslcert, sslkey,
+// sslrootcert). pgconn accepts dbname and database for one another, and
+// ssl=true for sslmode=require.
+var serverKeys = []string{
+	"host", "port", "dbname", "user", "password", "sslmode", "sslsni", "sslnegotiation", "connect_timeout",
+	"target_session_attrs", "application_name", "channel_binding", "require_auth",
+	"min_protocol_version", "max_protocol_version",
+}
+
+// serverKeysNoPassword is serverKeys without "password".
+var serverKeysNoPassword = func() []string {
+	var out []string
+	for _, k := range serverKeys {
+		if k != "password" {
+			out = append(out, k)
+		}
+	}
+	return out
+}()
+
+// noFiles clears the file settings pgconn otherwise takes from $HOME
+// (~/.pgpass and ~/.postgresql/postgresql.{crt,key}, root.crt) or from PG*
+// variables. A setting in the connection string wins over both.
+var noFiles = []string{"passfile", "sslcert", "sslkey", "sslrootcert"}
+
+func refusedSettings() error {
+	return qerr.New(qerr.Invalid, "this server only accepts these Postgres connection settings: "+strings.Join(serverKeys, ", ")).
+		WithHint("Remove the other settings from the connection string")
+}
+
+// withSettings adds key=” settings to dsn, in its own form (URL or
+// keyword/value).
+func withSettings(dsn string, keys []string, value string) string {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		pairs := make([]string, len(keys))
+		for i, k := range keys {
+			pairs[i] = k + "=" + url.QueryEscape(value)
+		}
+		// Find the query the way pgconn does: after the user info (which ends
+		// at the first '@' seen before any '/'), at the first '?'.
+		rest := dsn[strings.Index(dsn, "://")+3:]
+		if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+			rest = rest[i+1:]
+		}
+		switch {
+		case !strings.Contains(rest, "?"):
+			return dsn + "?" + strings.Join(pairs, "&")
+		case strings.HasSuffix(dsn, "?"):
+			return dsn + strings.Join(pairs, "&")
+		default:
+			return dsn + "&" + strings.Join(pairs, "&")
+		}
+	}
+	pairs := make([]string, len(keys))
+	for i, k := range keys {
+		pairs[i] = k + "='" + value + "'"
+	}
+	return dsn + " " + strings.Join(pairs, " ")
+}
+
+// usesOnly reports whether every setting in dsn is in allowed, without
+// reading any file. pgconn checks the allow-list first; the invalid
+// connect_timeout appended here (the last occurrence of a key wins) then
+// stops it before it opens a passfile, service file or certificate.
+func usesOnly(dsn string, allowed []string) bool {
+	_, err := pgconn.ParseConfigWithOptions(withSettings(dsn, []string{"connect_timeout"}, "-1"),
+		pgconn.ParseConfigOptions{ConnStringAllowedKeys: allowed})
+	// pgconn's ParseConfigError has no exported reason; the message is fixed.
+	return err == nil || !strings.Contains(err.Error(), "is not in ConnStringAllowedKeys")
+}
+
+// checkServerDSN validates a server-mode connection string and reports
+// whether it carries a password itself. Errors never quote dsn.
+func checkServerDSN(dsn string) (hasPassword bool, err error) {
+	if !usesOnly(dsn, serverKeys) {
+		return false, refusedSettings()
+	}
+	if _, err := pgconn.ParseConfigWithOptions(withSettings(dsn, noFiles, ""),
+		pgconn.ParseConfigOptions{ConnStringAllowedKeys: append(append([]string{}, serverKeys...), noFiles...)}); err != nil {
+		return false, qerr.New(qerr.Invalid, "invalid postgres connection string")
+	}
+	return !usesOnly(dsn, serverKeysNoPassword), nil
+}
+
+// CheckServerDSN implements engine.ServerDSNChecker: server mode accepts
+// only serverKeys, so a tenant cannot make qh read server files.
+func (Engine) CheckServerDSN(dsn string) error {
+	_, err := checkServerDSN(dsn)
+	return err
+}
+
+// withoutClientCert returns c without any client certificate.
+func withoutClientCert(c *tls.Config) *tls.Config {
+	if c == nil {
+		return nil
+	}
+	c = c.Clone()
+	c.Certificates, c.GetClientCertificate = nil, nil
+	return c
+}
+
+// poolConfig builds the pool configuration for spec. In server mode
+// (spec.Dial set) the connection string may use only serverKeys, the
+// password comes only from it (never PGPASSWORD, PGPASSFILE, ~/.pgpass or a
+// service file), and no default certificate or pgpass file applies.
+func poolConfig(spec engine.ConnSpec) (*pgxpool.Config, error) {
+	dsn, hasPassword := spec.DSN, true
+	if spec.Dial != nil {
+		var err error
+		if hasPassword, err = checkServerDSN(dsn); err != nil {
+			return nil, err
+		}
+		dsn = withSettings(dsn, noFiles, "")
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, qerr.New(qerr.Invalid, "invalid postgres connection string")
+	}
+	if spec.Dial != nil {
+		cc := cfg.ConnConfig
+		if !hasPassword {
+			cc.Password = ""
+		}
+		cc.TLSConfig = withoutClientCert(cc.TLSConfig)
+		for _, fb := range cc.Fallbacks {
+			fb.TLSConfig = withoutClientCert(fb.TLSConfig)
+		}
 	}
 	cfg.MaxConns = int32(max(spec.PoolSize, 1))
 	cfg.MaxConnIdleTime = 10 * time.Minute
@@ -101,6 +227,14 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	}
 	cfg.ConnConfig.RuntimeParams["application_name"] = "qh"
 	cfg.AfterRelease = resetSession
+	return cfg, nil
+}
+
+func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
+	cfg, err := poolConfig(spec)
+	if err != nil {
+		return nil, err
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, qerr.Wrap(qerr.ConnectionFailed, "cannot create connection pool", err)

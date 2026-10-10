@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -45,5 +46,20 @@ func TestServeFlagValidation(t *testing.T) {
 	}
 	if _, errOut, code := run(t, home, "", "serve", "--sqlite-root", home); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: --allow-cidr, --deny-cidr and --sqlite-root apply to server mode only") {
 		t.Fatalf("server-only flags in local mode: %d %q", code, errOut)
+	}
+}
+
+func TestServeClearsPGEnvironment(t *testing.T) {
+	t.Setenv("QH_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	t.Setenv("PGPASSWORD", "operator-secret")
+	t.Setenv("PGSERVICE", "operator-service")
+	// The invalid port stops serve right after startup.
+	_, errOut, code := run(t, t.TempDir(), "", "serve", "--http", "127.0.0.1:99999")
+	if code != 1 || !regexp.MustCompile(`(?m)^ignoring (PG[A-Z_]+, )*PGPASSWORD, (PG[A-Z_]+, )*PGSERVICE(, PG[A-Z_]+)* in server mode$`).MatchString(errOut) ||
+		strings.Contains(errOut, "operator-secret") || strings.Contains(errOut, "operator-service") {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	if os.Getenv("PGPASSWORD") != "" || os.Getenv("PGSERVICE") != "" {
+		t.Fatal("PG* variables still set")
 	}
 }

@@ -155,3 +155,55 @@ func TestWorkspaceOperations(t *testing.T) {
 		t.Fatalf("connection outlived its workspace: %v", err)
 	}
 }
+
+func TestServerDSNGate(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	key := make([]byte, secret.KeySize)
+	rand.Read(key)
+	keys, err := secret.NewKeyring(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pools := pool.New(OpenConn, pool.Options{})
+	t.Cleanup(pools.Close)
+	bad := "postgres://u:hunter22@db.example.com/db?connect_timeout=2&passfile=/etc/hosts"
+	// A row stored before the gate existed (or by local mode on the same store).
+	local := New(st, keys, pools, catalog.New(10*time.Minute))
+	if _, _, err := local.CreateConnection(ctx, ws, ConnInput{Name: "legacy", Engine: "postgres", DSN: bad}, false); err != nil {
+		t.Fatal(err)
+	}
+	dialed := false
+	server := New(st, keys, pools, catalog.New(10*time.Minute), Options{Dial: func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, errors.New("refused by policy")
+	}})
+	const want = "error[invalid]: this server only accepts these Postgres connection settings"
+	check := func(what string, err error) {
+		t.Helper()
+		if err == nil || !strings.HasPrefix(err.Error(), want) || strings.Contains(err.Error(), "hunter22") || strings.Contains(err.Error(), "/etc/hosts") {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+	_, _, err = server.CreateConnection(ctx, ws, ConnInput{Name: "new", Engine: "postgres", DSN: bad}, false)
+	check("create", err)
+	_, err = server.TestInput(ctx, ConnInput{Engine: "postgres", DSN: bad})
+	check("test input", err)
+	desc := "changed"
+	_, _, err = server.UpdateConnection(ctx, ws, "legacy", ConnPatch{Description: &desc}, false)
+	check("update", err)
+	_, err = server.Query(ctx, ws, QueryInput{Source: "legacy", Query: "SELECT 1"})
+	check("query (resolve)", err)
+	_, err = server.TestConnection(ctx, ws, "legacy")
+	check("test connection (resolve)", err)
+	info, err := server.GetConnection(ctx, ws, "legacy")
+	if err != nil || strings.Contains(info.DSN, "passfile") || strings.Contains(info.DSN, "db.example.com") || !strings.HasPrefix(info.DSN, "<") {
+		t.Errorf("info: %+v %v", info, err)
+	}
+	if dialed {
+		t.Error("dialed despite a refused setting")
+	}
+	if _, _, err := server.CreateConnection(ctx, ws, ConnInput{Name: "ok", Engine: "postgres", DSN: "postgres://u:hunter22@db.example.com/db"}, false); err != nil {
+		t.Errorf("allowed DSN refused: %v", err)
+	}
+}

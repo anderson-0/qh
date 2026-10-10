@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,6 +39,9 @@ func serveCmd(home *string, version string) *cobra.Command {
 				if os.Getenv("QH_MASTER_KEY") == "" {
 					return qerr.New(qerr.Invalid, "server mode needs QH_MASTER_KEY").
 						WithHint("Set it to a base64-encoded 32-byte key, e.g. openssl rand -base64 32")
+				}
+				if names := clearPGEnv(); len(names) > 0 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "ignoring %s in server mode\n", strings.Join(names, ", "))
 				}
 				policy, err := netguard.New(allow, deny)
 				if err != nil {
@@ -110,4 +115,19 @@ func serveCmd(home *string, version string) *cobra.Command {
 	fl.StringSliceVar(&allow, "allow-cidr", nil, "server mode: allow database addresses in this range, even if denied by default (repeatable)")
 	fl.StringSliceVar(&deny, "deny-cidr", nil, "server mode: also refuse database addresses in this range (repeatable)")
 	return cmd
+}
+
+// clearPGEnv unsets every PG* environment variable and returns their names.
+// In server mode the Postgres driver must not take a password, service,
+// host or file from the operator's environment for a tenant's connection.
+func clearPGEnv() []string {
+	var names []string
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "PG") {
+			os.Unsetenv(name)
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }

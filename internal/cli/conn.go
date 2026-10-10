@@ -37,7 +37,7 @@ type connFlags struct {
 func (f *connFlags) register(cmd *cobra.Command, withEngine bool) {
 	fl := cmd.Flags()
 	if withEngine {
-		fl.StringVar(&f.engine, "engine", "", "postgres or sqlite (required)")
+		fl.StringVar(&f.engine, "engine", "", "postgres, mysql (alias mariadb) or sqlite (required)")
 	}
 	fl.StringVar(&f.dsn, "dsn", "", "connection string, or - to read it from stdin")
 	fl.StringVar(&f.mode, "mode", "ro", "ro (read-only) or rw (read-write)")

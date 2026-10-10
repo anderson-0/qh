@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -144,9 +145,30 @@ func TestBusy(t *testing.T) {
 }
 
 func TestConnectionFailed(t *testing.T) {
-	_, err := Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: "postgres://u:hunter22@127.0.0.1:1/db?connect_timeout=2", Mode: engine.ModeRO, PoolSize: 1})
-	if e := qerr.From(err); err == nil || e.Category != qerr.ConnectionFailed {
+	for _, host := range []string{"127.0.0.1", "localhost"} {
+		_, err := Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: "postgres://u:hunter22@" + host + ":1/db?connect_timeout=2", Mode: engine.ModeRO, PoolSize: 1})
+		if e := qerr.From(err); err == nil || e.Category != qerr.ConnectionFailed {
+			t.Fatalf("%s: err = %v", host, err)
+		}
+		if strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "hunter22") {
+			t.Fatalf("%s: err = %q", host, err.Error())
+		}
+	}
+}
+
+func TestAuthFailed(t *testing.T) {
+	dsn := startPostgres(t, "postgres:17-alpine")
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword("qh", "wrong-pw-456")
+	_, err = Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: u.String(), Mode: engine.ModeRO, PoolSize: 1})
+	if e := qerr.From(err); err == nil || e.Category != qerr.ConnectionFailed || !strings.Contains(e.Message, "authentication failed") {
 		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(err.Error(), "wrong-pw-456") {
+		t.Fatalf("password leaked: %q", err.Error())
 	}
 }
 

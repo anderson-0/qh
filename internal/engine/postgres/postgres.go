@@ -299,9 +299,25 @@ func (c *conn) classify(ctx context.Context, err error) error {
 	if errors.As(err, &qe) {
 		return qe
 	}
+	var pe *pgconn.PgError
+	var ne net.Error
+	// Connect errors first: pgconn wraps the server's PgError and any dial
+	// timeout inside them.
+	var ce *pgconn.ConnectError
+	if errors.As(err, &ce) {
+		switch {
+		case errors.As(err, &pe) && strings.HasPrefix(pe.Code, "28"):
+			return qerr.Wrap(qerr.ConnectionFailed, "authentication failed: "+pe.Message, err)
+		case errors.As(err, &pe) && pe.Code == "3D000":
+			return qerr.Wrap(qerr.ConnectionFailed, pe.Message, err)
+		case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
+			return qerr.Wrap(qerr.ConnectionFailed, "timed out connecting to the database", err)
+		}
+		first, _, _ := strings.Cut(err.Error(), "\n")
+		return qerr.Wrap(qerr.ConnectionFailed, "cannot reach the database: "+first, err)
+	}
 	timeout := qerr.Wrap(qerr.Timeout, "query exceeded the connection timeout", err).
 		WithHint("Add WHERE/LIMIT or narrow the range")
-	var pe *pgconn.PgError
 	if errors.As(err, &pe) {
 		switch pe.Code {
 		case "57014":
@@ -331,9 +347,7 @@ func (c *conn) classify(ctx context.Context, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return timeout
 	}
-	var ce *pgconn.ConnectError
-	var ne net.Error
-	if errors.As(err, &ce) || errors.As(err, &ne) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if errors.As(err, &ne) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return qerr.Wrap(qerr.ConnectionFailed, "cannot reach the database: "+err.Error(), err)
 	}
 	return qerr.Wrap(qerr.QueryError, err.Error(), err)

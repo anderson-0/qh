@@ -15,6 +15,8 @@ func TestErrorFormat(t *testing.T) {
 			"error[timeout]: query exceeded 30s. Add WHERE/LIMIT or narrow the range"},
 		{New(Invalid, "query is empty."), "error[invalid]: query is empty"},
 		{New(QueryError, "  boom  "), "error[query_error]: boom"},
+		{New(ConnectionFailed, "dial a: refused\n\tdial b: refused\r\n").WithHint("try\nagain"),
+			"error[connection_failed]: dial a: refused dial b: refused. try again"},
 	}
 	for _, c := range cases {
 		if got := c.err.Error(); got != c.want {

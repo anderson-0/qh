@@ -5,8 +5,14 @@ package qerr
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// lineBreaks matches whitespace runs containing a line break or tab.
+var lineBreaks = regexp.MustCompile(`[ \t\r\n]*[\r\n\t][ \t\r\n]*`)
+
+func oneLine(s string) string { return lineBreaks.ReplaceAllString(s, " ") }
 
 // Category is the machine-readable error class.
 type Category string
@@ -51,9 +57,9 @@ func (e *Error) WithHint(h string) *Error {
 }
 
 func (e *Error) Error() string {
-	msg := strings.TrimRight(strings.TrimSpace(e.Message), ".")
+	msg := strings.TrimRight(strings.TrimSpace(oneLine(e.Message)), ".")
 	s := fmt.Sprintf("error[%s]: %s", e.Category, msg)
-	if h := strings.TrimSpace(e.Hint); h != "" {
+	if h := strings.TrimSpace(oneLine(e.Hint)); h != "" {
 		s += ". " + h
 	}
 	return s

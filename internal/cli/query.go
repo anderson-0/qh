@@ -11,26 +11,25 @@ import (
 
 	"github.com/anderson-0/qh/internal/core"
 	"github.com/anderson-0/qh/internal/mcpserver"
-	"github.com/anderson-0/qh/internal/store"
 )
 
-func queryCmd(with withApp) *cobra.Command {
+func queryCmd(with withBackend) *cobra.Command {
 	var maxRows int
 	var explain bool
 	cmd := &cobra.Command{
 		Use:   "query <connection> <statement|->",
 		Short: "Run one statement and print TSV (- reads the statement from stdin)",
 		Args:  cobra.ExactArgs(2),
-		RunE: with(func(cmd *cobra.Command, a *app, args []string) error {
+		RunE: with(func(cmd *cobra.Command, b backend, args []string) error {
 			q := args[1]
 			if q == "-" {
-				b, err := io.ReadAll(cmd.InOrStdin())
+				raw, err := io.ReadAll(cmd.InOrStdin())
 				if err != nil {
 					return err
 				}
-				q = string(b)
+				q = string(raw)
 			}
-			out, err := a.svc.Query(cmd.Context(), ws, core.QueryInput{Source: args[0], Query: q, MaxRows: maxRows, Explain: explain})
+			out, err := b.Query(cmd.Context(), core.QueryInput{Source: args[0], Query: q, MaxRows: maxRows, Explain: explain})
 			if err != nil {
 				return err
 			}
@@ -43,18 +42,18 @@ func queryCmd(with withApp) *cobra.Command {
 	return cmd
 }
 
-func schemaCmd(with withApp) *cobra.Command {
+func schemaCmd(with withBackend) *cobra.Command {
 	var object string
 	cmd := &cobra.Command{
 		Use:   "schema <connection> [pattern]",
 		Short: "Show the schema overview, or tables matching a pattern",
 		Args:  cobra.RangeArgs(1, 2),
-		RunE: with(func(cmd *cobra.Command, a *app, args []string) error {
+		RunE: with(func(cmd *cobra.Command, b backend, args []string) error {
 			in := core.SchemaInput{Source: args[0], Object: object}
 			if len(args) == 2 {
 				in.Pattern = args[1]
 			}
-			out, err := a.svc.Schema(cmd.Context(), ws, in)
+			out, err := b.Schema(cmd.Context(), in)
 			if err != nil {
 				return err
 			}
@@ -66,19 +65,44 @@ func schemaCmd(with withApp) *cobra.Command {
 	return cmd
 }
 
-func mcpCmd(with withApp, version string) *cobra.Command {
-	return &cobra.Command{
+func mcpCmd(home *string, version string) *cobra.Command {
+	var lf queryLogFlags
+	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Serve MCP over stdio",
+		Short: "Serve MCP over stdio (local store)",
 		Args:  cobra.NoArgs,
-		RunE: with(func(cmd *cobra.Command, a *app, _ []string) error {
-			a.pools.Start(cmd.Context())
-			srv := mcpserver.New(a.svc, func(context.Context) string { return store.DefaultWorkspace }, version)
-			err := srv.Run(cmd.Context(), &mcp.StdioTransport{})
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refuseRemote(cmd); err != nil {
+				return err
+			}
+			retention, err := lf.retention()
+			if err != nil {
+				return err
+			}
+			dir, err := homeDir(*home)
+			if err != nil {
+				return err
+			}
+			a, err := openAppWith(dir, core.Options{NoQueryLog: lf.off})
+			if err != nil {
+				return err
+			}
+			defer a.Close()
+			ctx := cmd.Context()
+			a.pools.Start(ctx)
+			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
+			ws, _ := workspaceOf(cmd)
+			if err := requireWorkspace(ctx, a, ws); err != nil {
+				return err
+			}
+			srv := mcpserver.New(a.svc, func(context.Context) string { return ws }, version)
+			err = srv.Run(ctx, &mcp.StdioTransport{})
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return err
-		}),
+		},
 	}
+	lf.register(cmd)
+	return cmd
 }

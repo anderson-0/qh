@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"strings"
 	"time"
 
@@ -40,6 +41,22 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	}
 	if spec.Dial != nil {
 		cfg.DialFunc = spec.Dial
+	}
+	if spec.TLS != nil {
+		host, _, err := net.SplitHostPort(cfg.Addr)
+		if err != nil {
+			host = cfg.Addr
+		}
+		c, err := spec.TLS.Config(host)
+		if err != nil {
+			return nil, err
+		}
+		// cfg.TLS takes priority over the tls= setting; "false" keeps a nil
+		// TLS from being re-derived from the connection string.
+		cfg.TLS, cfg.AllowFallbackToPlaintext = c, false
+		if c == nil {
+			cfg.TLSConfig = "false"
+		}
 	}
 	connector, err := gomysql.NewConnector(cfg)
 	if err != nil {

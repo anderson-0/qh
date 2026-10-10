@@ -65,6 +65,23 @@ var migrations = [][]string{
 		)`,
 		`CREATE INDEX api_keys_workspace ON api_keys (workspace_id)`,
 	},
+	{
+		`CREATE TABLE query_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			connection_id TEXT NOT NULL,
+			connection_name TEXT NOT NULL,
+			key_id TEXT NOT NULL DEFAULT '',
+			tool TEXT NOT NULL,
+			query TEXT NOT NULL,
+			row_count INTEGER NOT NULL,
+			duration_ms INTEGER NOT NULL,
+			error_category TEXT NOT NULL DEFAULT '',
+			at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX query_log_workspace ON query_log (workspace_id, id)`,
+		`CREATE INDEX query_log_at ON query_log (at)`,
+	},
 }
 
 // SQLite is a Store backed by a SQLite file.
@@ -164,7 +181,15 @@ func (s *SQLite) Close() error { return s.db.Close() }
 
 const connColumns = `id, workspace_id, name, engine, secret, secret_key_id, host, port, "database",
 	username, description, mode, max_rows, timeout_ms, pool_size, allowed_namespaces, version,
-	created_at, updated_at`
+	created_at, updated_at, tls`
+
+// tlsColumn stores an empty TLS summary as '{}', the column's default.
+func tlsColumn(s string) string {
+	if s == "" {
+		return "{}"
+	}
+	return s
+}
 
 func isUnique(err error) bool {
 	var se *msqlite.Error
@@ -183,12 +208,15 @@ func (s *SQLite) CreateConnection(ctx context.Context, c *Connection) error {
 	}
 	now := s.now()
 	_, err = s.db.ExecContext(ctx, `INSERT INTO connections (`+connColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
 		c.ID, c.WorkspaceID, c.Name, c.Engine, c.Secret, c.SecretKeyID, c.Host, c.Port, c.Database,
 		c.Username, c.Description, c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns),
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), tlsColumn(c.TLS))
 	if isUnique(err) {
 		return ErrExists
+	}
+	if isForeignKey(err) {
+		return ErrNotFound // the workspace does not exist
 	}
 	if err != nil {
 		return err
@@ -205,10 +233,10 @@ func (s *SQLite) UpdateConnection(ctx context.Context, c *Connection) error {
 	now := s.now()
 	res, err := s.db.ExecContext(ctx, `UPDATE connections SET engine = ?, secret = ?, secret_key_id = ?,
 		host = ?, port = ?, "database" = ?, username = ?, description = ?, mode = ?, max_rows = ?,
-		timeout_ms = ?, pool_size = ?, allowed_namespaces = ?, version = version + 1, updated_at = ?
+		timeout_ms = ?, pool_size = ?, allowed_namespaces = ?, tls = ?, version = version + 1, updated_at = ?
 		WHERE workspace_id = ? AND name = ? AND id = ? AND version = ?`,
 		c.Engine, c.Secret, c.SecretKeyID, c.Host, c.Port, c.Database, c.Username, c.Description,
-		c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns), now.Format(time.RFC3339Nano),
+		c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns), tlsColumn(c.TLS), now.Format(time.RFC3339Nano),
 		c.WorkspaceID, c.Name, c.ID, c.Version)
 	if err != nil {
 		return err
@@ -265,10 +293,10 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanConnection(r scanner) (*Connection, error) {
 	var c Connection
-	var ns, created, updated string
+	var ns, created, updated, tls string
 	err := r.Scan(&c.ID, &c.WorkspaceID, &c.Name, &c.Engine, &c.Secret, &c.SecretKeyID, &c.Host, &c.Port,
 		&c.Database, &c.Username, &c.Description, &c.Mode, &c.MaxRows, &c.TimeoutMS, &c.PoolSize, &ns,
-		&c.Version, &created, &updated)
+		&c.Version, &created, &updated, &tls)
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +305,9 @@ func scanConnection(r scanner) (*Connection, error) {
 	}
 	if len(c.AllowedNamespaces) == 0 {
 		c.AllowedNamespaces = nil
+	}
+	if tls != "{}" {
+		c.TLS = tls
 	}
 	if c.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
 		return nil, err
@@ -315,6 +346,126 @@ func parseTime(s sql.NullString) (*time.Time, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+func (s *SQLite) AppendQueryLog(ctx context.Context, e *QueryLogEntry) error {
+	if e.At.IsZero() {
+		e.At = s.now()
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO query_log (workspace_id, connection_id, connection_name, key_id,
+		tool, query, row_count, duration_ms, error_category, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.WorkspaceID, e.ConnectionID, e.ConnectionName, e.KeyID, e.Tool, e.Query, e.RowCount, e.DurationMS,
+		e.ErrorCategory, e.At.UnixMilli())
+	if err != nil {
+		return err
+	}
+	e.ID, err = res.LastInsertId()
+	return err
+}
+
+func (s *SQLite) ListQueryLog(ctx context.Context, f QueryLogFilter) ([]*QueryLogEntry, error) {
+	q := `SELECT id, workspace_id, connection_id, connection_name, key_id, tool, query, row_count, duration_ms,
+		error_category, at FROM query_log WHERE workspace_id = ?`
+	args := []any{f.WorkspaceID}
+	if f.ConnectionName != "" {
+		q += ` AND connection_name = ?`
+		args = append(args, f.ConnectionName)
+	}
+	if !f.Since.IsZero() {
+		q += ` AND at >= ?`
+		args = append(args, f.Since.UnixMilli())
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = -1 // SQLite: no limit
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*QueryLogEntry
+	for rows.Next() {
+		var e QueryLogEntry
+		var at int64
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.ConnectionID, &e.ConnectionName, &e.KeyID, &e.Tool, &e.Query,
+			&e.RowCount, &e.DurationMS, &e.ErrorCategory, &at); err != nil {
+			return nil, err
+		}
+		e.At = time.UnixMilli(at).UTC()
+		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) PruneQueryLog(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM query_log WHERE at < ?`, before.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ResealConnections calls fn for every connection in every workspace inside
+// one write transaction, and stores the secret fn returns. A nil secret
+// leaves the connection unchanged. If fn fails, nothing is changed. Versions
+// stay the same: the connection string itself does not change.
+func (s *SQLite) ResealConnections(ctx context.Context, fn func(c *Connection) ([]byte, uint32, error)) (int, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return 0, err
+	}
+	n, err := reseal(ctx, conn, fn)
+	if err == nil {
+		_, err = conn.ExecContext(ctx, "COMMIT")
+	}
+	if err != nil {
+		conn.ExecContext(context.Background(), "ROLLBACK")
+		return 0, err
+	}
+	return n, nil
+}
+
+func reseal(ctx context.Context, conn *sql.Conn, fn func(c *Connection) ([]byte, uint32, error)) (int, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT `+connColumns+` FROM connections ORDER BY workspace_id, name`)
+	if err != nil {
+		return 0, err
+	}
+	var all []*Connection
+	for rows.Next() {
+		c, err := scanConnection(rows)
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	n := 0
+	for _, c := range all {
+		secret, keyID, err := fn(c)
+		if err != nil {
+			return 0, err
+		}
+		if secret == nil {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, `UPDATE connections SET secret = ?, secret_key_id = ? WHERE id = ?`, secret, keyID, c.ID); err != nil {
+			return 0, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 func (s *SQLite) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

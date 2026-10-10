@@ -37,9 +37,33 @@ type Connection struct {
 	TimeoutMS         int
 	PoolSize          int
 	AllowedNamespaces []string
+	TLS               string // JSON summary of the TLS settings (engine.TLSInfo); "" when there are none
 	Version           int64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// QueryLogEntry is one logged query call.
+type QueryLogEntry struct {
+	ID             int64
+	WorkspaceID    string
+	ConnectionID   string
+	ConnectionName string // kept so entries of deleted connections still name them
+	KeyID          string // "" for local calls
+	Tool           string // "query" or "explain"
+	Query          string
+	RowCount       int64
+	DurationMS     int64
+	ErrorCategory  string // "" when the call succeeded
+	At             time.Time
+}
+
+// QueryLogFilter selects query log entries of one workspace.
+type QueryLogFilter struct {
+	WorkspaceID    string
+	ConnectionName string    // "" for every connection
+	Since          time.Time // zero for no lower bound
+	Limit          int       // <= 0 for no limit
 }
 
 // Workspace isolates connections and keys. Its ID is its name.
@@ -62,7 +86,7 @@ type APIKey struct {
 	CreatedBy   string // id of the key that created this one; empty for bootstrap and CLI keys
 }
 
-// Store is the persistence interface. Plan 3 adds workspaces, keys and the query log.
+// Store is the persistence interface.
 type Store interface {
 	CreateConnection(ctx context.Context, c *Connection) error
 	UpdateConnection(ctx context.Context, c *Connection) error
@@ -79,6 +103,10 @@ type Store interface {
 	DeleteKey(ctx context.Context, id string) error
 	TouchKey(ctx context.Context, id string, at time.Time) error
 	CountKeys(ctx context.Context) (int, error)
+	AppendQueryLog(ctx context.Context, e *QueryLogEntry) error
+	ListQueryLog(ctx context.Context, f QueryLogFilter) ([]*QueryLogEntry, error)
+	PruneQueryLog(ctx context.Context, before time.Time) (int64, error)
+	ResealConnections(ctx context.Context, fn func(c *Connection) (secret []byte, keyID uint32, err error)) (int, error)
 	Ping(ctx context.Context) error
 	Close() error
 }

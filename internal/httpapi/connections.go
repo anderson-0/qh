@@ -1,38 +1,42 @@
 package httpapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/anderson-0/qh/internal/core"
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/format"
+	"github.com/anderson-0/qh/internal/qerr"
 )
 
 type connectionJSON struct {
-	Name              string    `json:"name"`
-	Engine            string    `json:"engine"`
-	Description       string    `json:"description,omitempty"`
-	Mode              string    `json:"mode"`
-	Host              string    `json:"host,omitempty"`
-	Port              int       `json:"port,omitempty"`
-	Database          string    `json:"database,omitempty"`
-	User              string    `json:"user,omitempty"`
-	DSN               string    `json:"dsn"`
-	MaxRows           int       `json:"max_rows"`
-	TimeoutMS         int       `json:"timeout_ms"`
-	PoolSize          int       `json:"pool_size"`
-	AllowedNamespaces []string  `json:"allowed_namespaces,omitempty"`
-	Version           int64     `json:"version"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
-	ServerVersion     string    `json:"server_version,omitempty"`
-	ConnectMS         *int64    `json:"connect_ms,omitempty"`
+	Name              string          `json:"name"`
+	Engine            string          `json:"engine"`
+	Description       string          `json:"description,omitempty"`
+	Mode              string          `json:"mode"`
+	Host              string          `json:"host,omitempty"`
+	Port              int             `json:"port,omitempty"`
+	Database          string          `json:"database,omitempty"`
+	Username          string          `json:"username,omitempty"`
+	DSN               string          `json:"dsn"`
+	TLS               *engine.TLSInfo `json:"tls,omitempty"`
+	MaxRows           int             `json:"max_rows"`
+	TimeoutMS         int             `json:"timeout_ms"`
+	PoolSize          int             `json:"pool_size"`
+	AllowedNamespaces []string        `json:"allowed_namespaces,omitempty"`
+	Version           int64           `json:"version"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+	ServerVersion     string          `json:"server_version,omitempty"`
+	ConnectMS         *int64          `json:"connect_ms,omitempty"`
 }
 
 func toConnection(c *core.ConnInfo, tr *core.TestResult) connectionJSON {
 	out := connectionJSON{Name: c.Name, Engine: c.Engine, Description: c.Description, Mode: string(c.Mode),
-		Host: c.Host, Port: c.Port, Database: c.Database, User: c.User, DSN: c.DSN,
+		Host: c.Host, Port: c.Port, Database: c.Database, Username: c.User, DSN: c.DSN, TLS: c.TLS,
 		MaxRows: c.MaxRows, TimeoutMS: c.TimeoutMS, PoolSize: c.PoolSize, AllowedNamespaces: c.AllowedNamespaces,
 		Version: c.Version, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
 	if tr != nil {
@@ -43,40 +47,63 @@ func toConnection(c *core.ConnInfo, tr *core.TestResult) connectionJSON {
 }
 
 type connectionInput struct {
-	Name              string   `json:"name"`
-	Engine            string   `json:"engine"`
-	DSN               string   `json:"dsn"`
-	Description       string   `json:"description,omitempty"`
-	Mode              string   `json:"mode,omitempty"`
-	MaxRows           int      `json:"max_rows,omitempty"`
-	TimeoutMS         int      `json:"timeout_ms,omitempty"`
-	PoolSize          int      `json:"pool_size,omitempty"`
-	AllowedNamespaces []string `json:"allowed_namespaces,omitempty"`
+	Name              string            `json:"name"`
+	Engine            string            `json:"engine"`
+	DSN               string            `json:"dsn,omitempty"`
+	Host              string            `json:"host,omitempty"`
+	Port              int               `json:"port,omitempty"`
+	Database          string            `json:"database,omitempty"`
+	Username          string            `json:"username,omitempty"`
+	Password          string            `json:"password,omitempty"`
+	Params            map[string]string `json:"params,omitempty"`
+	TLS               *engine.TLS       `json:"tls,omitempty"`
+	Description       string            `json:"description,omitempty"`
+	Mode              string            `json:"mode,omitempty"`
+	MaxRows           int               `json:"max_rows,omitempty"`
+	TimeoutMS         int               `json:"timeout_ms,omitempty"`
+	PoolSize          int               `json:"pool_size,omitempty"`
+	AllowedNamespaces []string          `json:"allowed_namespaces,omitempty"`
 }
 
 func (in connectionInput) core() core.ConnInput {
-	return core.ConnInput{Name: in.Name, Engine: in.Engine, DSN: in.DSN, Description: in.Description, Mode: engine.Mode(in.Mode),
-		MaxRows: in.MaxRows, TimeoutMS: in.TimeoutMS, PoolSize: in.PoolSize, AllowedNamespaces: in.AllowedNamespaces}
+	return core.ConnInput{Name: in.Name, Engine: in.Engine, DSN: in.DSN, Host: in.Host, Port: in.Port, Database: in.Database,
+		Username: in.Username, Password: in.Password, Params: in.Params, TLS: in.TLS, Description: in.Description,
+		Mode: engine.Mode(in.Mode), MaxRows: in.MaxRows, TimeoutMS: in.TimeoutMS, PoolSize: in.PoolSize,
+		AllowedNamespaces: in.AllowedNamespaces}
 }
 
 type connectionPatch struct {
-	DSN               *string   `json:"dsn"`
-	Description       *string   `json:"description"`
-	Mode              *string   `json:"mode"`
-	MaxRows           *int      `json:"max_rows"`
-	TimeoutMS         *int      `json:"timeout_ms"`
-	PoolSize          *int      `json:"pool_size"`
-	AllowedNamespaces *[]string `json:"allowed_namespaces"`
+	DSN               *string         `json:"dsn"`
+	Description       *string         `json:"description"`
+	Mode              *string         `json:"mode"`
+	MaxRows           *int            `json:"max_rows"`
+	TimeoutMS         *int            `json:"timeout_ms"`
+	PoolSize          *int            `json:"pool_size"`
+	AllowedNamespaces *[]string       `json:"allowed_namespaces"`
+	TLS               json.RawMessage `json:"tls"` // absent: unchanged; null: removed; object: replaced
 }
 
-func (p connectionPatch) core() core.ConnPatch {
+func (p connectionPatch) core() (core.ConnPatch, error) {
 	out := core.ConnPatch{DSN: p.DSN, Description: p.Description, MaxRows: p.MaxRows, TimeoutMS: p.TimeoutMS,
 		PoolSize: p.PoolSize, AllowedNamespaces: p.AllowedNamespaces}
 	if p.Mode != nil {
 		m := engine.Mode(*p.Mode)
 		out.Mode = &m
 	}
-	return out
+	switch raw := bytes.TrimSpace(p.TLS); {
+	case len(raw) == 0:
+	case string(raw) == "null":
+		out.ClearTLS = true
+	default:
+		var t engine.TLS
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&t); err != nil {
+			return out, qerr.New(qerr.Invalid, "invalid JSON body: tls: "+err.Error())
+		}
+		out.TLS = &t
+	}
+	return out, nil
 }
 
 type testJSON struct {
@@ -128,7 +155,12 @@ func (a *api) updateConnection(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	c, tr, err := a.cfg.Service.UpdateConnection(r.Context(), workspace(r), r.PathValue("name"), p.core(), !skipTest(r))
+	cp, err := p.core()
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
+	c, tr, err := a.cfg.Service.UpdateConnection(r.Context(), workspace(r), r.PathValue("name"), cp, !skipTest(r))
 	if err != nil {
 		a.fail(w, r, err)
 		return

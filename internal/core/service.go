@@ -41,6 +41,8 @@ type Options struct {
 	SQLiteRoot string
 	// SQLiteDisabled refuses SQLite connections entirely.
 	SQLiteDisabled bool
+	// NoQueryLog turns the query log off.
+	NoQueryLog bool
 }
 
 // New returns a Service. opts (at most one) configures server mode.
@@ -76,8 +78,8 @@ func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
 
 // connSpec builds the spec engines open for workspace ws, carrying the
 // server's options. Workspace names cannot contain path separators.
-func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int) engine.ConnSpec {
-	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial}
+func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int, tls *engine.TLS) engine.ConnSpec {
+	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial, TLS: tls}
 	if s.opts.SQLiteRoot != "" {
 		spec.FileRoot = filepath.Join(s.opts.SQLiteRoot, ws)
 	}
@@ -128,7 +130,7 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	info, _ := eng.Inspect(in.DSN)
 	return &target{
 		rec: rec, eng: eng, info: info,
-		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize),
+		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),
 	}, nil
 }
 
@@ -212,6 +214,14 @@ func (s *Service) QueryResult(ctx context.Context, ws string, in QueryInput) (*e
 	if err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	res, err := s.runQuery(ctx, t, in)
+	s.logQuery(ctx, ws, t, in, res, err, time.Since(start))
+	return res, err
+}
+
+// runQuery classifies, guards and executes one statement on a resolved connection.
+func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engine.Result, error) {
 	access, err := sqlx.Classify(in.Query, t.eng.Dialect())
 	if err != nil {
 		return nil, err

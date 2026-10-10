@@ -121,7 +121,7 @@ func TestUpgradeFromVersion1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{"DROP TABLE api_keys", "PRAGMA user_version = 1"} {
+	for _, q := range []string{"DROP TABLE query_log", "DROP TABLE api_keys", "PRAGMA user_version = 1"} {
 		if _, err := raw.Exec(q); err != nil {
 			t.Fatal(err)
 		}

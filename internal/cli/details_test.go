@@ -1,0 +1,174 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/anderson-0/qh/internal/store"
+	"github.com/anderson-0/qh/internal/testutil"
+)
+
+func TestConnFieldAndTLSFlags(t *testing.T) {
+	home := t.TempDir()
+	f := testutil.NewTLSFixture(t)
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, []byte(f.CA), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, code := run(t, home, "s3cret-pw\n", "conn", "add", "pg", "--engine", "postgres", "--host", "db.example.com",
+		"--port", "5433", "--database", "app", "--user", "reader", "--password-stdin", "--param", "application_name=qh-cli",
+		"--tls-mode", "verify-full", "--tls-ca", ca, "--skip-test")
+	if code != 0 || out != "added pg (postgres, ro)\n" {
+		t.Fatalf("add: %d %q %q", code, out, errOut)
+	}
+	out, _, _ = run(t, home, "", "conn", "show", "pg")
+	if !strings.Contains(out, "dsn: postgres://reader:***@db.example.com:5433/app?application_name=qh-cli\n") ||
+		!strings.Contains(out, "tls: verify-full (ca)\n") || strings.Contains(out, "s3cret-pw") {
+		t.Fatalf("show: %q", out)
+	}
+	if out, _, _ = run(t, home, "", "conn", "edit", "pg", "--no-tls", "--skip-test"); out != "updated pg (version 2)\n" {
+		t.Fatalf("edit --no-tls: %q", out)
+	}
+	if out, _, _ = run(t, home, "", "conn", "show", "pg"); !strings.Contains(out, "tls: none") {
+		t.Fatalf("show after --no-tls: %q", out)
+	}
+	if _, errOut, code := run(t, home, "", "conn", "edit", "pg", "--tls-ca", ca); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: --tls-ca needs --tls-mode") {
+		t.Fatalf("tls flag without mode: %d %q", code, errOut)
+	}
+	if _, errOut, code := run(t, home, "x\n", "conn", "add", "b", "--engine", "postgres", "--dsn", "-", "--password-stdin"); code != 1 ||
+		!strings.HasPrefix(errOut, "error[invalid]: --dsn - and --password-stdin cannot both read stdin") {
+		t.Fatalf("two stdin readers: %d %q", code, errOut)
+	}
+	if _, errOut, code := run(t, home, "", "conn", "add", "c", "--engine", "postgres", "--dsn", "postgres://h/db", "--host", "h"); code != 1 ||
+		!strings.HasPrefix(errOut, "error[invalid]: give either dsn or host") {
+		t.Fatalf("dsn and host: %d %q", code, errOut)
+	}
+}
+
+func TestQueryLogCommand(t *testing.T) {
+	home, db := t.TempDir(), testutil.SQLiteFixture(t)
+	run(t, home, "", "conn", "add", "shop", "--engine", "sqlite", "--dsn", db)
+	run(t, home, "", "query", "shop", "SELECT id\nFROM users")
+	run(t, home, "", "query", "shop", "DELETE FROM users")
+	out, errOut, code := run(t, home, "", "log")
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if code != 0 || len(lines) != 3 || !strings.HasPrefix(lines[0], "AT") || !strings.Contains(lines[1], "read_only") ||
+		!strings.HasSuffix(lines[2], "SELECT id FROM users") {
+		t.Fatalf("log: %d %q %q", code, out, errOut)
+	}
+	if out, _, _ := run(t, home, "", "log", "--limit", "1"); strings.Count(out, "\n") != 2 {
+		t.Fatalf("limit: %q", out)
+	}
+	if out, _, _ := run(t, home, "", "log", "--connection", "crm"); out != "no logged queries\n" {
+		t.Fatalf("filter: %q", out)
+	}
+	if _, errOut, code := run(t, home, "", "log", "--since", "yesterday"); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: since must be") {
+		t.Fatalf("since: %d %q", code, errOut)
+	}
+}
+
+func TestQueryLogFlags(t *testing.T) {
+	home := t.TempDir()
+	for _, args := range [][]string{{"mcp", "--query-log-retention", "0"}, {"serve", "--query-log-retention", "soon"}} {
+		if _, errOut, code := run(t, home, "", args...); code != 1 ||
+			!strings.HasPrefix(errOut, "error[invalid]: --query-log-retention must be a positive duration such as 30d or 72h") {
+			t.Fatalf("%v: %d %q", args, code, errOut)
+		}
+	}
+}
+
+func TestWorkspaceFlag(t *testing.T) {
+	home, db := t.TempDir(), testutil.SQLiteFixture(t)
+	run(t, home, "", "workspace", "create", "team")
+	if out, errOut, code := run(t, home, "", "--workspace", "team", "conn", "add", "shop", "--engine", "sqlite", "--dsn", db); code != 0 {
+		t.Fatalf("add in team: %q %q", out, errOut)
+	}
+	if out, _, _ := run(t, home, "", "conn", "ls"); !strings.HasPrefix(out, "no connections") {
+		t.Fatalf("default workspace: %q", out)
+	}
+	if out, _, _ := run(t, home, "", "--workspace", "team", "conn", "ls"); !strings.Contains(out, "shop") {
+		t.Fatalf("team: %q", out)
+	}
+	t.Setenv("QH_WORKSPACE", "team")
+	if out, _, _ := run(t, home, "", "query", "shop", "SELECT 1 AS one"); !strings.HasPrefix(out, "one\n1\n") {
+		t.Fatalf("QH_WORKSPACE: %q", out)
+	}
+}
+
+func TestUnknownWorkspaceIsRefused(t *testing.T) {
+	home, db := t.TempDir(), testutil.SQLiteFixture(t)
+	const want = `error[unknown_source]: no workspace named "nosuch"`
+	for _, args := range [][]string{
+		{"conn", "ls"},
+		{"conn", "add", "x", "--engine", "sqlite", "--dsn", db},
+		{"log"},
+		{"key", "ls"},
+	} {
+		_, errOut, code := run(t, home, "", append([]string{"--workspace", "nosuch"}, args...)...)
+		if code != 1 || !strings.HasPrefix(errOut, want) || !strings.Contains(errOut, "qh workspace create") {
+			t.Errorf("%v: %d %q", args, code, errOut)
+		}
+	}
+	t.Setenv("QH_WORKSPACE", "nosuch")
+	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 1 || !strings.HasPrefix(errOut, want) {
+		t.Errorf("QH_WORKSPACE: %d %q", code, errOut)
+	}
+	if _, errOut, code := run(t, home, "", "mcp"); code != 1 || !strings.HasPrefix(errOut, want) {
+		t.Errorf("mcp: %d %q", code, errOut)
+	}
+	t.Setenv("QH_WORKSPACE", "")
+	if out, errOut, code := run(t, home, "", "--workspace", "nosuch", "workspace", "create", "nosuch"); code != 0 {
+		t.Errorf("workspace create: %d %q %q", code, out, errOut)
+	}
+	if out, errOut, code := run(t, home, "", "--workspace", "nosuch", "conn", "ls"); code != 0 {
+		t.Errorf("conn ls after create: %d %q %q", code, out, errOut)
+	}
+}
+
+// Retention applies even when logging is off, so old entries still age out.
+func TestNoQueryLogStillPrunes(t *testing.T) {
+	home := t.TempDir()
+	if _, errOut, code := run(t, home, "", "workspace", "ls"); code != 0 {
+		t.Fatal(errOut)
+	}
+	st, err := store.OpenSQLite(filepath.Join(home, "qh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.AppendQueryLog(ctx, &store.QueryLogEntry{WorkspaceID: "default", ConnectionName: "shop", Tool: "query",
+		Query: "SELECT 1", At: time.Now().Add(-90 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	var out, errOut bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Execute("test", []string{"--home", home, "mcp", "--no-query-log"}, pr, &out, &errOut)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		list, err := st.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: "default"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the old entry was not pruned while --no-query-log was set")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	pw.Close()
+	if code := <-done; code != 0 {
+		t.Fatalf("mcp: %d %q", code, errOut.String())
+	}
+}

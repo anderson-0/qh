@@ -138,6 +138,10 @@ func TestServeEndToEnd(t *testing.T) {
 	if code, body := call("POST", "/api/v1/connections/shop/query", k.Key, map[string]any{"query": "SELECT count(*) AS n FROM orders"}); code != 200 || !strings.Contains(body, `"rows":[["250"]]`) {
 		t.Fatalf("query: %d %s", code, body)
 	}
+	remote := exec.Command(bin, "--server", base, "--key", k.Key, "conn", "ls")
+	if out, err := remote.CombinedOutput(); err != nil || !strings.Contains(string(out), "shop") {
+		t.Fatalf("remote CLI: %v %s", err, out)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

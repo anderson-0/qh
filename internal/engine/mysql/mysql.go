@@ -29,6 +29,9 @@ func (e Engine) Name() string {
 
 func (Engine) Dialect() sqlx.Dialect { return sqlx.MySQL }
 
+// BuildDSN implements engine.DSNBuilder.
+func (Engine) BuildDSN(f engine.DSNFields) (string, error) { return engine.BuildURL("mysql", f) }
+
 func invalidDSN() error {
 	return qerr.New(qerr.Invalid, "invalid mysql connection string").
 		WithHint("Use mysql://user:password@host:3306/database or user:password@tcp(host:3306)/database; special characters in the password must be percent-encoded (@ as %40, / as %2F)")

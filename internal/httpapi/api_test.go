@@ -152,7 +152,7 @@ func TestRequestBodies(t *testing.T) {
 	e := newEnv(t, true, nil)
 	k := e.key(t, "default", auth.ScopeManage)
 	expectProblem(t, e.do(t, "POST", "/api/v1/connections", k, "{not json"), 400, "invalid", "invalid JSON body")
-	expectProblem(t, e.do(t, "POST", "/api/v1/connections", k, `{"name":"x","password":"p"}`), 400, "invalid", "invalid JSON body")
+	expectProblem(t, e.do(t, "POST", "/api/v1/connections", k, `{"name":"x","secret":"p"}`), 400, "invalid", "invalid JSON body")
 	big := `{"name":"` + strings.Repeat("x", 2<<20) + `"}`
 	expectProblem(t, e.do(t, "POST", "/api/v1/connections", k, big), 400, "invalid", "request body is larger than 1 MiB")
 }

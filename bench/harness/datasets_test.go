@@ -1,6 +1,9 @@
 package harness
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -65,5 +68,55 @@ func TestDatasets(t *testing.T) {
 				t.Fatalf("dataset fields: %+v", ds)
 			}
 		})
+	}
+}
+
+func TestUntarExtractsSQLAndStaysInside(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range map[string]string{
+		"sakila-db/sakila-schema.sql": "schema",
+		"sakila-db/readme.txt":        "not sql",
+		"../evil.sql":                 "evil",
+		"/abs-evil.sql":               "evil",
+	} {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tw.Close()
+	gz.Close()
+
+	parent := t.TempDir()
+	archive := filepath.Join(parent, "a.tar.gz")
+	if err := os.WriteFile(archive, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(parent, "out")
+	if err := untar(archive, dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "sakila-db", "sakila-schema.sql")); err != nil || string(b) != "schema" {
+		t.Fatalf("schema: %q %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sakila-db", "readme.txt")); err == nil {
+		t.Fatal("non-sql entry extracted")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "evil.sql")); err == nil {
+		t.Fatal("../evil.sql escaped the destination")
+	}
+	// Nothing may land outside dir (an absolute name stays inside it).
+	err := filepath.WalkDir(parent, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && p != archive && !strings.HasPrefix(p, dir+string(filepath.Separator)) {
+			t.Errorf("file outside destination: %s", p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

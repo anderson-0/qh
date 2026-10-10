@@ -166,15 +166,21 @@ func StartSakila(ctx context.Context) (*Dataset, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	dir := filepath.Join(CacheDir(), "sakila")
+	// Extract the verified archive afresh every run, so a stale or truncated
+	// extraction is never reused.
+	dir, err := os.MkdirTemp("", "qh-bench-sakila-")
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := untar(archive, dir); err != nil {
+		os.RemoveAll(dir)
 		return nil, nil, err
 	}
 	schema, data := filepath.Join(dir, "sakila-db", "sakila-schema.sql"), filepath.Join(dir, "sakila-db", "sakila-data.sql")
 	ctr, err := tcmysql.Run(ctx, "mysql:8.4",
 		tcmysql.WithDatabase("sakila"), tcmysql.WithUsername("bench"), tcmysql.WithPassword("bench-pw"),
 		orderedMySQLScripts(schema, data))
-	stop := func() { _ = testcontainers.TerminateContainer(ctr) }
+	stop := func() { _ = testcontainers.TerminateContainer(ctr); os.RemoveAll(dir) }
 	if err != nil {
 		stop()
 		return nil, nil, err
@@ -215,11 +221,8 @@ func orderedMySQLScripts(scripts ...string) testcontainers.CustomizeRequestOptio
 	return testcontainers.WithFiles(files...)
 }
 
-// untar extracts the .sql files of a .tar.gz into dir (skipped when present).
+// untar extracts the .sql files of a .tar.gz into dir.
 func untar(archive, dir string) error {
-	if _, err := os.Stat(filepath.Join(dir, "sakila-db", "sakila-data.sql")); err == nil {
-		return nil
-	}
 	f, err := os.Open(archive)
 	if err != nil {
 		return err

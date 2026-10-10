@@ -32,7 +32,8 @@ qh conn add local --engine sqlite --dsn ./app.db
 ```
 
 Connection strings are encrypted (AES-256-GCM) in `~/.config/qh/qh.db`; the key is `~/.config/qh/master.key`
-(or `$QH_MASTER_KEY`). Set `$QH_HOME` to use another directory.
+(or `$QH_MASTER_KEY`). `$XDG_CONFIG_HOME/qh` is used instead of `~/.config/qh` when `$XDG_CONFIG_HOME` is set;
+set `$QH_HOME` to use another directory.
 
 ## Use it from Claude Code
 

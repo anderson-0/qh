@@ -131,8 +131,10 @@ qh logs every `query` call: connection, API key, statement (up to 8 KiB), rows, 
 
 ## Rotating the master key
 
+Stop `qh serve` first.
+
 ```bash
-qh serve ...                                   # stop the server first
+printf '%s\n' "$OLD_QH_MASTER_KEY" > old.key     # the previous key
 export QH_MASTER_KEY=$(openssl rand -base64 32) # the new key
 qh masterkey rotate --old-key-file old.key --home /var/lib/qh
 ```

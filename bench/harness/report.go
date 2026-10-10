@@ -1,0 +1,221 @@
+package harness
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Report is everything one benchmark run measured.
+type Report struct {
+	Date, Model, DBHubVersion string
+	Runs                      int
+	Results                   []Result
+	ToolTokens                map[string][]int64 // server → tool-definition tokens for 1..5 connections
+	ColdSchema                map[string]time.Duration
+	LatencyP50, LatencyP95    map[string]time.Duration
+	Notes                     []string // e.g. a phase that could not run
+}
+
+// Summary aggregates the results of one dataset (or "all") and server.
+type Summary struct {
+	Dataset, Server                                         string
+	Runs, Errors, Truncations                               int
+	Accuracy                                                float64
+	AvgTotal, AvgInput, AvgOutput, AvgToolCalls, AvgWallSec float64
+}
+
+// Summarize groups results by dataset and server, plus an "all" row per server.
+func Summarize(results []Result) []Summary {
+	type key struct{ ds, srv string }
+	acc := map[key]*Summary{}
+	add := func(k key, r Result) {
+		s := acc[k]
+		if s == nil {
+			s = &Summary{Dataset: k.ds, Server: k.srv}
+			acc[k] = s
+		}
+		s.Runs++
+		if r.Correct {
+			s.Accuracy++
+		}
+		if r.Error != "" {
+			s.Errors++
+		}
+		s.Truncations += r.Truncations
+		s.AvgInput += float64(r.InputTokens)
+		s.AvgOutput += float64(r.OutputTokens)
+		s.AvgToolCalls += float64(r.ToolCalls)
+		s.AvgWallSec += float64(r.WallMS) / 1000
+	}
+	for _, r := range results {
+		add(key{r.Dataset, r.Server}, r)
+		add(key{"all", r.Server}, r)
+	}
+	var out []Summary
+	for _, s := range acc {
+		n := float64(s.Runs)
+		s.Accuracy /= n
+		s.AvgInput /= n
+		s.AvgOutput /= n
+		s.AvgToolCalls /= n
+		s.AvgWallSec /= n
+		s.AvgTotal = s.AvgInput + s.AvgOutput
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Dataset != out[j].Dataset {
+			return out[i].Dataset == "all" || (out[j].Dataset != "all" && out[i].Dataset < out[j].Dataset)
+		}
+		return out[i].Server > out[j].Server // qh before dbhub
+	})
+	return out
+}
+
+// Criterion is one success criterion of spec §1.
+type Criterion struct {
+	Name, Label, Target, Result string
+	Known, Pass                 bool
+}
+
+func overall(results []Result, server string) (Summary, bool) {
+	for _, s := range Summarize(results) {
+		if s.Dataset == "all" && s.Server == server {
+			return s, true
+		}
+	}
+	return Summary{}, false
+}
+
+// Criteria evaluates spec §1 against the report. Unmeasured criteria are
+// returned with Known false.
+func Criteria(r *Report) []Criterion {
+	qh, okQ := overall(r.Results, "qh")
+	db, okD := overall(r.Results, "dbhub")
+	both := okQ && okD && db.AvgTotal > 0
+	var cs []Criterion
+	c := Criterion{Name: "tokens", Label: "Fewer total tokens per task", Target: "≥ 40% fewer than dbhub", Result: "not measured"}
+	if both {
+		cut := 1 - qh.AvgTotal/db.AvgTotal
+		c.Known, c.Pass, c.Result = true, cut >= 0.40, fmt.Sprintf("%.0f%% fewer", cut*100)
+	}
+	cs = append(cs, c)
+	c = Criterion{Name: "accuracy", Label: "Accuracy", Target: "≥ dbhub", Result: "not measured"}
+	if both {
+		c.Known, c.Pass, c.Result = true, qh.Accuracy >= db.Accuracy, fmt.Sprintf("%.0f%% vs %.0f%%", qh.Accuracy*100, db.Accuracy*100)
+	}
+	cs = append(cs, c)
+	c = Criterion{Name: "tool calls", Label: "Tool calls per task", Target: "fewer than dbhub", Result: "not measured"}
+	if both {
+		c.Known, c.Pass, c.Result = true, qh.AvgToolCalls < db.AvgToolCalls, fmt.Sprintf("%.1f vs %.1f", qh.AvgToolCalls, db.AvgToolCalls)
+	}
+	cs = append(cs, c)
+	c = Criterion{Name: "tool definitions", Label: "qh tool definitions", Target: "≤ 800 tokens", Result: "not measured"}
+	if t := r.ToolTokens["qh"]; len(t) > 0 {
+		c.Known, c.Pass, c.Result = true, t[0] <= 800, fmt.Sprintf("%d tokens", t[0])
+	}
+	cs = append(cs, c)
+	c = Criterion{Name: "cold schema", Label: "Cold schema build, 1,000 tables", Target: "< 1 s", Result: "not measured"}
+	if d, ok := r.ColdSchema["qh"]; ok {
+		c.Known, c.Pass, c.Result = true, d < time.Second, fmt.Sprintf("%.2f s", d.Seconds())
+	}
+	return append(cs, c)
+}
+
+func mark(c Criterion) string {
+	switch {
+	case !c.Known:
+		return "—"
+	case c.Pass:
+		return "✅"
+	}
+	return "❌"
+}
+
+// Markdown renders the report.
+func (r *Report) Markdown() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# qh vs dbhub benchmark — %s\n\n", r.Date)
+	fmt.Fprintf(&b, "Model `%s` · %d run(s) per question · dbhub %s · tool output capped at %d characters for both servers.\n\n", r.Model, r.Runs, r.DBHubVersion, OutputCap)
+	b.WriteString("## Success criteria (spec §1)\n\n| Criterion | Target | Result | Pass |\n|---|---|---|---|\n")
+	for _, c := range Criteria(r) {
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", c.Label, c.Target, c.Result, mark(c))
+	}
+	b.WriteString("\n## Results by dataset\n\n| Dataset | Server | Accuracy | Avg total tokens | Avg input | Avg output | Avg tool calls | Avg wall (s) | Runs | Errors | Truncated outputs |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, s := range Summarize(r.Results) {
+		fmt.Fprintf(&b, "| %s | %s | %.0f%% | %.0f | %.0f | %.0f | %.1f | %.1f | %d | %d | %d |\n", s.Dataset, s.Server, s.Accuracy*100,
+			s.AvgTotal, s.AvgInput, s.AvgOutput, s.AvgToolCalls, s.AvgWallSec, s.Runs, s.Errors, s.Truncations)
+	}
+	if len(r.ToolTokens) > 0 {
+		b.WriteString("\n## Tool-definition tokens by number of connections\n\n| Connections | qh | dbhub |\n|---|---|---|\n")
+		for i := 0; i < 5; i++ {
+			fmt.Fprintf(&b, "| %d | %s | %s |\n", i+1, at(r.ToolTokens["qh"], i), at(r.ToolTokens["dbhub"], i))
+		}
+	}
+	if len(r.ColdSchema)+len(r.LatencyP50) > 0 {
+		b.WriteString("\n## Micro-benchmarks\n\n| | qh | dbhub |\n|---|---|---|\n")
+		fmt.Fprintf(&b, "| Cold schema, 1,000 tables (median of 3) | %s | %s |\n", dur(r.ColdSchema, "qh"), dur(r.ColdSchema, "dbhub"))
+		fmt.Fprintf(&b, "| Query latency p50 | %s | %s |\n", dur(r.LatencyP50, "qh"), dur(r.LatencyP50, "dbhub"))
+		fmt.Fprintf(&b, "| Query latency p95 | %s | %s |\n", dur(r.LatencyP95, "qh"), dur(r.LatencyP95, "dbhub"))
+	}
+	b.WriteString("\n## Per question\n\n| Question | Kind | qh correct | dbhub correct | qh avg tokens | dbhub avg tokens |\n|---|---|---|---|---|---|\n")
+	type agg struct {
+		kind   string
+		ok, n  map[string]int
+		tokens map[string]int64
+	}
+	byQ := map[string]*agg{}
+	var ids []string
+	for _, x := range r.Results {
+		a := byQ[x.Question]
+		if a == nil {
+			a = &agg{kind: x.Kind, ok: map[string]int{}, n: map[string]int{}, tokens: map[string]int64{}}
+			byQ[x.Question] = a
+			ids = append(ids, x.Question)
+		}
+		a.n[x.Server]++
+		a.tokens[x.Server] += x.InputTokens + x.OutputTokens
+		if x.Correct {
+			a.ok[x.Server]++
+		}
+	}
+	sort.Strings(ids)
+	avg := func(a *agg, s string) string {
+		if a.n[s] == 0 {
+			return "—"
+		}
+		return fmt.Sprintf("%d", a.tokens[s]/int64(a.n[s]))
+	}
+	for _, id := range ids {
+		a := byQ[id]
+		fmt.Fprintf(&b, "| %s | %s | %d/%d | %d/%d | %s | %s |\n", id, a.kind, a.ok["qh"], a.n["qh"], a.ok["dbhub"], a.n["dbhub"], avg(a, "qh"), avg(a, "dbhub"))
+	}
+	if len(r.Notes) > 0 {
+		b.WriteString("\n## Notes\n\n")
+		for _, n := range r.Notes {
+			fmt.Fprintf(&b, "- %s\n", n)
+		}
+	}
+	b.WriteString("\nMethod: tool-definition tokens are `count_tokens(noop tool + server tools) − count_tokens(noop tool)`. " +
+		"Total tokens are input (including cache reads and writes) plus output, summed over every model turn of a task.\n")
+	return b.String()
+}
+
+func at(v []int64, i int) string {
+	if i < len(v) {
+		return fmt.Sprintf("%d", v[i])
+	}
+	return "—"
+}
+
+func dur(m map[string]time.Duration, k string) string {
+	d, ok := m[k]
+	if !ok {
+		return "—"
+	}
+	if d >= time.Second {
+		return fmt.Sprintf("%.2f s", d.Seconds())
+	}
+	return fmt.Sprintf("%.1f ms", float64(d.Microseconds())/1000)
+}

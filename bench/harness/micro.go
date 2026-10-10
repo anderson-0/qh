@@ -63,7 +63,9 @@ func StartGenerated(ctx context.Context, n int) (*Dataset, func(), error) {
 // SchemaCall is the schema-discovery call measured for a server: qh's
 // schema overview, dbhub's search_objects for tables at summary detail.
 // dbhub caps search_objects at 100 results unless limit is given (1 to 1000),
-// so limit 1000 makes it list every table, as qh's overview does.
+// so limit 1000 makes it list every table. qh's overview caps itself at 200
+// tables with a pattern hint while dbhub lists all of them; the difference is
+// intentional and the report notes it.
 func SchemaCall(server, source string) (string, json.RawMessage) {
 	if server == "qh" {
 		return "schema", json.RawMessage(fmt.Sprintf(`{"source":%q}`, source))

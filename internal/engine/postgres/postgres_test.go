@@ -153,6 +153,9 @@ func TestConnectionFailed(t *testing.T) {
 		if strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "hunter22") {
 			t.Fatalf("%s: err = %q", host, err.Error())
 		}
+		if msg := err.Error(); !(strings.Contains(msg, "refused") || strings.Contains(msg, "dial")) || strings.HasSuffix(msg, ":") {
+			t.Fatalf("%s: message lacks a cause: %q", host, msg)
+		}
 	}
 }
 

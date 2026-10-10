@@ -313,8 +313,8 @@ func (c *conn) classify(ctx context.Context, err error) error {
 		case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
 			return qerr.Wrap(qerr.ConnectionFailed, "timed out connecting to the database", err)
 		}
-		first, _, _ := strings.Cut(err.Error(), "\n")
-		return qerr.Wrap(qerr.ConnectionFailed, "cannot reach the database: "+first, err)
+		// qerr collapses the multi-line dial details onto one line.
+		return qerr.Wrap(qerr.ConnectionFailed, "cannot reach the database: "+err.Error(), err)
 	}
 	timeout := qerr.Wrap(qerr.Timeout, "query exceeded the connection timeout", err).
 		WithHint("Add WHERE/LIMIT or narrow the range")

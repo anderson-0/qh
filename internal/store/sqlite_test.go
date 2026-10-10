@@ -160,3 +160,30 @@ func TestConcurrentFirstOpen(t *testing.T) {
 		t.Fatalf("default workspace rows = %d, %v", rows, err)
 	}
 }
+
+func TestStaleUpdateDoesNotHitRecreatedConnection(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	old := sample("shop")
+	_ = s.CreateConnection(ctx, old)
+	stale := *old
+	if err := s.DeleteConnection(ctx, DefaultWorkspace, "shop"); err != nil {
+		t.Fatal(err)
+	}
+	fresh := sample("shop")
+	fresh.MaxRows = 77
+	if err := s.CreateConnection(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	stale.MaxRows = 999
+	if err := s.UpdateConnection(ctx, &stale); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale update err = %v", err)
+	}
+	got, err := s.GetConnection(ctx, DefaultWorkspace, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != fresh.ID || got.MaxRows != 77 || got.Version != 1 {
+		t.Fatalf("recreated row changed: id %s max %d v%d", got.ID, got.MaxRows, got.Version)
+	}
+}

@@ -190,10 +190,10 @@ func (s *SQLite) UpdateConnection(ctx context.Context, c *Connection) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE connections SET engine = ?, secret = ?, secret_key_id = ?,
 		host = ?, port = ?, "database" = ?, username = ?, description = ?, mode = ?, max_rows = ?,
 		timeout_ms = ?, pool_size = ?, allowed_namespaces = ?, version = version + 1, updated_at = ?
-		WHERE workspace_id = ? AND name = ? AND version = ?`,
+		WHERE workspace_id = ? AND name = ? AND id = ? AND version = ?`,
 		c.Engine, c.Secret, c.SecretKeyID, c.Host, c.Port, c.Database, c.Username, c.Description,
 		c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns), now.Format(time.RFC3339Nano),
-		c.WorkspaceID, c.Name, c.Version)
+		c.WorkspaceID, c.Name, c.ID, c.Version)
 	if err != nil {
 		return err
 	}

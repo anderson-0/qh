@@ -71,3 +71,30 @@ func TestHugeValueIsBounded(t *testing.T) {
 		t.Fatalf("output is %d bytes", len(got))
 	}
 }
+
+// A cell can hold any text; it must never add a column or a line to the TSV.
+func FuzzResult(f *testing.F) {
+	for _, s := range []string{"plain", "a\tb", "a\nb", "a\r\nb", `back\slash`, "\t\n\r\\", strings.Repeat("x\ty\n", 300), "é🚀\x00\xff"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		r := &engine.Result{
+			Columns:      []engine.Column{{Name: s}},
+			Rows:         [][]engine.Value{{txt(s)}, {txt("ok")}},
+			RowsAffected: -1,
+		}
+		out := Result(r)
+		if !strings.HasSuffix(out, "\n") {
+			t.Fatalf("output does not end with a newline: %q", out)
+		}
+		lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+		if len(lines) != 1+len(r.Rows)+1 { // header + rows + footer
+			t.Fatalf("%d lines for %q: %q", len(lines), s, out)
+		}
+		for _, l := range lines[:len(lines)-1] {
+			if strings.ContainsAny(l, "\t\r") {
+				t.Fatalf("raw tab or CR in a single-column line %q (input %q)", l, s)
+			}
+		}
+	})
+}

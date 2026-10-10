@@ -90,9 +90,7 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			defer a.Close()
 			ctx := cmd.Context()
 			a.pools.Start(ctx)
-			if !lf.off {
-				pruneQueryLog(ctx, a.svc, retention)
-			}
+			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
 			ws, _ := workspaceOf(cmd)
 			if err := requireWorkspace(ctx, a, ws); err != nil {
 				return err

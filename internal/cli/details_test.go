@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/testutil"
 )
 
@@ -123,5 +128,47 @@ func TestUnknownWorkspaceIsRefused(t *testing.T) {
 	}
 	if out, errOut, code := run(t, home, "", "--workspace", "nosuch", "conn", "ls"); code != 0 {
 		t.Errorf("conn ls after create: %d %q %q", code, out, errOut)
+	}
+}
+
+// Retention applies even when logging is off, so old entries still age out.
+func TestNoQueryLogStillPrunes(t *testing.T) {
+	home := t.TempDir()
+	if _, errOut, code := run(t, home, "", "workspace", "ls"); code != 0 {
+		t.Fatal(errOut)
+	}
+	st, err := store.OpenSQLite(filepath.Join(home, "qh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.AppendQueryLog(ctx, &store.QueryLogEntry{WorkspaceID: "default", ConnectionName: "shop", Tool: "query",
+		Query: "SELECT 1", At: time.Now().Add(-90 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	var out, errOut bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Execute("test", []string{"--home", home, "mcp", "--no-query-log"}, pr, &out, &errOut)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		list, err := st.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: "default"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the old entry was not pruned while --no-query-log was set")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	pw.Close()
+	if code := <-done; code != 0 {
+		t.Fatalf("mcp: %d %q", code, errOut.String())
 	}
 }

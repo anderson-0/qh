@@ -30,7 +30,7 @@ type queryLogFlags struct {
 }
 
 func (f *queryLogFlags) register(cmd *cobra.Command) {
-	cmd.Flags().BoolVar(&f.off, "no-query-log", false, "do not log query calls")
+	cmd.Flags().BoolVar(&f.off, "no-query-log", false, "do not log query calls (existing entries still expire)")
 	cmd.Flags().StringVar(&f.keep, "query-log-retention", "30d", "how long to keep logged query calls, e.g. 30d or 72h")
 }
 
@@ -135,9 +135,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 			srv := &http.Server{Handler: httpapi.New(cfg), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 			ctx := cmd.Context()
 			a.pools.Start(ctx)
-			if !lf.off {
-				pruneQueryLog(ctx, a.svc, retention)
-			}
+			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
 			done := make(chan error, 1)
 			go func() { done <- srv.Serve(ln) }()
 			select {

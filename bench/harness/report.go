@@ -209,7 +209,7 @@ func (r *Report) Markdown() string {
 			fmt.Fprintf(&b, "- %s\n", n)
 		}
 	}
-	b.WriteString("\nMethod: tool-definition tokens are `count_tokens(noop tool + server tools) − count_tokens(noop tool)`. " +
+	b.WriteString("\nMethod: tool-definition tokens are `count_tokens(noop tool + server tools, server instructions as the system prompt) − count_tokens(noop tool)`, so they include the instructions the server sends at initialization. " +
 		"Total tokens are input (including cache reads and writes) plus output, summed over every model turn of a task.\n")
 	return b.String()
 }

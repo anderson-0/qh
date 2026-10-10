@@ -143,7 +143,11 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 	start := time.Now()
 	defer func() { r.WallMS = time.Since(start).Milliseconds() }()
 	tools := append(ToolDefs(srv.Tools()), SubmitTool)
-	reply, err := m.Start(ctx, SystemPrompt, PromptFor(q), tools)
+	system := SystemPrompt
+	if in := srv.Instructions(); in != "" {
+		system += "\n\nServer instructions:\n" + in
+	}
+	reply, err := m.Start(ctx, system, PromptFor(q), tools)
 	for {
 		if err != nil {
 			r.Error, r.Aborted = "model: "+err.Error(), IsTransient(err)

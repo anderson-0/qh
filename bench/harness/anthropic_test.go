@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -28,7 +29,7 @@ func TestToolDefinitionBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srv.Close()
-	n, err := CountToolTokens(ctx, key, DefaultModel, ToolDefs(srv.Tools()))
+	n, err := CountToolTokens(ctx, key, DefaultModel, ToolDefs(srv.Tools()), srv.Instructions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,5 +103,31 @@ func TestAnthropicRequestIsWellFormed(t *testing.T) {
 	s := got.Tools[1]
 	if s.Name != "submit_answer" || s.InputSchema.Properties["rows"] == nil || len(s.InputSchema.Required) != 1 || s.InputSchema.Required[0] != "rows" {
 		t.Fatalf("submit tool: %s", b)
+	}
+}
+
+// TestCountParamsPutInstructionsInSystem checks, offline, that the measured
+// count_tokens call carries the server instructions as the system prompt and
+// the baseline does not.
+func TestCountParamsPutInstructionsInSystem(t *testing.T) {
+	system := func(instructions string) string {
+		b, err := json.Marshal(countParams(DefaultModel, []ToolDef{noopTool, SubmitTool}, instructions))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			System json.RawMessage `json:"system"`
+			Tools  []struct{ Name string }
+		}
+		if err := json.Unmarshal(b, &got); err != nil || len(got.Tools) != 2 {
+			t.Fatalf("%v: %s", err, b)
+		}
+		return string(got.System)
+	}
+	if got := system(""); got != "" {
+		t.Fatalf("system without instructions: %s", got)
+	}
+	if got := system("Use sources."); !strings.Contains(got, "Use sources.") {
+		t.Fatalf("system with instructions: %s", got)
 	}
 }

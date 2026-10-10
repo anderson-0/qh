@@ -33,7 +33,7 @@ func fakeDeps(failDBHub bool) Deps {
 			}
 			return &namedServer{fakeServer: fakeServer{out: "ok"}, name: server}, nil
 		},
-		CountTokens: func(context.Context, []ToolDef) (int64, error) { return 123, nil },
+		CountTokens: func(context.Context, []ToolDef, string) (int64, error) { return 123, nil },
 	}
 }
 

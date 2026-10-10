@@ -30,6 +30,9 @@ func ConnFor(ds *Dataset) Conn {
 type Server interface {
 	Name() string
 	Tools() []*mcp.Tool
+	// Instructions is the text the server sent in its initialize result; an
+	// MCP client puts it in the model's system prompt.
+	Instructions() string
 	// Call runs a tool. Protocol errors (an unknown tool, bad arguments) come
 	// back as error text, the way an agent client shows them to the model.
 	Call(ctx context.Context, tool string, args json.RawMessage) (text string, isError bool)
@@ -40,6 +43,7 @@ type mcpServer struct {
 	name    string
 	session *mcp.ClientSession
 	tools   []*mcp.Tool
+	instr   string
 	cleanup func()
 }
 
@@ -62,11 +66,16 @@ func connect(ctx context.Context, name string, cmd *exec.Cmd, cleanup func()) (*
 		}
 		tools = append(tools, tl)
 	}
-	return &mcpServer{name: name, session: session, tools: tools, cleanup: cleanup}, nil
+	var instr string
+	if res := session.InitializeResult(); res != nil {
+		instr = res.Instructions
+	}
+	return &mcpServer{name: name, session: session, tools: tools, instr: instr, cleanup: cleanup}, nil
 }
 
-func (s *mcpServer) Name() string       { return s.name }
-func (s *mcpServer) Tools() []*mcp.Tool { return s.tools }
+func (s *mcpServer) Name() string         { return s.name }
+func (s *mcpServer) Tools() []*mcp.Tool   { return s.tools }
+func (s *mcpServer) Instructions() string { return s.instr }
 
 func (s *mcpServer) Call(ctx context.Context, tool string, args json.RawMessage) (string, bool) {
 	var a map[string]any

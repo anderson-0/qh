@@ -26,7 +26,7 @@ type Deps struct {
 	Models       ModelFactory
 	StartServer  func(ctx context.Context, server string, conns []Conn) (Server, error)
 	StartDataset func(ctx context.Context, name string) (*Dataset, func(), error)
-	CountTokens  func(ctx context.Context, tools []ToolDef) (int64, error)
+	CountTokens  func(ctx context.Context, tools []ToolDef, instructions string) (int64, error)
 }
 
 // DefaultDeps wires the real model, servers and datasets.
@@ -40,8 +40,8 @@ func DefaultDeps(cfg Config, qhBin string) Deps {
 			}
 			return StartDBHub(ctx, cfg.DBHubVersion, conns)
 		},
-		CountTokens: func(ctx context.Context, tools []ToolDef) (int64, error) {
-			return CountToolTokens(ctx, cfg.APIKey, cfg.Model, tools)
+		CountTokens: func(ctx context.Context, tools []ToolDef, instructions string) (int64, error) {
+			return CountToolTokens(ctx, cfg.APIKey, cfg.Model, tools, instructions)
 		},
 	}
 }
@@ -195,7 +195,7 @@ func toolTokens(ctx context.Context, cfg Config, deps Deps, rep *Report) error {
 				rep.Notes = append(rep.Notes, fmt.Sprintf("tool tokens, %s with %d connections: %v", server, k, err))
 				break
 			}
-			n, err := deps.CountTokens(ctx, ToolDefs(srv.Tools()))
+			n, err := deps.CountTokens(ctx, ToolDefs(srv.Tools()), srv.Instructions())
 			srv.Close()
 			if err != nil {
 				return err

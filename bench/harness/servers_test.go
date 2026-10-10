@@ -43,6 +43,9 @@ func TestQHServer(t *testing.T) {
 	if strings.Join(names, ",") != "query,schema,sources" || srv.Name() != "qh" {
 		t.Fatalf("tools %v", names)
 	}
+	if !strings.Contains(srv.Instructions(), "Use sources to pick a connection") {
+		t.Fatalf("instructions %q", srv.Instructions())
+	}
 	out, isErr := srv.Call(ctx, "query", json.RawMessage(`{"source":"chinook","query":"SELECT count(*) AS n FROM Track"}`))
 	if isErr || !strings.HasPrefix(out, "n\n3503\n") {
 		t.Fatalf("query: %q %v", out, isErr)

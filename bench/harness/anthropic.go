@@ -116,30 +116,42 @@ func (m *anthropicModel) send(ctx context.Context) (*Reply, error) {
 // as count(noop + tools) - count(noop).
 var noopTool = ToolDef{Name: "noop", Description: "Does nothing.", Schema: map[string]any{"type": "object", "properties": map[string]any{}}}
 
-// CountToolTokens measures what the tool definitions add to every request.
-func CountToolTokens(ctx context.Context, apiKey, model string, tools []ToolDef) (int64, error) {
+// countParams is a count_tokens request for defs. A non-empty system
+// (a server's initialize instructions) goes into the system prompt.
+func countParams(model string, defs []ToolDef, system string) anthropic.MessageCountTokensParams {
+	var params []anthropic.MessageCountTokensToolUnionParam
+	for _, t := range defs {
+		p := toolParam(t)
+		params = append(params, anthropic.MessageCountTokensToolUnionParam{OfTool: &p})
+	}
+	p := anthropic.MessageCountTokensParams{
+		Model:    anthropic.Model(model),
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+		Tools:    params,
+	}
+	if system != "" {
+		p.System = anthropic.MessageCountTokensParamsSystemUnion{OfString: anthropic.String(system)}
+	}
+	return p
+}
+
+// CountToolTokens measures what the tool definitions and the server's
+// instructions add to every request. The instructions go in the system prompt
+// of the measured call only, so they are part of the difference.
+func CountToolTokens(ctx context.Context, apiKey, model string, tools []ToolDef, instructions string) (int64, error) {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6))
-	count := func(defs []ToolDef) (int64, error) {
-		var params []anthropic.MessageCountTokensToolUnionParam
-		for _, t := range defs {
-			p := toolParam(t)
-			params = append(params, anthropic.MessageCountTokensToolUnionParam{OfTool: &p})
-		}
-		res, err := client.Messages.CountTokens(ctx, anthropic.MessageCountTokensParams{
-			Model:    anthropic.Model(model),
-			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
-			Tools:    params,
-		})
+	count := func(defs []ToolDef, system string) (int64, error) {
+		res, err := client.Messages.CountTokens(ctx, countParams(model, defs, system))
 		if err != nil {
 			return 0, err
 		}
 		return res.InputTokens, nil
 	}
-	base, err := count([]ToolDef{noopTool})
+	base, err := count([]ToolDef{noopTool}, "")
 	if err != nil {
 		return 0, err
 	}
-	with, err := count(append([]ToolDef{noopTool}, tools...))
+	with, err := count(append([]ToolDef{noopTool}, tools...), instructions)
 	if err != nil {
 		return 0, err
 	}

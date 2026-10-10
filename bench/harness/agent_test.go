@@ -18,10 +18,13 @@ import (
 
 // fakeServer answers every call with out (or errOut when isErr).
 type fakeServer struct {
-	out   string
-	isErr bool
-	calls int
+	out          string
+	isErr        bool
+	calls        int
+	instructions string
 }
+
+func (f *fakeServer) Instructions() string { return f.instructions }
 
 func (f *fakeServer) Name() string { return "fake" }
 func (f *fakeServer) Tools() []*mcp.Tool {
@@ -38,6 +41,7 @@ type script struct {
 	replies []*Reply
 	n       int
 	tools   []ToolDef
+	system  string
 	sent    [][]ToolResult
 }
 
@@ -48,8 +52,8 @@ func (s *script) next() (*Reply, error) {
 	s.n++
 	return s.replies[s.n-1], nil
 }
-func (s *script) Start(_ context.Context, _, _ string, tools []ToolDef) (*Reply, error) {
-	s.tools = tools
+func (s *script) Start(_ context.Context, system, _ string, tools []ToolDef) (*Reply, error) {
+	s.tools, s.system = tools, system
 	return s.next()
 }
 func (s *script) Continue(_ context.Context, r []ToolResult) (*Reply, error) {
@@ -266,5 +270,19 @@ func TestRunReplacesEmptyToolOutput(t *testing.T) {
 	Run(context.Background(), s, &fakeServer{out: ""}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 5})
 	if got := s.sent[0][0].Content; got != "(no output)" {
 		t.Fatalf("content %q", got)
+	}
+}
+
+func TestRunAppendsServerInstructionsToTheSystemPrompt(t *testing.T) {
+	reply := func() []*Reply { return []*Reply{{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}}} }
+	s := &script{replies: reply()}
+	Run(context.Background(), s, &fakeServer{instructions: "Use sources first."}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 5})
+	if s.system != SystemPrompt+"\n\nServer instructions:\nUse sources first." {
+		t.Fatalf("system %q", s.system)
+	}
+	s = &script{replies: reply()}
+	Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 5})
+	if s.system != SystemPrompt {
+		t.Fatalf("system %q", s.system)
 	}
 }

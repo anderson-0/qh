@@ -100,3 +100,32 @@ func TestDialSkipsDeniedAddressesOfAName(t *testing.T) {
 		t.Fatal("dialled a denied address") // … so neither resolved address may be dialled
 	}
 }
+
+// IPv4-mapped ranges (::ffff:a.b.c.d/n) apply to the IPv4 addresses they
+// map, since Allowed compares unmapped addresses.
+func TestIPv4MappedRanges(t *testing.T) {
+	deny := mustPolicy(t, nil, []string{"::ffff:10.0.0.0/104"})
+	for _, ip := range []string{"10.1.2.3", "::ffff:10.1.2.3"} {
+		if deny.Allowed(netip.MustParseAddr(ip)) {
+			t.Errorf("mapped deny range does not cover %s", ip)
+		}
+	}
+	if !deny.Allowed(netip.MustParseAddr("11.0.0.1")) {
+		t.Error("mapped deny range is too wide")
+	}
+	allow := mustPolicy(t, []string{"::ffff:127.0.0.1/128"}, nil)
+	if !allow.Allowed(netip.MustParseAddr("127.0.0.1")) || allow.Allowed(netip.MustParseAddr("127.0.0.2")) {
+		t.Error("mapped allow range does not apply to its IPv4 address")
+	}
+	for _, cidr := range []string{"::ffff:0:0/95", "::ffff:10.0.0.0/64"} {
+		if _, err := New(nil, []string{cidr}); err == nil || !strings.HasPrefix(err.Error(), "error[invalid]: invalid CIDR \""+cidr+"\"") {
+			t.Errorf("%s: %v", cidr, err)
+		}
+	}
+}
+
+func TestAllowedRefusesInvalidAddress(t *testing.T) {
+	if mustPolicy(t, nil, nil).Allowed(netip.Addr{}) {
+		t.Fatal("the zero Addr is allowed")
+	}
+}

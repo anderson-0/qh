@@ -42,6 +42,15 @@ func parse(list []string) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, qerr.New(qerr.Invalid, fmt.Sprintf("invalid CIDR %q", s))
 		}
+		// Allowed compares unmapped addresses, so an IPv4-mapped range
+		// (::ffff:10.0.0.0/104) must become the IPv4 range it maps.
+		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return nil, qerr.New(qerr.Invalid, fmt.Sprintf("invalid CIDR %q", s)).
+					WithHint("An IPv4-mapped range needs a prefix length of at least 96; write the IPv4 range instead")
+			}
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+		}
 		out = append(out, p.Masked())
 	}
 	return out, nil
@@ -66,6 +75,9 @@ func New(allow, deny []string) (*Policy, error) {
 func (p *Policy) Allowed(ip netip.Addr) bool {
 	// Drop the IPv6 zone (fe80::1%en0): netip.Prefix.Contains never matches a
 	// zoned address, so it would otherwise slip past every range.
+	if !ip.IsValid() {
+		return false
+	}
 	ip = ip.Unmap().WithZone("")
 	for _, r := range p.allow {
 		if r.Contains(ip) {

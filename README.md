@@ -49,10 +49,12 @@ Connections you add or edit with `qh conn` while the server runs are used on the
 
 ## Read-only safety
 
-On read-only connections every query runs in a read-only transaction (Postgres) or on a file opened read-only
-(SQLite), with statement checks on top for clear errors. Read-only transactions cannot stop everything: a
-Postgres extension such as `dblink` or `postgres_fdw` can open a second connection that is not read-only. Give
-qh a database user that can only read:
+On read-only connections every query runs in a read-only transaction (Postgres, MySQL/MariaDB) or on a file opened
+read-only (SQLite), and qh also rejects statements that would write before they reach the database. Read-only
+transactions cannot stop everything. In Postgres, an extension such as `dblink` or `postgres_fdw` can open a
+second connection that is not read-only. In MySQL/MariaDB, a read-only transaction does not limit server-side
+file access, so don't grant `FILE` (`LOAD_FILE`, `SELECT ... INTO OUTFILE`). Give qh a database user that can
+only read:
 
 ```sql
 CREATE ROLE qh_reader LOGIN PASSWORD 'change-me';
@@ -74,7 +76,7 @@ Don't grant the `FILE` privilege: with it, `SELECT LOAD_FILE(...)` reads files o
 ## Development
 
 ```bash
-make test        # needs Docker for the Postgres tests
+make test        # needs Docker for the Postgres and MySQL/MariaDB tests
 make test-short  # skips Docker tests
 make build       # static binary in bin/qh
 ```

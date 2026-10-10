@@ -101,15 +101,30 @@ func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine
 	return c.run(ctx, q, o, access, readOnly)
 }
 
+// Explain returns the plan for q. EXPLAIN does not execute the statement, but
+// MySQL checks write permission (including read-only transactions) as if it
+// did, so a statement that writes is explained on a read-write connection in
+// a transaction that is always rolled back, and the connection is discarded.
 func (c *conn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
-	if _, err := sqlx.Classify(q, sqlx.MySQL); err != nil {
+	access, err := sqlx.Classify(q, sqlx.MySQL)
+	if err != nil {
 		return nil, err
 	}
 	stmt := "EXPLAIN FORMAT=TREE " + q
 	if c.flavor == flavorMariaDB {
 		stmt = "EXPLAIN " + q
 	}
-	r, err := c.run(ctx, stmt, engine.QueryOpts{MaxRows: 500, Timeout: o.Timeout}, sqlx.Read, true)
+	qo := engine.QueryOpts{MaxRows: 500, Timeout: o.Timeout}
+	var r *engine.Result
+	switch {
+	case access == sqlx.Read:
+		r, err = c.run(ctx, stmt, qo, sqlx.Read, true)
+	case o.ReadOnly || c.readOnly:
+		return nil, qerr.New(qerr.Invalid, "EXPLAIN of a statement that writes needs a read-write connection on MySQL/MariaDB").
+			WithHint("Use a read-write connection, or explain a SELECT")
+	default:
+		r, err = c.exec(ctx, stmt, qo, access, false, false)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +194,12 @@ func (c *conn) finish(sc *sql.Conn, commit, rw bool) error {
 }
 
 func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly bool) (*engine.Result, error) {
+	return c.exec(ctx, q, o, access, readOnly, true)
+}
+
+// exec is run with a choice of how the transaction ends: commit false always
+// rolls back (used to explain a write without applying anything).
+func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly, commit bool) (*engine.Result, error) {
 	start := time.Now()
 	timeout := o.Timeout
 	if timeout <= 0 {
@@ -208,6 +229,18 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sql
 		c.finish(sc, false, !readOnly)
 		return nil, classify(ctx, err)
 	}
+	// Statements on a read-write connection can leave session state that the
+	// reset cannot clear (CREATE TEMPORARY TABLE, HANDLER ... OPEN, CALL
+	// changing sql_mode, LOCK INSTANCE FOR BACKUP), even when they fail
+	// part-way. Never pool the connection after one.
+	dirty := !readOnly && access != sqlx.Read
+	fail := func(err error) (*engine.Result, error) {
+		c.finish(sc, false, !readOnly)
+		if dirty {
+			discard(sc)
+		}
+		return nil, classify(ctx, err)
+	}
 	qctx, qcancel := context.WithCancel(ctx)
 	defer qcancel()
 	res, killed, err := collect(qctx, qcancel, sc, q, limit, access == sqlx.Read)
@@ -219,23 +252,20 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sql
 		return res, nil
 	}
 	if err != nil {
-		c.finish(sc, false, !readOnly)
-		return nil, classify(ctx, err)
+		return fail(err)
 	}
 	if len(res.Columns) == 0 {
 		if err := sc.QueryRowContext(ctx, "SELECT ROW_COUNT()").Scan(&res.RowsAffected); err != nil {
-			c.finish(sc, false, !readOnly)
-			return nil, classify(ctx, err)
+			return fail(err)
 		}
 	}
-	if err := c.finish(sc, true, !readOnly); err != nil {
+	if err := c.finish(sc, commit, !readOnly); err != nil {
+		if dirty {
+			discard(sc)
+		}
 		return nil, classify(ctx, err)
 	}
-	if !readOnly && access != sqlx.Read {
-		// Statements on a read-write connection can leave session state that
-		// the reset cannot clear (CREATE TEMPORARY TABLE, HANDLER ... OPEN,
-		// CALL changing sql_mode, LOCK INSTANCE FOR BACKUP). Never pool the
-		// connection after one.
+	if dirty {
 		discard(sc)
 	}
 	res.Duration = time.Since(start)

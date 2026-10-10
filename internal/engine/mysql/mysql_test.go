@@ -268,3 +268,65 @@ func TestReadWriteConnectionDoesNotKeepTemporaryTables(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestFailedWriteDoesNotPoolDirtyConnection(t *testing.T) {
+	dsn := startDB(t, "mysql:8.4")
+	_, rw := specs(dsn)
+	rw.PoolSize = 1
+	c := openConn(t, rw)
+	ctx := context.Background()
+	opts := engine.QueryOpts{MaxRows: 10, Timeout: 5 * time.Second}
+	// A compound statement contains semicolons, which Query refuses, so the
+	// procedure is created through a plain connection.
+	admin, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	if _, err := admin.ExecContext(ctx, `CREATE PROCEDURE p_fail() BEGIN
+		CREATE TEMPORARY TABLE leak_t (x int);
+		SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'boom';
+	END`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Query(ctx, "CALL p_fail()", opts)
+	if err == nil || qerr.From(err).Category != qerr.QueryError || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("CALL p_fail(): %v", err)
+	}
+	_, err = c.Query(ctx, "SELECT * FROM leak_t", opts)
+	if err == nil || qerr.From(err).UnknownTable != "leak_t" {
+		t.Fatalf("temporary table survived a failed statement: %v", err)
+	}
+}
+
+func TestExplainOfWrite(t *testing.T) {
+	ro, rw := specs(startDB(t, "mysql:8.4"))
+	rw.PoolSize = 1
+	rwc := openConn(t, rw)
+	roc := openConn(t, ro)
+	ctx := context.Background()
+	opts := engine.QueryOpts{MaxRows: 10, Timeout: 5 * time.Second}
+	const upd = "UPDATE orders SET note = 'x' WHERE id = 1"
+
+	r, err := rwc.Explain(ctx, upd, opts)
+	if err != nil || len(r.Rows) == 0 {
+		t.Fatalf("rw explain: %+v %v", r, err)
+	}
+	r, err = rwc.Query(ctx, "SELECT COUNT(*) FROM orders WHERE note = 'x'", opts)
+	if err != nil || r.Rows[0][0].Text != "0" {
+		t.Fatalf("EXPLAIN changed data: %+v %v", r, err)
+	}
+	// The connection is usable afterwards.
+	if _, err := rwc.Explain(ctx, "SELECT * FROM orders", opts); err != nil {
+		t.Fatalf("read explain after write explain: %v", err)
+	}
+
+	_, err = roc.Explain(ctx, upd, opts)
+	if err == nil || qerr.From(err).Category != qerr.Invalid || !strings.Contains(err.Error(), "needs a read-write connection") {
+		t.Fatalf("ro explain: %v", err)
+	}
+	_, err = rwc.Explain(ctx, upd, engine.QueryOpts{MaxRows: 10, ReadOnly: true, Timeout: 5 * time.Second})
+	if err == nil || qerr.From(err).Category != qerr.Invalid {
+		t.Fatalf("per-call read-only explain on rw conn: %v", err)
+	}
+}

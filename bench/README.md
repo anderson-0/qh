@@ -63,6 +63,8 @@ The comparison tolerates a relative 1e-6 on numbers: `|a − b| ≤ 1e-6 × max(
 - **Aborted** runs did not really happen, so they are left out of every figure: the server failed to start, or the model API failed in a transient way (429, 5xx or 529 after the SDK's retries, a network error, an interrupt).
 - **Failed** runs count against their server, as wrong answers with an error: the model gave no answer, hit the turn limit, the token budget, the 10-minute run timeout or `max_tokens`, refused, or the API rejected the request (for example 400 "prompt is too long").
 
+The success criteria on tokens, accuracy and tool calls use only the (dataset, question, run) triples that both servers completed, and the report says how many that is. A server that lost a run to an outage therefore never flatters or penalises the other. The by-dataset table still covers every non-aborted run of each server.
+
 ## What this does not cover
 
 Spec §1's criterion that a new connection is queryable without a restart is covered by qh's own integration tests, not by this benchmark.

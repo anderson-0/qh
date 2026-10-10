@@ -87,36 +87,85 @@ type Criterion struct {
 	Known, Pass                 bool
 }
 
-func overall(results []Result, server string) (Summary, bool) {
-	for _, s := range Summarize(results) {
-		if s.Dataset == "all" && s.Server == server {
-			return s, true
+// pairedRuns returns the (dataset, question, run) triples that have a
+// non-aborted result for both qh and dbhub, as parallel slices, and how many
+// non-aborted runs each server has in all.
+func pairedRuns(results []Result) (qh, db []Result, qhAll, dbAll int) {
+	type key struct {
+		ds, q string
+		run   int
+	}
+	byQH, byDB := map[key]Result{}, map[key]Result{}
+	var order []key
+	for _, r := range results {
+		if r.Aborted {
+			continue
+		}
+		k := key{r.Dataset, r.Question, r.Run}
+		switch r.Server {
+		case "qh":
+			qhAll++
+			if _, dup := byQH[k]; !dup {
+				order = append(order, k)
+			}
+			byQH[k] = r
+		case "dbhub":
+			dbAll++
+			byDB[k] = r
 		}
 	}
-	return Summary{}, false
+	for _, k := range order {
+		if d, ok := byDB[k]; ok {
+			qh, db = append(qh, byQH[k]), append(db, d)
+		}
+	}
+	return qh, db, qhAll, dbAll
 }
 
-// Criteria evaluates spec §1 against the report. Unmeasured criteria are
+// pairAvg is the mean of the per-run figures of rs.
+type pairAvg struct{ total, calls, accuracy float64 }
+
+func averageOf(rs []Result) pairAvg {
+	var a pairAvg
+	for _, r := range rs {
+		a.total += float64(r.InputTokens + r.OutputTokens)
+		a.calls += float64(r.ToolCalls)
+		if r.Correct {
+			a.accuracy++
+		}
+	}
+	n := float64(len(rs))
+	return pairAvg{a.total / n, a.calls / n, a.accuracy / n}
+}
+
+// Criteria evaluates spec §1 against the report. The token, accuracy and
+// tool-call criteria compare only the runs both servers completed, so a run
+// one server lost never tilts the comparison. Unmeasured criteria are
 // returned with Known false.
 func Criteria(r *Report) []Criterion {
-	qh, okQ := overall(r.Results, "qh")
-	db, okD := overall(r.Results, "dbhub")
-	both := okQ && okD && qh.Runs > 0 && db.Runs > 0 && db.AvgTotal > 0
+	pq, pd, _, _ := pairedRuns(r.Results)
+	var qh, db pairAvg
+	both := len(pq) > 0
+	if both {
+		qh, db = averageOf(pq), averageOf(pd)
+		both = db.total > 0
+	}
+	paired := fmt.Sprintf(" (%d paired runs)", len(pq))
 	var cs []Criterion
 	c := Criterion{Name: "tokens", Label: "Fewer total tokens per task", Target: "≥ 40% fewer than dbhub", Result: "not measured"}
 	if both {
-		cut := 1 - qh.AvgTotal/db.AvgTotal
-		c.Known, c.Pass, c.Result = true, cut >= 0.40, fmt.Sprintf("%.1f%% fewer", cut*100)
+		cut := 1 - qh.total/db.total
+		c.Known, c.Pass, c.Result = true, cut >= 0.40, fmt.Sprintf("%.1f%% fewer", cut*100)+paired
 	}
 	cs = append(cs, c)
 	c = Criterion{Name: "accuracy", Label: "Accuracy", Target: "≥ dbhub", Result: "not measured"}
 	if both {
-		c.Known, c.Pass, c.Result = true, qh.Accuracy >= db.Accuracy, fmt.Sprintf("%.1f%% vs %.1f%%", qh.Accuracy*100, db.Accuracy*100)
+		c.Known, c.Pass, c.Result = true, qh.accuracy >= db.accuracy, fmt.Sprintf("%.1f%% vs %.1f%%", qh.accuracy*100, db.accuracy*100)+paired
 	}
 	cs = append(cs, c)
 	c = Criterion{Name: "tool calls", Label: "Tool calls per task", Target: "fewer than dbhub", Result: "not measured"}
 	if both {
-		c.Known, c.Pass, c.Result = true, qh.AvgToolCalls < db.AvgToolCalls, fmt.Sprintf("%.1f vs %.1f", qh.AvgToolCalls, db.AvgToolCalls)
+		c.Known, c.Pass, c.Result = true, qh.calls < db.calls, fmt.Sprintf("%.1f vs %.1f", qh.calls, db.calls)+paired
 	}
 	cs = append(cs, c)
 	c = Criterion{Name: "tool definitions", Label: "qh tool definitions", Target: "≤ 800 tokens", Result: "not measured"}
@@ -154,6 +203,9 @@ func (r *Report) Markdown() string {
 	for _, c := range Criteria(r) {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", c.Label, c.Target, c.Result, mark(c))
 	}
+	if pq, _, qhAll, dbAll := pairedRuns(r.Results); len(pq) < qhAll || len(pq) < dbAll {
+		fmt.Fprintf(&b, "\nCriteria use the %d runs both servers completed; %d qh and %d dbhub runs without a counterpart are excluded.\n", len(pq), qhAll-len(pq), dbAll-len(pq))
+	}
 	b.WriteString("\n## Results by dataset\n\n| Dataset | Server | Accuracy | Avg total tokens | Avg input | Avg output | Avg tool calls | Avg wall (s) | Runs | Aborted | Errors | Truncated outputs |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range Summarize(r.Results) {
 		fmt.Fprintf(&b, "| %s | %s | %.0f%% | %.0f | %.0f | %.0f | %.1f | %.1f | %d | %d | %d | %d |\n", s.Dataset, s.Server, s.Accuracy*100,
@@ -180,6 +232,9 @@ func (r *Report) Markdown() string {
 	byQ := map[string]*agg{}
 	var ids []string
 	for _, x := range r.Results {
+		if x.Aborted {
+			continue
+		}
 		a := byQ[x.Question]
 		if a == nil {
 			a = &agg{kind: x.Kind, ok: map[string]int{}, n: map[string]int{}, tokens: map[string]int64{}}

@@ -98,7 +98,7 @@ func TestMarkdown(t *testing.T) {
 		"Model `claude-sonnet-5-5` (effort high) · 1 run(s)",
 		"tool output capped at 100,000 bytes for both servers",
 		"| chinook | qh | 100% |",
-		"| Fewer total tokens per task | ≥ 40% fewer than dbhub | 50.0% fewer | ✅ |",
+		"| Fewer total tokens per task | ≥ 40% fewer than dbhub | 50.0% fewer (2 paired runs) | ✅ |",
 		"| Cold schema build, 1,000 tables | < 1 s | 0.40 s | ✅ |",
 		"| 5 | 400 | 2500 |",
 		"| chinook-01 | lookup | 1/1 | 1/1 |",
@@ -106,5 +106,63 @@ func TestMarkdown(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown lacks %q", want)
 		}
+	}
+}
+
+func TestCriteriaUseOnlyPairedRuns(t *testing.T) {
+	r := sampleReport() // chinook: 2 questions, both servers, qh 1000 vs dbhub 2000 tokens
+	// pagila: qh ran twice (expensive, 5000 tokens, 9 calls, wrong), dbhub was aborted both times.
+	for _, q := range []string{"pagila-01", "pagila-02"} {
+		r.Results = append(r.Results,
+			Result{Dataset: "pagila", Server: "qh", Question: q, Kind: "lookup", Run: 1, Submitted: true, InputTokens: 4900, OutputTokens: 100, ToolCalls: 9, WallMS: 1000},
+			Result{Dataset: "pagila", Server: "dbhub", Question: q, Kind: "lookup", Run: 1, Error: "model: 529", Aborted: true})
+	}
+	// and one chinook run only dbhub completed
+	r.Results = append(r.Results,
+		Result{Dataset: "chinook", Server: "dbhub", Question: "chinook-03", Kind: "lookup", Run: 1, Correct: true, Submitted: true, InputTokens: 100, OutputTokens: 0, ToolCalls: 1},
+		Result{Dataset: "chinook", Server: "qh", Question: "chinook-03", Kind: "lookup", Run: 1, Error: "model: 529", Aborted: true})
+	for _, c := range Criteria(r) {
+		switch c.Name {
+		case "tokens":
+			if !c.Known || !c.Pass || c.Result != "50.0% fewer (2 paired runs)" {
+				t.Errorf("tokens: %+v", c)
+			}
+		case "accuracy":
+			if !c.Known || !c.Pass || c.Result != "100.0% vs 50.0% (2 paired runs)" {
+				t.Errorf("accuracy: %+v", c)
+			}
+		case "tool calls":
+			if !c.Known || !c.Pass || c.Result != "2.0 vs 3.0 (2 paired runs)" {
+				t.Errorf("tool calls: %+v", c)
+			}
+		}
+	}
+	md := r.Markdown()
+	want := "Criteria use the 2 runs both servers completed; 2 qh and 1 dbhub runs without a counterpart are excluded"
+	if !strings.Contains(md, want) {
+		t.Errorf("markdown lacks %q", want)
+	}
+	// per-question table: aborted rows do not count
+	for _, row := range []string{
+		"| pagila-01 | lookup | 0/1 | 0/0 | 5000 | — |",
+		"| chinook-03 | lookup | 0/0 | 1/1 | — | 100 |",
+	} {
+		if !strings.Contains(md, row) {
+			t.Errorf("per-question table lacks %q\n%s", row, md)
+		}
+	}
+	// no counterpart anywhere: nothing is measured
+	only := &Report{Results: []Result{
+		{Dataset: "chinook", Server: "qh", Question: "chinook-01", Run: 1, Submitted: true, InputTokens: 1},
+		{Dataset: "chinook", Server: "dbhub", Question: "chinook-02", Run: 1, Submitted: true, InputTokens: 1}}}
+	for _, c := range Criteria(only) {
+		if (c.Name == "tokens" || c.Name == "accuracy" || c.Name == "tool calls") && (c.Known || c.Result != "not measured") {
+			t.Errorf("%+v", c)
+		}
+	}
+	// a question whose every run aborted has no row
+	r = &Report{Results: []Result{{Dataset: "chinook", Server: "qh", Question: "chinook-09", Run: 1, Aborted: true}}}
+	if strings.Contains(r.Markdown(), "chinook-09") {
+		t.Error("all-aborted question listed")
 	}
 }

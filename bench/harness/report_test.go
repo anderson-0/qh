@@ -96,6 +96,7 @@ func TestMarkdown(t *testing.T) {
 	for _, want := range []string{
 		"# qh vs dbhub benchmark — 2026-10-11",
 		"Model `claude-sonnet-5-5` (effort high) · 1 run(s)",
+		"tool output capped at 100,000 bytes for both servers",
 		"| chinook | qh | 100% |",
 		"| Fewer total tokens per task | ≥ 40% fewer than dbhub | 50.0% fewer | ✅ |",
 		"| Cold schema build, 1,000 tables | < 1 s | 0.40 s | ✅ |",

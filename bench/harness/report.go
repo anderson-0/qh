@@ -149,7 +149,7 @@ func (r *Report) Markdown() string {
 	if r.Effort != "" {
 		model += " (effort " + r.Effort + ")"
 	}
-	fmt.Fprintf(&b, "Model %s · %d run(s) per question · dbhub %s · tool output capped at %d characters for both servers.\n\n", model, r.Runs, r.DBHubVersion, OutputCap)
+	fmt.Fprintf(&b, "Model %s · %d run(s) per question · dbhub %s · tool output capped at %d,%03d bytes for both servers.\n\n", model, r.Runs, r.DBHubVersion, OutputCap/1000, OutputCap%1000)
 	b.WriteString("## Success criteria (spec §1)\n\n| Criterion | Target | Result | Pass |\n|---|---|---|---|\n")
 	for _, c := range Criteria(r) {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", c.Label, c.Target, c.Result, mark(c))

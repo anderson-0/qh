@@ -47,7 +47,7 @@ These are estimates, not quotes; check your API budget before a full run. Two fl
 
 ## Fairness
 
-Both servers get the same model, prompts, turn limit (30) and tool-output cap (100,000 characters). Each runs read-only, with its own defaults:
+Both servers get the same model, prompts, turn limit (30) and tool-output cap (100,000 bytes). Each runs read-only, with its own defaults:
 - qh: 100-row cap.
 - dbhub: no row cap.
 
@@ -55,3 +55,14 @@ Answers are submitted through a `submit_answer` tool and compared with the refer
 - numbers within a relative 1e-6;
 - strings trimmed and compared case-insensitively;
 - row order ignored unless the question asks for one.
+
+The comparison tolerates a relative 1e-6 on numbers: `|a − b| ≤ 1e-6 × max(1, |a|, |b|)`. For totals near 67,000 that is about 0.067, so an answer one cent off is accepted.
+
+## Aborted and failed runs
+
+- **Aborted** runs did not really happen, so they are left out of every figure: the server failed to start, or the model API failed in a transient way (429, 5xx or 529 after the SDK's retries, a network error, an interrupt).
+- **Failed** runs count against their server, as wrong answers with an error: the model gave no answer, hit the turn limit, the token budget, the 10-minute run timeout or `max_tokens`, refused, or the API rejected the request (for example 400 "prompt is too long").
+
+## What this does not cover
+
+Spec §1's criterion that a new connection is queryable without a restart is covered by qh's own integration tests, not by this benchmark.

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net"
 	"reflect"
@@ -309,5 +310,67 @@ func TestParseRawQueryValuesWithSlashes(t *testing.T) {
 	_, err := parseRaw("mysql://u:p%zz@h/db")
 	if err == nil || !strings.Contains(err.Error(), "percent-encoded") {
 		t.Errorf("hint: %v", err)
+	}
+}
+
+func TestAssembleStringDefaultsAreQuotedOnMySQL(t *testing.T) {
+	col := func(name, dataType, dflt, extra string) columnRow {
+		return columnRow{schema: "s", table: "t", name: name, colType: dataType, dataType: dataType, nullable: "NO", extra: extra,
+			dflt: sql.NullString{String: dflt, Valid: true}}
+	}
+	columns := []columnRow{
+		col("a", "varchar", "pending", ""),
+		col("b", "text", "it's", ""),
+		col("c", "int", "0", ""),
+		col("d", "datetime", "CURRENT_TIMESTAMP", "DEFAULT_GENERATED"),
+		col("e", "varchar", "concat(_utf8mb4\\'a\\',_utf8mb4\\'b\\')", "DEFAULT_GENERATED"),
+		col("f", "varbinary", "x", ""),
+		{schema: "s", table: "t", name: "g", colType: "varchar(9)", dataType: "varchar", nullable: "YES"},
+	}
+	tables := []tableRow{{schema: "s", name: "t", kind: "BASE TABLE"}}
+	cat := (&conn{flavor: flavorMySQL}).assemble(tables, columns, nil, nil)
+	want := []string{"'pending'", "'it''s'", "0", "CURRENT_TIMESTAMP", "concat(_utf8mb4\\'a\\',_utf8mb4\\'b\\')", "'x'", ""}
+	for i, f := range cat.Namespaces[0].Objects[0].Fields {
+		if f.Default != want[i] {
+			t.Errorf("%s: default %q, want %q", f.Name, f.Default, want[i])
+		}
+	}
+	// MariaDB already reports quoted string defaults and the string NULL.
+	maria := []columnRow{col("a", "varchar", "'pending'", ""), col("b", "varchar", "NULL", "")}
+	cat = (&conn{flavor: flavorMariaDB}).assemble(tables, maria, nil, nil)
+	fs := cat.Namespaces[0].Objects[0].Fields
+	if fs[0].Default != "'pending'" || fs[1].Default != "" {
+		t.Errorf("mariadb: %+v", fs)
+	}
+}
+
+func TestAssembleSortsIndexesAndForeignKeys(t *testing.T) {
+	tables := []tableRow{{schema: "s", name: "t", kind: "BASE TABLE"}, {schema: "s", name: "a", kind: "BASE TABLE"}, {schema: "s", name: "b", kind: "BASE TABLE"}}
+	indexes := []indexRow{
+		{"s", "t", "idx_b", 1, sql.NullString{String: "x", Valid: true}},
+		{"s", "t", "Idx_a", 1, sql.NullString{String: "y", Valid: true}},
+		{"s", "t", "idx_A", 0, sql.NullString{String: "z", Valid: true}},
+	}
+	keys := []keyRow{
+		{"s", "t", "fk1", "p", "s", "b", "id"},
+		{"s", "t", "fk2", "q", "s", "a", "id"},
+		{"s", "t", "fk3", "o", "s", "a", "id"},
+	}
+	cat := (&conn{flavor: flavorMySQL}).assemble(tables, nil, keys, indexes)
+	var o *engine.Object
+	for _, x := range cat.Namespaces[0].Objects {
+		if x.Name == "t" {
+			o = x
+		}
+	}
+	var ix, fk []string
+	for _, x := range o.Indexes {
+		ix = append(ix, x.Name)
+	}
+	for _, x := range o.ForeignKeys {
+		fk = append(fk, x.RefObject+"."+x.Columns[0])
+	}
+	if !reflect.DeepEqual(ix, []string{"Idx_a", "idx_A", "idx_b"}) || !reflect.DeepEqual(fk, []string{"a.o", "a.q", "b.p"}) {
+		t.Errorf("indexes %v foreign keys %v", ix, fk)
 	}
 }

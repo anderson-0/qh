@@ -22,6 +22,13 @@ func (c *conn) filter(col string) (string, []any) {
 	return col + " NOT IN (" + systemSchemas + ")", nil
 }
 
+// stringTypes are the information_schema DATA_TYPE values whose literal
+// defaults MySQL reports without quotes.
+var stringTypes = map[string]bool{
+	"char": true, "varchar": true, "tinytext": true, "text": true, "mediumtext": true, "longtext": true,
+	"enum": true, "set": true, "binary": true, "varbinary": true,
+}
+
 type tableRow struct {
 	schema, name, kind, comment string
 	rows                        sql.NullInt64
@@ -165,8 +172,17 @@ func (c *conn) assemble(tables []tableRow, columns []columnRow, keys []keyRow, i
 		switch {
 		case strings.Contains(col.extra, "auto_increment"):
 			f.Default = "auto"
-		case col.dflt.Valid && !(c.flavor == flavorMariaDB && col.dflt.String == "NULL"):
+		case col.dflt.Valid && c.flavor == flavorMariaDB:
+			if col.dflt.String != "NULL" { // MariaDB reports a NULL default as the string NULL
+				f.Default = col.dflt.String
+			}
+		case col.dflt.Valid:
 			f.Default = col.dflt.String
+			// MySQL reports string defaults unquoted; quote them as MariaDB
+			// does. A generated default is an expression and stays as is.
+			if stringTypes[col.dataType] && !strings.Contains(col.extra, "DEFAULT_GENERATED") {
+				f.Default = "'" + strings.ReplaceAll(col.dflt.String, "'", "''") + "'"
+			}
 		}
 		o.Fields = append(o.Fields, f)
 	}
@@ -221,14 +237,24 @@ func (c *conn) assemble(tables []tableRow, columns []columnRow, keys []keyRow, i
 	// Server collations order names differently (MariaDB and MySQL disagree
 	// about "_"), so sort here for the same output on both.
 	byName := func(a, b string) int {
-		if c := strings.Compare(strings.ToLower(a), strings.ToLower(b)); c != 0 {
-			return c
+		if d := strings.Compare(strings.ToLower(a), strings.ToLower(b)); d != 0 {
+			return d
 		}
 		return strings.Compare(a, b)
 	}
 	slices.SortFunc(cat.Namespaces, func(a, b engine.Namespace) int { return byName(a.Name, b.Name) })
 	for i := range cat.Namespaces {
-		slices.SortFunc(cat.Namespaces[i].Objects, func(a, b *engine.Object) int { return byName(a.Name, b.Name) })
+		objects := cat.Namespaces[i].Objects
+		slices.SortFunc(objects, func(a, b *engine.Object) int { return byName(a.Name, b.Name) })
+		for _, o := range objects {
+			slices.SortFunc(o.Indexes, func(a, b engine.Index) int { return byName(a.Name, b.Name) })
+			slices.SortStableFunc(o.ForeignKeys, func(a, b engine.ForeignKey) int {
+				if d := byName(a.RefObject, b.RefObject); d != 0 {
+					return d
+				}
+				return byName(a.Columns[0], b.Columns[0])
+			})
+		}
 	}
 	cat.Link()
 	return cat

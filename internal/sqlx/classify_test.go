@@ -56,6 +56,27 @@ func TestClassify(t *testing.T) {
 		{`SELECT "a;b"`, MySQL, Read, ""},
 		{"SELECT 'a\\';DROP'", MySQL, Read, ""},
 		{"DESCRIBE users", MySQL, Read, ""},
+		// Postgres line comments also end at a carriage return.
+		{"SELECT 1 --x\r; DROP TABLE t", Postgres, 0, "only one statement per call"},
+		{"SELECT 1 --x\nSELECT 2", Postgres, Read, ""},
+		{"SELECT 1 --x\r; DROP TABLE t", SQLite, Read, ""},
+		// MySQL "--" is a comment only when followed by whitespace, a control
+		// character or end of input.
+		{"SELECT 1--1; DROP TABLE t", MySQL, 0, "only one statement per call"},
+		{"SELECT 1--1", MySQL, Read, ""},
+		{"SELECT 1 -- x; DROP TABLE t", MySQL, Read, ""},
+		{"SELECT 1 --\n; DROP TABLE t", MySQL, 0, "only one statement per call"},
+		// MySQL executable comments run server-side, so they are rejected.
+		{"SELECT 1 /*! INTO OUTFILE '/tmp/x' */", MySQL, 0, "executable comments"},
+		{"SELECT 1 /*M! INTO OUTFILE '/tmp/x' */", MySQL, 0, "executable comments"},
+		{"SELECT 1 /*! x */", Postgres, Read, ""},
+		// A semicolon inside quotes or quoted identifiers is not a separator.
+		{`SELECT "a;b"`, Postgres, Read, ""},
+		{"SELECT `a;b`", SQLite, Read, ""},
+		{"SELECT [a;b]", SQLite, Read, ""},
+		{"SELECT 'a;b'", Postgres, Read, ""},
+		{"SELECT 'a;b'", MySQL, Read, ""},
+		{"SELECT 'a;b'", SQLite, Read, ""},
 		{"SELECT 1; SELECT 2", Postgres, 0, "only one statement per call"},
 		{"COMMIT; DELETE FROM t", Postgres, 0, "only one statement per call"},
 		{"BEGIN", Postgres, 0, "BEGIN statements are not supported"},

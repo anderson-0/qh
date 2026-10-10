@@ -48,11 +48,14 @@ func tokenize(s string, d Dialect) ([]token, error) {
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
 			i++
-		case c == '-' && i+1 < n && s[i+1] == '-', c == '#' && d == MySQL:
-			for i < n && s[i] != '\n' {
+		case c == '-' && i+1 < n && s[i+1] == '-' && (d != MySQL || mysqlDashComment(s, i+2)), c == '#' && d == MySQL:
+			for i < n && !lineEnd(s[i], d) {
 				i++
 			}
 		case c == '/' && i+1 < n && s[i+1] == '*':
+			if d == MySQL && (strings.HasPrefix(s[i:], "/*!") || strings.HasPrefix(s[i:], "/*M!")) {
+				return nil, qerr.New(qerr.Invalid, "MySQL executable comments (/*! */) are not supported")
+			}
 			end, ok := skipBlockComment(s, i, d == Postgres)
 			if !ok {
 				return nil, unterminated("comment")
@@ -150,6 +153,18 @@ func tokenize(s string, d Dialect) ([]token, error) {
 		}
 	}
 	return toks, nil
+}
+
+// lineEnd reports whether c ends a "--" or "#" line comment. Postgres also
+// ends comments at a carriage return.
+func lineEnd(c byte, d Dialect) bool {
+	return c == '\n' || c == '\r' && d == Postgres
+}
+
+// mysqlDashComment reports whether the "--" before j starts a MySQL comment:
+// MySQL requires whitespace, a control character or end of input after it.
+func mysqlDashComment(s string, j int) bool {
+	return j >= len(s) || s[j] == ' ' || s[j] < 0x20
 }
 
 func isIdentStart(c byte) bool {

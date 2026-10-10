@@ -314,3 +314,16 @@ func sameColumns(a, b []string) bool {
 	}
 	return true
 }
+
+// Matching returns the objects Schema would describe for pattern/object, or
+// every object when both are empty.
+func Matching(c *engine.Catalog, pattern, object string) []*engine.Object {
+	if strings.TrimSpace(pattern) == "" && strings.TrimSpace(object) == "" {
+		var out []*engine.Object
+		for _, ns := range c.Namespaces {
+			out = append(out, ns.Objects...)
+		}
+		return out
+	}
+	return match(c, SchemaOpts{Pattern: pattern, Object: object})
+}

@@ -161,3 +161,16 @@ func TestCompact(t *testing.T) {
 		}
 	}
 }
+
+func TestMatching(t *testing.T) {
+	c := schemaCatalog()
+	if got := Matching(c, "", ""); len(got) != 5 {
+		t.Fatalf("all: %d", len(got))
+	}
+	if got := Matching(c, "order*", ""); len(got) != 2 {
+		t.Fatalf("pattern: %d", len(got))
+	}
+	if got := Matching(c, "", "public.users"); len(got) != 1 || got[0].Name != "users" {
+		t.Fatalf("object: %+v", got)
+	}
+}

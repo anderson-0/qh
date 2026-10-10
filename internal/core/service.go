@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -27,11 +28,41 @@ type Service struct {
 	keys  *secret.Keyring
 	pools *pool.Manager
 	cache *catalog.Cache
+	opts  Options
 }
 
-// New returns a Service.
-func New(st store.Store, keys *secret.Keyring, pools *pool.Manager, cache *catalog.Cache) *Service {
-	return &Service{store: st, keys: keys, pools: pools, cache: cache}
+// Options configures a Service for server mode. The zero value is local mode.
+type Options struct {
+	// Dial, when set, opens every database network connection (netguard).
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// SQLiteRoot, when set, confines SQLite files to this directory.
+	SQLiteRoot string
+	// SQLiteDisabled refuses SQLite connections entirely.
+	SQLiteDisabled bool
+}
+
+// New returns a Service. opts (at most one) configures server mode.
+func New(st store.Store, keys *secret.Keyring, pools *pool.Manager, cache *catalog.Cache, opts ...Options) *Service {
+	s := &Service{store: st, keys: keys, pools: pools, cache: cache}
+	if len(opts) > 0 {
+		s.opts = opts[0]
+	}
+	return s
+}
+
+// allowEngine refuses engines this server does not permit.
+func (s *Service) allowEngine(name string) error {
+	if s.opts.SQLiteDisabled && name == "sqlite" {
+		return qerr.New(qerr.Invalid, "SQLite connections are disabled on this server").
+			WithHint("Start qh serve with --sqlite-root DIR to allow SQLite files under DIR")
+	}
+	return nil
+}
+
+// connSpec builds the spec engines open, carrying the server's options.
+func (s *Service) connSpec(id string, version int64, eng, dsn string, mode engine.Mode, poolSize int) engine.ConnSpec {
+	return engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize,
+		Dial: s.opts.Dial, FileRoot: s.opts.SQLiteRoot}
 }
 
 // OpenConn opens spec with its registered engine. It is the production pool.Opener.
@@ -61,6 +92,9 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.allowEngine(rec.Engine); err != nil {
+		return nil, err
+	}
 	in, err := s.load(rec)
 	if err != nil {
 		return nil, err
@@ -72,8 +106,7 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	info, _ := eng.Inspect(in.DSN)
 	return &target{
 		rec: rec, eng: eng, info: info,
-		spec: engine.ConnSpec{ID: rec.ID, Version: rec.Version, Engine: rec.Engine, DSN: in.DSN,
-			Mode: in.Mode, PoolSize: rec.PoolSize},
+		spec: s.connSpec(rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize),
 	}, nil
 }
 
@@ -151,24 +184,24 @@ type QueryInput struct {
 	Explain bool
 }
 
-// Query runs one statement and renders the result as TSV.
-func (s *Service) Query(ctx context.Context, ws string, in QueryInput) (string, error) {
+// QueryResult runs one statement and returns its result.
+func (s *Service) QueryResult(ctx context.Context, ws string, in QueryInput) (*engine.Result, error) {
 	t, err := s.resolve(ctx, ws, in.Source)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	access, err := sqlx.Classify(in.Query, t.eng.Dialect())
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	readOnly := t.spec.Mode != engine.ModeRW
 	if !in.Explain && readOnly && access != sqlx.Read {
-		return "", qerr.New(qerr.ReadOnly, fmt.Sprintf("connection %q is read-only; only statements that read data are allowed", t.rec.Name)).
+		return nil, qerr.New(qerr.ReadOnly, fmt.Sprintf("connection %q is read-only; only statements that read data are allowed", t.rec.Name)).
 			WithHint("Use a read-write connection to change data")
 	}
 	conn, release, err := s.pools.Get(ctx, t.spec)
 	if err != nil {
-		return "", t.scrub(err)
+		return nil, t.scrub(err)
 	}
 	defer release()
 	opts := engine.QueryOpts{
@@ -183,14 +216,41 @@ func (s *Service) Query(ctx context.Context, ws string, in QueryInput) (string, 
 		res, err = conn.Query(ctx, in.Query, opts)
 	}
 	if err != nil {
-		return "", t.scrub(s.withSuggestions(ctx, conn, t, in.Query, err))
+		return nil, t.scrub(s.withSuggestions(ctx, conn, t, in.Query, err))
 	}
 	// Any statement that is not a plain read may change the schema (DDL, but
 	// also a DO block or a function call), so drop the cached catalog.
 	if access != sqlx.Read && !in.Explain {
 		s.cache.Invalidate(t.rec.ID)
 	}
+	return res, nil
+}
+
+// Query runs one statement and renders the result as TSV.
+func (s *Service) Query(ctx context.Context, ws string, in QueryInput) (string, error) {
+	res, err := s.QueryResult(ctx, ws, in)
+	if err != nil {
+		return "", err
+	}
 	return format.Result(res), nil
+}
+
+// Catalog returns a connection's schema, limited to its allowed namespaces.
+func (s *Service) Catalog(ctx context.Context, ws, name string) (*engine.Catalog, error) {
+	t, err := s.resolve(ctx, ws, name)
+	if err != nil {
+		return nil, err
+	}
+	conn, release, err := s.pools.Get(ctx, t.spec)
+	if err != nil {
+		return nil, t.scrub(err)
+	}
+	defer release()
+	cat, err := s.catalog(ctx, conn, t)
+	if err != nil {
+		return nil, t.scrub(err)
+	}
+	return cat, nil
 }
 
 func effectiveMaxRows(connMax, requested int) int {

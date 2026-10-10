@@ -41,6 +41,8 @@ type Options struct {
 	SQLiteRoot string
 	// SQLiteDisabled refuses SQLite connections entirely.
 	SQLiteDisabled bool
+	// NoQueryLog turns the query log off.
+	NoQueryLog bool
 }
 
 // New returns a Service. opts (at most one) configures server mode.
@@ -212,6 +214,14 @@ func (s *Service) QueryResult(ctx context.Context, ws string, in QueryInput) (*e
 	if err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	res, err := s.runQuery(ctx, t, in)
+	s.logQuery(ctx, ws, t, in, res, err, time.Since(start))
+	return res, err
+}
+
+// runQuery classifies, guards and executes one statement on a resolved connection.
+func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engine.Result, error) {
 	access, err := sqlx.Classify(in.Query, t.eng.Dialect())
 	if err != nil {
 		return nil, err

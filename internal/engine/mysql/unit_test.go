@@ -227,3 +227,28 @@ func TestParseConfigDropsSessionParams(t *testing.T) {
 		t.Fatalf("sql_mode dropped: %+v", cfg.Params)
 	}
 }
+
+// TestReadOnlyRejectsFileWrites needs no database: Query refuses before it
+// touches the pool, so a nil pool proves the refusal came from qh itself.
+func TestReadOnlyRejectsFileWrites(t *testing.T) {
+	c := &conn{readOnly: true}
+	for _, q := range []string{
+		"SELECT 1.5INTO OUTFILE '/tmp/qh-evil-a.txt'",
+		"SELECT id, 1.0INTO DUMPFILE '/tmp/qh-evil-b.txt' FROM users LIMIT 1",
+		"SELECT 1e0INTO OUTFILE '/tmp/qh-evil-c.txt'",
+		`SELECT 1 AS "a\" INTO OUTFILE '/tmp/qh-evil-d.txt' -- "`,
+		`SELECT 'a\' INTO OUTFILE '/tmp/qh-evil-e.txt' -- '`,
+		`SELECT 'a\' INTO DuMpFiLe '/tmp/qh-evil-f.txt' -- '`,
+	} {
+		_, err := c.Query(context.Background(), q, engine.QueryOpts{MaxRows: 10, ReadOnly: true})
+		if e := qerr.From(err); err == nil || e.Category != qerr.ReadOnly {
+			t.Errorf("%q: %v", q, err)
+		}
+	}
+	// The per-call flag applies on a read-write connection too.
+	rw := &conn{}
+	_, err := rw.Query(context.Background(), `SELECT 'a\' INTO OUTFILE '/tmp/qh-evil-g.txt' -- '`, engine.QueryOpts{ReadOnly: true})
+	if e := qerr.From(err); err == nil || e.Category != qerr.ReadOnly {
+		t.Errorf("per-call read-only: %v", err)
+	}
+}

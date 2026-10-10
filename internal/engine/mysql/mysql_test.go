@@ -126,6 +126,11 @@ func TestConformance(t *testing.T) {
 				ReadOnlyEscapes: []string{
 					"CREATE TEMPORARY TABLE evil_tmp (x int)",
 					"SELECT * FROM users INTO OUTFILE '/tmp/qh-evil.txt'",
+					"SELECT 1.5INTO OUTFILE '/tmp/qh-evil-1.txt'",
+					"SELECT id, 1.0INTO DUMPFILE '/tmp/qh-evil-2.txt' FROM users LIMIT 1",
+					"SELECT 1e0INTO OUTFILE '/tmp/qh-evil-3.txt'",
+					`SELECT 1 AS "a\" INTO OUTFILE '/tmp/qh-evil-4.txt' -- "`,
+					`SELECT 'a\' INTO OUTFILE '/tmp/qh-evil-5.txt' -- '`,
 					"LOAD DATA LOCAL INFILE '/etc/hosts' INTO TABLE users",
 					"HANDLER users OPEN",
 					"SET SESSION TRANSACTION READ WRITE",

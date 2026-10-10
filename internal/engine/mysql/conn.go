@@ -89,6 +89,15 @@ func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine
 	if readOnly && access != sqlx.Read {
 		return nil, readOnlyErr()
 	}
+	// Defence in depth: the lexer cannot model every quoting mode (sql_mode
+	// ANSI_QUOTES and NO_BACKSLASH_ESCAPES change where strings end), so a
+	// file-writing clause could be hidden inside what the lexer sees as a
+	// string or comment. No read needs these words, so refuse them outright.
+	if readOnly {
+		if lq := strings.ToLower(q); strings.Contains(lq, "outfile") || strings.Contains(lq, "dumpfile") {
+			return nil, readOnlyErr()
+		}
+	}
 	return c.run(ctx, q, o, access, readOnly)
 }
 

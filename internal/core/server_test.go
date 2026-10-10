@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,21 +60,64 @@ func TestSQLiteDisabled(t *testing.T) {
 	if _, err := locked.Query(ctx, ws, QueryInput{Source: "shop", Query: "SELECT 1"}); err == nil || qerr.From(err).Category != qerr.Invalid {
 		t.Fatalf("existing sqlite connection still usable: %v", err)
 	}
-	if _, err := locked.TestInput(ctx, ConnInput{Engine: "sqlite", DSN: db}); err == nil {
+	if _, err := locked.TestInput(ctx, ws, ConnInput{Engine: "sqlite", DSN: db}); err == nil {
 		t.Fatal("TestInput allowed sqlite")
 	}
 }
 
+// copyFixture copies the SQLite fixture to dir/name.
+func copyFixture(t *testing.T, dir, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(testutil.SQLiteFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Each workspace is confined to its own directory under the SQLite root.
 func TestSQLiteRoot(t *testing.T) {
 	ctx := context.Background()
-	inside := testutil.SQLiteFixture(t)
+	root := t.TempDir()
+	mine := copyFixture(t, filepath.Join(root, ws), "a.db")
+	theirs := copyFixture(t, filepath.Join(root, "team"), "b.db")
+	shared := copyFixture(t, root, "c.db")
 	outside := testutil.SQLiteFixture(t)
-	svc := newServiceWith(t, openStore(t), Options{SQLiteRoot: filepath.Dir(inside)})
-	if _, _, err := svc.CreateConnection(ctx, ws, ConnInput{Name: "in", Engine: "sqlite", DSN: inside}, true); err != nil {
+	svc := newServiceWith(t, openStore(t), Options{SQLiteRoot: root})
+	if _, err := svc.CreateWorkspace(ctx, "team"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.CreateConnection(ctx, ws, ConnInput{Name: "in", Engine: "sqlite", DSN: mine}, true); err != nil {
 		t.Fatalf("inside: %v", err)
 	}
-	if _, _, err := svc.CreateConnection(ctx, ws, ConnInput{Name: "out", Engine: "sqlite", DSN: outside}, true); err == nil || !strings.Contains(err.Error(), "outside the allowed directory") {
-		t.Fatalf("outside: %v", err)
+	if _, err := svc.TestInput(ctx, ws, ConnInput{Engine: "sqlite", DSN: mine}); err != nil {
+		t.Fatalf("test input inside: %v", err)
+	}
+	if _, _, err := svc.CreateConnection(ctx, "team", ConnInput{Name: "in", Engine: "sqlite", DSN: theirs}, true); err != nil {
+		t.Fatalf("team inside: %v", err)
+	}
+	for _, dsn := range []string{theirs, shared, outside} {
+		if _, _, err := svc.CreateConnection(ctx, ws, ConnInput{Name: "out", Engine: "sqlite", DSN: dsn}, true); err == nil || !strings.Contains(err.Error(), "outside the allowed directory") {
+			t.Errorf("create %s: %v", dsn, err)
+		}
+		if _, err := svc.TestInput(ctx, ws, ConnInput{Engine: "sqlite", DSN: dsn}); err == nil || !strings.Contains(err.Error(), "outside the allowed directory") {
+			t.Errorf("test input %s: %v", dsn, err)
+		}
+	}
+	// A row that points into another workspace's directory (stored without
+	// a test) is refused when it is used.
+	if _, _, err := svc.CreateConnection(ctx, ws, ConnInput{Name: "sneaky", Engine: "sqlite", DSN: theirs}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Query(ctx, ws, QueryInput{Source: "sneaky", Query: "SELECT 1"}); err == nil || !strings.Contains(err.Error(), "outside the allowed directory") {
+		t.Errorf("query sneaky: %v", err)
 	}
 }
 
@@ -102,11 +146,11 @@ func TestQueryResultCatalogAndTestInput(t *testing.T) {
 	if err != nil || len(cat.Lookup("users")) != 1 {
 		t.Fatalf("catalog: %v", err)
 	}
-	tr, err := h.svc.TestInput(ctx, ConnInput{Engine: "sqlite", DSN: testutil.SQLiteFixture(t)})
+	tr, err := h.svc.TestInput(ctx, ws, ConnInput{Engine: "sqlite", DSN: testutil.SQLiteFixture(t)})
 	if err != nil || !strings.HasPrefix(tr.ServerVersion, "SQLite ") {
 		t.Fatalf("test input: %+v %v", tr, err)
 	}
-	if _, err := h.svc.TestInput(ctx, ConnInput{Engine: "sqlite", DSN: filepath.Join(t.TempDir(), "missing.db")}); qerr.From(err).Category != qerr.ConnectionFailed {
+	if _, err := h.svc.TestInput(ctx, ws, ConnInput{Engine: "sqlite", DSN: filepath.Join(t.TempDir(), "missing.db")}); qerr.From(err).Category != qerr.ConnectionFailed {
 		t.Fatalf("missing file: %v", err)
 	}
 }
@@ -187,7 +231,7 @@ func TestServerDSNGate(t *testing.T) {
 	}
 	_, _, err = server.CreateConnection(ctx, ws, ConnInput{Name: "new", Engine: "postgres", DSN: bad}, false)
 	check("create", err)
-	_, err = server.TestInput(ctx, ConnInput{Engine: "postgres", DSN: bad})
+	_, err = server.TestInput(ctx, ws, ConnInput{Engine: "postgres", DSN: bad})
 	check("test input", err)
 	desc := "changed"
 	_, _, err = server.UpdateConnection(ctx, ws, "legacy", ConnPatch{Description: &desc}, false)

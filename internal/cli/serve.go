@@ -111,7 +111,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 	fl := cmd.Flags()
 	fl.StringVar(&listen, "http", "", "server mode: listen on this address (e.g. :8080); requires QH_MASTER_KEY and API keys")
 	fl.StringVar(&dataDir, "data-dir", "", "data directory (default: the same as --home)")
-	fl.StringVar(&sqliteRoot, "sqlite-root", "", "server mode: allow SQLite files under this directory (SQLite is disabled otherwise)")
+	fl.StringVar(&sqliteRoot, "sqlite-root", "", "server mode: allow SQLite files under DIR/<workspace>/ (SQLite is disabled otherwise)")
 	fl.StringSliceVar(&allow, "allow-cidr", nil, "server mode: allow database addresses in this range, even if denied by default (repeatable)")
 	fl.StringSliceVar(&deny, "deny-cidr", nil, "server mode: also refuse database addresses in this range (repeatable)")
 	return cmd

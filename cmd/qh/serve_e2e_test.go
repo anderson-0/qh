@@ -46,10 +46,22 @@ func (b bearerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestServeEndToEnd(t *testing.T) {
 	bin := buildBinary(t)
-	db := testutil.SQLiteFixture(t)
+	// Each workspace's SQLite files live under <sqlite-root>/<workspace>/.
+	root := t.TempDir()
+	fixture, err := os.ReadFile(testutil.SQLiteFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(root, "team", "shop.db")
+	if err := os.MkdirAll(filepath.Dir(db), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(db, fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	key := make([]byte, 32)
 	rand.Read(key)
-	cmd := exec.Command(bin, "serve", "--http", "127.0.0.1:0", "--data-dir", t.TempDir(), "--sqlite-root", filepath.Dir(db))
+	cmd := exec.Command(bin, "serve", "--http", "127.0.0.1:0", "--data-dir", t.TempDir(), "--sqlite-root", root)
 	cmd.Env = append(os.Environ(), "QH_MASTER_KEY="+base64.StdEncoding.EncodeToString(key), "QH_BOOTSTRAP_ADMIN_KEY=")
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {

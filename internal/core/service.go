@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,7 +36,8 @@ type Service struct {
 type Options struct {
 	// Dial, when set, opens every database network connection (netguard).
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
-	// SQLiteRoot, when set, confines SQLite files to this directory.
+	// SQLiteRoot, when set, confines each workspace's SQLite files to
+	// SQLiteRoot/<workspace>/.
 	SQLiteRoot string
 	// SQLiteDisabled refuses SQLite connections entirely.
 	SQLiteDisabled bool
@@ -72,10 +74,14 @@ func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
 	return nil
 }
 
-// connSpec builds the spec engines open, carrying the server's options.
-func (s *Service) connSpec(id string, version int64, eng, dsn string, mode engine.Mode, poolSize int) engine.ConnSpec {
-	return engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize,
-		Dial: s.opts.Dial, FileRoot: s.opts.SQLiteRoot}
+// connSpec builds the spec engines open for workspace ws, carrying the
+// server's options. Workspace names cannot contain path separators.
+func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int) engine.ConnSpec {
+	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial}
+	if s.opts.SQLiteRoot != "" {
+		spec.FileRoot = filepath.Join(s.opts.SQLiteRoot, ws)
+	}
+	return spec
 }
 
 // OpenConn opens spec with its registered engine. It is the production pool.Opener.
@@ -122,7 +128,7 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	info, _ := eng.Inspect(in.DSN)
 	return &target{
 		rec: rec, eng: eng, info: info,
-		spec: s.connSpec(rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize),
+		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize),
 	}, nil
 }
 

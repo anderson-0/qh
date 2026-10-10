@@ -152,11 +152,11 @@ func (s *Service) fill(rec *store.Connection, in ConnInput, info engine.DSNInfo)
 	return nil
 }
 
-func (s *Service) testConn(ctx context.Context, eng engine.Engine, in ConnInput, info engine.DSNInfo) (*TestResult, error) {
+func (s *Service) testConn(ctx context.Context, ws string, eng engine.Engine, in ConnInput, info engine.DSNInfo) (*TestResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	start := time.Now()
-	conn, err := eng.Open(ctx, s.connSpec("test", 0, in.Engine, in.DSN, in.Mode, 1))
+	conn, err := eng.Open(ctx, s.connSpec(ws, "test", 0, in.Engine, in.DSN, in.Mode, 1))
 	if err != nil {
 		return nil, scrub(err, secretsOf(in.DSN, info)...)
 	}
@@ -197,7 +197,7 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 	}
 	var tr *TestResult
 	if test {
-		if tr, err = s.testConn(ctx, eng, in, info); err != nil {
+		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -266,7 +266,7 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	}
 	var tr *TestResult
 	if test && (p.DSN != nil || p.Mode != nil) {
-		if tr, err = s.testConn(ctx, eng, in, info); err != nil {
+		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -348,7 +348,7 @@ func (s *Service) TestConnection(ctx context.Context, ws, name string) (*TestRes
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, t.eng, ConnInput{Engine: t.rec.Engine, DSN: t.spec.DSN, Mode: t.spec.Mode}, t.info)
+	return s.testConn(ctx, ws, t.eng, ConnInput{Engine: t.rec.Engine, DSN: t.spec.DSN, Mode: t.spec.Mode}, t.info)
 }
 
 // RefreshSchema rebuilds a connection's cached schema.
@@ -373,7 +373,7 @@ func (s *Service) RefreshSchema(ctx context.Context, ws, name string) (int, time
 
 // TestInput connects with connection details that are not saved. The name
 // may be empty.
-func (s *Service) TestInput(ctx context.Context, in ConnInput) (*TestResult, error) {
+func (s *Service) TestInput(ctx context.Context, ws string, in ConnInput) (*TestResult, error) {
 	if strings.TrimSpace(in.Name) == "" {
 		in.Name = "test"
 	}
@@ -392,5 +392,5 @@ func (s *Service) TestInput(ctx context.Context, in ConnInput) (*TestResult, err
 	if err != nil {
 		return nil, scrub(err, in.DSN)
 	}
-	return s.testConn(ctx, eng, in, info)
+	return s.testConn(ctx, ws, eng, in, info)
 }

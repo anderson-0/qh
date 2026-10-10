@@ -150,7 +150,7 @@ func (a *api) testInput(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	tr, err := a.cfg.Service.TestInput(r.Context(), in.core())
+	tr, err := a.cfg.Service.TestInput(r.Context(), workspace(r), in.core())
 	if err != nil {
 		a.fail(w, r, err)
 		return

@@ -1,0 +1,77 @@
+package harness
+
+import (
+	"context"
+	"encoding/json"
+	"os/exec"
+	"sort"
+	"strings"
+	"testing"
+)
+
+func chinook(t *testing.T) *Dataset {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("downloads Chinook")
+	}
+	ds, stop, err := OpenChinook(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	return ds
+}
+
+func TestQHServer(t *testing.T) {
+	ds := chinook(t)
+	ctx := context.Background()
+	bin, cleanup, err := BuildQH(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	srv, err := StartQH(ctx, bin, []Conn{ConnFor(ds)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	var names []string
+	for _, tl := range srv.Tools() {
+		names = append(names, tl.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "query,schema,sources" || srv.Name() != "qh" {
+		t.Fatalf("tools %v", names)
+	}
+	out, isErr := srv.Call(ctx, "query", json.RawMessage(`{"source":"chinook","query":"SELECT count(*) AS n FROM Track"}`))
+	if isErr || !strings.HasPrefix(out, "n\n3503\n") {
+		t.Fatalf("query: %q %v", out, isErr)
+	}
+	if out, isErr := srv.Call(ctx, "nope", json.RawMessage(`{}`)); !isErr || out == "" {
+		t.Fatalf("unknown tool: %q %v", out, isErr)
+	}
+}
+
+func TestDBHubServer(t *testing.T) {
+	ds := chinook(t)
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Skip("npx not installed")
+	}
+	ctx := context.Background()
+	srv, err := StartDBHub(ctx, DefaultDBHubVersion, []Conn{ConnFor(ds)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	exec := FindTool(srv.Tools(), "execute_sql")
+	if exec == "" || srv.Name() != "dbhub" {
+		t.Fatalf("tools: %v", srv.Tools())
+	}
+	out, isErr := srv.Call(ctx, exec, json.RawMessage(`{"sql":"SELECT count(*) AS n FROM Track"}`))
+	if isErr || !strings.Contains(out, "3503") {
+		t.Fatalf("execute_sql: %q %v", out, isErr)
+	}
+	if out, isErr := srv.Call(ctx, exec, json.RawMessage(`{"sql":"DELETE FROM Track"}`)); !isErr && !strings.Contains(strings.ToLower(out), "read") {
+		t.Fatalf("dbhub accepted a write in read-only mode: %q", out)
+	}
+}

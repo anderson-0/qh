@@ -1,0 +1,2 @@
+public: 4 tables, 1 view
+  AuditLog ~0 · order_items ~20 · orders ~250 · paid_orders (view) · users ~3

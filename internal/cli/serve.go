@@ -23,16 +23,59 @@ import (
 
 const localAddr = "127.0.0.1:8765"
 
+// queryLogFlags are the query-log settings of qh serve and qh mcp.
+type queryLogFlags struct {
+	off  bool
+	keep string
+}
+
+func (f *queryLogFlags) register(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&f.off, "no-query-log", false, "do not log query calls")
+	cmd.Flags().StringVar(&f.keep, "query-log-retention", "30d", "how long to keep logged query calls, e.g. 30d or 72h")
+}
+
+func (f *queryLogFlags) retention() (time.Duration, error) {
+	d, err := auth.ParseExpiry(f.keep)
+	if err != nil || d <= 0 {
+		return 0, qerr.New(qerr.Invalid, "--query-log-retention must be a positive duration such as 30d or 72h")
+	}
+	return d, nil
+}
+
+// pruneQueryLog deletes expired query-log entries now, then hourly until ctx ends.
+func pruneQueryLog(ctx context.Context, svc *core.Service, retention time.Duration) {
+	go func() {
+		tick := time.NewTicker(time.Hour)
+		defer tick.Stop()
+		for {
+			_, _ = svc.PruneQueryLog(ctx, retention)
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+}
+
 func serveCmd(home *string, version string) *cobra.Command {
 	var listen, dataDir, sqliteRoot string
 	var allow, deny []string
+	var lf queryLogFlags
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve MCP over HTTP and the REST API (local mode on " + localAddr + ", or server mode with --http)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refuseRemote(cmd); err != nil {
+				return err
+			}
+			retention, err := lf.retention()
+			if err != nil {
+				return err
+			}
 			server := listen != ""
-			var opts core.Options
+			opts := core.Options{NoQueryLog: lf.off}
 			addr := localAddr
 			if server {
 				addr = listen
@@ -92,6 +135,9 @@ func serveCmd(home *string, version string) *cobra.Command {
 			srv := &http.Server{Handler: httpapi.New(cfg), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 			ctx := cmd.Context()
 			a.pools.Start(ctx)
+			if !lf.off {
+				pruneQueryLog(ctx, a.svc, retention)
+			}
 			done := make(chan error, 1)
 			go func() { done <- srv.Serve(ln) }()
 			select {
@@ -108,6 +154,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 			}
 		},
 	}
+	lf.register(cmd)
 	fl := cmd.Flags()
 	fl.StringVar(&listen, "http", "", "server mode: listen on this address (e.g. :8080); requires QH_MASTER_KEY and API keys")
 	fl.StringVar(&dataDir, "data-dir", "", "data directory (default: the same as --home)")

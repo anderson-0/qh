@@ -26,6 +26,9 @@ func masterkeyCmd(home *string) *cobra.Command {
 			"In local mode, when QH_MASTER_KEY is unset and master.key does not exist, pass --generate to create a new master.key.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refuseRemote(cmd); err != nil {
+				return err
+			}
 			if oldFile == "" {
 				return qerr.New(qerr.Invalid, "--old-key-file is required").WithHint("Give the file holding the previous base64 master key")
 			}

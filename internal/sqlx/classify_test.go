@@ -73,6 +73,16 @@ func TestClassify(t *testing.T) {
 		{"SELECT 1--1", MySQL, Read, ""},
 		{"SELECT 1 -- x; DROP TABLE t", MySQL, Read, ""},
 		{"SELECT 1 --\n; DROP TABLE t", MySQL, 0, "only one statement per call"},
+		// A MySQL number ends at the first character that cannot continue it,
+		// so a keyword may follow directly.
+		{"SELECT 1.5INTO OUTFILE 'x'", MySQL, Write, ""},
+		{"SELECT 1e0INTO OUTFILE 'x'", MySQL, Write, ""},
+		{"SELECT 1.0INTO DUMPFILE 'x'", MySQL, Write, ""},
+		{"SELECT id, 1.0INTO DUMPFILE 'x' FROM users LIMIT 1", MySQL, Write, ""},
+		{"SELECT 1INTO OUTFILE 'x'", MySQL, Write, ""},
+		{"SELECT 1e10 AS n", MySQL, Read, ""},
+		{"SELECT 1.5e-3, 2E+4, 7. FROM t", MySQL, Read, ""},
+		{"SELECT 1.5INTO x FROM t", Postgres, Write, ""},
 		// MySQL executable comments run server-side, so they are rejected.
 		{"SELECT 1 /*! INTO OUTFILE '/tmp/x' */", MySQL, 0, "executable comments"},
 		{"SELECT 1 /*M! INTO OUTFILE '/tmp/x' */", MySQL, 0, "executable comments"},

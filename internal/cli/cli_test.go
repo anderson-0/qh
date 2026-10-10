@@ -78,3 +78,20 @@ func TestMissingFlags(t *testing.T) {
 		t.Fatalf("%d %q", code, errOut)
 	}
 }
+
+func TestMySQLEngineIsRegistered(t *testing.T) {
+	home := t.TempDir()
+	_, errOut, code := run(t, home, "", "conn", "add", "shop", "--engine", "mysql",
+		"--dsn", "mysql://u:hunter22@127.0.0.1:1/db?timeout=1s")
+	if code != 1 || !strings.HasPrefix(errOut, "error[connection_failed]") || strings.Contains(errOut, "hunter22") {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	out, errOut, code := run(t, home, "", "conn", "add", "maria", "--engine", "mariadb",
+		"--dsn", "mariadb://u:hunter22@127.0.0.1:1/db", "--skip-test")
+	if code != 0 || !strings.HasPrefix(out, "added maria (mariadb, ro)") {
+		t.Fatalf("%d %q %q", code, out, errOut)
+	}
+	if out, _, _ = run(t, home, "", "conn", "show", "maria"); !strings.Contains(out, "dsn: mariadb://u:***@127.0.0.1:1/db") {
+		t.Fatalf("show: %q", out)
+	}
+}

@@ -186,6 +186,14 @@ func TestInspect(t *testing.T) {
 	if info.Redacted != "postgres://bob:***@db.example.com:6543/shop?sslmode=require" {
 		t.Fatalf("redacted = %q", info.Redacted)
 	}
+	info, err = Engine{}.Inspect("postgres://bob:hunter22@db/shop?sslmode=require&sslpassword=keypass99&Password=other77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(info.Redacted, "keypass99") || strings.Contains(info.Redacted, "other77") || strings.Contains(info.Redacted, "hunter22") ||
+		!strings.Contains(info.Redacted, "sslmode=require") || !strings.Contains(info.Redacted, "sslpassword=***") {
+		t.Fatalf("query-parameter passwords not redacted: %q", info.Redacted)
+	}
 	info, err = Engine{}.Inspect("host=db user=bob password=hunter22 dbname=shop")
 	if err != nil || info.Redacted != "host=db user=bob password=*** dbname=shop" {
 		t.Fatalf("keyword form = %+v, %v", info, err)

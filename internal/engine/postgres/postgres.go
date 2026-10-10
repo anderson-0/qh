@@ -67,8 +67,14 @@ func redact(dsn string) string {
 			}
 		}
 		q := u.Query()
-		if q.Has("password") {
-			q.Set("password", placeholder)
+		redacted := false
+		for name := range q {
+			if strings.Contains(strings.ToLower(name), "password") { // password, sslpassword, ...
+				q.Set(name, placeholder)
+				redacted = true
+			}
+		}
+		if redacted {
 			u.RawQuery = q.Encode()
 		}
 		return strings.ReplaceAll(u.String(), placeholder, "***")

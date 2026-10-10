@@ -41,7 +41,7 @@ func TestToolDefinitionBudget(t *testing.T) {
 // TestAnthropicRequestIsWellFormed builds the request offline and checks the
 // tool schemas survive the SDK's JSON encoding, extra keys included.
 func TestAnthropicRequestIsWellFormed(t *testing.T) {
-	m := &anthropicModel{model: DefaultModel, system: "sys"}
+	m := &anthropicModel{model: DefaultModel, system: "sys", effort: "high"}
 	defs := []ToolDef{
 		{Name: "query", Description: "run SQL", Schema: map[string]any{
 			"type":                 "object",
@@ -61,10 +61,13 @@ func TestAnthropicRequestIsWellFormed(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Model     string `json:"model"`
-		MaxTokens int    `json:"max_tokens"`
-		System    []struct{ Text string }
-		Tools     []struct {
+		Model        string `json:"model"`
+		MaxTokens    int    `json:"max_tokens"`
+		OutputConfig struct {
+			Effort string `json:"effort"`
+		} `json:"output_config"`
+		System []struct{ Text string }
+		Tools  []struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 			InputSchema struct {
@@ -80,6 +83,9 @@ func TestAnthropicRequestIsWellFormed(t *testing.T) {
 	}
 	if got.Model != DefaultModel || got.MaxTokens != maxTokens || len(got.System) != 1 || got.System[0].Text != "sys" || len(got.Tools) != 2 {
 		t.Fatalf("%s", b)
+	}
+	if got.MaxTokens != 16000 || got.OutputConfig.Effort != "high" {
+		t.Fatalf("max_tokens %d, effort %q: %s", got.MaxTokens, got.OutputConfig.Effort, b)
 	}
 	q := got.Tools[0]
 	if q.Name != "query" || q.Description != "run SQL" || q.InputSchema.Type != "object" ||

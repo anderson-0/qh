@@ -39,8 +39,9 @@ type Usage struct{ Input, Output int64 }
 
 // Reply is one model turn.
 type Reply struct {
-	Calls []ToolCall
-	Usage Usage
+	Calls      []ToolCall
+	Usage      Usage
+	StopReason string // the API's stop_reason: end_turn, max_tokens, refusal, tool_use, ...
 }
 
 // Model is one conversation with a model. Start opens it; Continue sends
@@ -107,6 +108,8 @@ type Result struct {
 	Truncations  int     `json:"truncations"`
 	WallMS       int64   `json:"wall_ms"`
 	Error        string  `json:"error,omitempty"`
+	// StopReasons is the API stop_reason of every reply, in order.
+	StopReasons []string `json:"stop_reasons,omitempty"`
 	// Aborted marks a run that did not really happen (server start failure,
 	// model API error): it is excluded from every average.
 	Aborted bool `json:"aborted,omitempty"`
@@ -141,8 +144,16 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 		r.Turns++
 		r.InputTokens += reply.Usage.Input
 		r.OutputTokens += reply.Usage.Output
+		r.StopReasons = append(r.StopReasons, reply.StopReason)
 		if len(reply.Calls) == 0 {
-			r.Error = "the model stopped without calling submit_answer"
+			switch reply.StopReason {
+			case "max_tokens":
+				r.Error = "the model hit max_tokens without calling submit_answer"
+			case "refusal":
+				r.Error = "the model refused"
+			default:
+				r.Error = "the model stopped without calling submit_answer"
+			}
 			return r
 		}
 		var results []ToolResult

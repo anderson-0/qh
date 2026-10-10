@@ -7,7 +7,7 @@ import (
 )
 
 func sampleReport() *Report {
-	r := &Report{Date: "2026-10-11", Model: "claude-sonnet-5-5", Runs: 1, DBHubVersion: "1.5.0",
+	r := &Report{Date: "2026-10-11", Model: "claude-sonnet-5-5", Effort: "high", Runs: 1, DBHubVersion: "1.5.0",
 		ToolTokens: map[string][]int64{"qh": {400, 400, 400, 400, 400}, "dbhub": {500, 1000, 1500, 2000, 2500}},
 		ColdSchema: map[string]time.Duration{"qh": 400 * time.Millisecond, "dbhub": 9 * time.Second},
 		LatencyP50: map[string]time.Duration{"qh": 2 * time.Millisecond, "dbhub": 4 * time.Millisecond},
@@ -95,6 +95,7 @@ func TestMarkdown(t *testing.T) {
 	md := sampleReport().Markdown()
 	for _, want := range []string{
 		"# qh vs dbhub benchmark — 2026-10-11",
+		"Model `claude-sonnet-5-5` (effort high) · 1 run(s)",
 		"| chinook | qh | 100% |",
 		"| Fewer total tokens per task | ≥ 40% fewer than dbhub | 50.0% fewer | ✅ |",
 		"| Cold schema build, 1,000 tables | < 1 s | 0.40 s | ✅ |",

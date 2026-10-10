@@ -19,6 +19,7 @@ func main() {
 	var cfg harness.Config
 	var datasets, servers, out string
 	flag.StringVar(&cfg.Model, "model", harness.DefaultModel, "Claude model id")
+	flag.StringVar(&cfg.Effort, "effort", harness.DefaultEffort, "output_config effort sent with every request (low, medium, high, xhigh, max)")
 	flag.StringVar(&cfg.DBHubVersion, "dbhub-version", harness.DefaultDBHubVersion, "dbhub npm version")
 	flag.StringVar(&datasets, "datasets", "pagila,sakila,chinook", "datasets to run")
 	flag.StringVar(&servers, "servers", "qh,dbhub", "servers to compare")
@@ -37,6 +38,11 @@ func main() {
 	}
 	if cfg.Servers, err = parseList("servers", servers, "qh", "dbhub"); err != nil {
 		usage(err)
+	}
+	switch cfg.Effort {
+	case "low", "medium", "high", "xhigh", "max":
+	default:
+		usage(fmt.Errorf("-effort: unknown value %q (use low, medium, high, xhigh or max)", cfg.Effort))
 	}
 	cfg.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	if cfg.APIKey == "" && (!cfg.SkipAgent || !cfg.SkipTokens) {

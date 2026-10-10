@@ -9,13 +9,13 @@ import (
 
 // Report is everything one benchmark run measured.
 type Report struct {
-	Date, Model, DBHubVersion string
-	Runs                      int
-	Results                   []Result
-	ToolTokens                map[string][]int64 // server → tool-definition tokens for 1..5 connections
-	ColdSchema                map[string]time.Duration
-	LatencyP50, LatencyP95    map[string]time.Duration
-	Notes                     []string // e.g. a phase that could not run
+	Date, Model, Effort, DBHubVersion string
+	Runs                              int
+	Results                           []Result
+	ToolTokens                        map[string][]int64 // server → tool-definition tokens for 1..5 connections
+	ColdSchema                        map[string]time.Duration
+	LatencyP50, LatencyP95            map[string]time.Duration
+	Notes                             []string // e.g. a phase that could not run
 }
 
 // Summary aggregates the results of one dataset (or "all") and server.
@@ -145,7 +145,11 @@ func mark(c Criterion) string {
 func (r *Report) Markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# qh vs dbhub benchmark — %s\n\n", r.Date)
-	fmt.Fprintf(&b, "Model `%s` · %d run(s) per question · dbhub %s · tool output capped at %d characters for both servers.\n\n", r.Model, r.Runs, r.DBHubVersion, OutputCap)
+	model := "`" + r.Model + "`"
+	if r.Effort != "" {
+		model += " (effort " + r.Effort + ")"
+	}
+	fmt.Fprintf(&b, "Model %s · %d run(s) per question · dbhub %s · tool output capped at %d characters for both servers.\n\n", model, r.Runs, r.DBHubVersion, OutputCap)
 	b.WriteString("## Success criteria (spec §1)\n\n| Criterion | Target | Result | Pass |\n|---|---|---|---|\n")
 	for _, c := range Criteria(r) {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", c.Label, c.Target, c.Result, mark(c))

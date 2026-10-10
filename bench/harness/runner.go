@@ -11,7 +11,7 @@ import (
 
 // Config selects what a benchmark run does.
 type Config struct {
-	Model, DBHubVersion              string
+	Model, Effort, DBHubVersion      string
 	Datasets, Servers                []string
 	Runs, Limit, Parallel, MaxTurns  int
 	SkipAgent, SkipTokens, SkipMicro bool
@@ -31,7 +31,7 @@ type Deps struct {
 // DefaultDeps wires the real model, servers and datasets.
 func DefaultDeps(cfg Config, qhBin string) Deps {
 	return Deps{
-		Models:       NewAnthropic(cfg.APIKey, cfg.Model),
+		Models:       NewAnthropic(cfg.APIKey, cfg.Model, cfg.Effort),
 		StartDataset: StartDataset,
 		StartServer: func(ctx context.Context, server string, conns []Conn) (Server, error) {
 			if server == "qh" {
@@ -55,7 +55,7 @@ func (cfg Config) logf(format string, a ...any) {
 // micro-benchmarks, as configured. Failures of one server or phase are
 // recorded and the rest continues.
 func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
-	rep := &Report{Date: time.Now().Format("2006-01-02"), Model: cfg.Model, Runs: cfg.Runs, DBHubVersion: cfg.DBHubVersion,
+	rep := &Report{Date: time.Now().Format("2006-01-02"), Model: cfg.Model, Effort: cfg.Effort, Runs: cfg.Runs, DBHubVersion: cfg.DBHubVersion,
 		ToolTokens: map[string][]int64{}, ColdSchema: map[string]time.Duration{},
 		LatencyP50: map[string]time.Duration{}, LatencyP95: map[string]time.Duration{}}
 	var mu sync.Mutex

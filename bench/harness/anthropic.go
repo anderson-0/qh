@@ -8,20 +8,26 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-const maxTokens = 2048
+// maxTokens leaves room for a long submit_answer and for adaptive thinking at
+// the configured effort.
+const maxTokens = 16000
+
+// DefaultEffort is the output_config effort every request is sent with unless -effort says otherwise.
+const DefaultEffort = "high"
 
 type anthropicModel struct {
 	client   anthropic.Client
 	model    string
+	effort   string
 	system   string
 	tools    []anthropic.ToolUnionParam
 	messages []anthropic.MessageParam
 }
 
 // NewAnthropic returns a factory of conversations with model.
-func NewAnthropic(apiKey, model string) ModelFactory {
+func NewAnthropic(apiKey, model, effort string) ModelFactory {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6))
-	return func() Model { return &anthropicModel{client: client, model: model} }
+	return func() Model { return &anthropicModel{client: client, model: model, effort: effort} }
 }
 
 // toolParam converts a ToolDef. Schema keys other than type, properties and
@@ -57,11 +63,12 @@ func toolParam(t ToolDef) anthropic.ToolParam {
 // uses the same parameters.
 func (m *anthropicModel) newParams() anthropic.MessageNewParams {
 	return anthropic.MessageNewParams{
-		Model:     anthropic.Model(m.model),
-		MaxTokens: maxTokens,
-		System:    []anthropic.TextBlockParam{{Text: m.system}},
-		Messages:  m.messages,
-		Tools:     m.tools,
+		Model:        anthropic.Model(m.model),
+		MaxTokens:    maxTokens,
+		System:       []anthropic.TextBlockParam{{Text: m.system}},
+		Messages:     m.messages,
+		Tools:        m.tools,
+		OutputConfig: anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(m.effort)},
 	}
 }
 
@@ -92,7 +99,7 @@ func (m *anthropicModel) send(ctx context.Context) (*Reply, error) {
 	}
 	m.messages = append(m.messages, msg.ToParam())
 	u := msg.Usage
-	r := &Reply{Usage: Usage{Input: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, Output: u.OutputTokens}}
+	r := &Reply{StopReason: string(msg.StopReason), Usage: Usage{Input: u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens, Output: u.OutputTokens}}
 	for _, b := range msg.Content {
 		if tu, ok := b.AsAny().(anthropic.ToolUseBlock); ok {
 			r.Calls = append(r.Calls, ToolCall{ID: tu.ID, Name: tu.Name, Input: json.RawMessage(tu.Input)})

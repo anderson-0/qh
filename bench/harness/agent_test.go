@@ -185,3 +185,18 @@ func TestRunModelErrorIsAborted(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestRunReportsWhyTheModelStopped(t *testing.T) {
+	for stop, want := range map[string]string{
+		"max_tokens": "the model hit max_tokens without calling submit_answer",
+		"refusal":    "the model refused",
+		"end_turn":   "the model stopped without calling submit_answer",
+		"":           "the model stopped without calling submit_answer",
+	} {
+		s := &script{replies: []*Reply{{StopReason: stop, Usage: Usage{Input: 1, Output: 1}}}}
+		r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, nil, 1, 5)
+		if r.Error != want || r.Aborted || len(r.StopReasons) != 1 || r.StopReasons[0] != stop {
+			t.Errorf("stop %q: %+v", stop, r)
+		}
+	}
+}

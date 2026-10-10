@@ -57,6 +57,12 @@ type SQLite struct {
 	now func() time.Time
 }
 
+// openRetryFor bounds how long OpenSQLite retries after SQLITE_BUSY. The driver
+// runs PRAGMA journal_mode=WAL on every new connection, and SQLite does not
+// apply busy_timeout to that switch, so a connection opened while another
+// process is creating or converting the file can fail at once.
+const openRetryFor = 10 * time.Second
+
 // OpenSQLite opens (creating if needed) the store at path and migrates it.
 func OpenSQLite(path string) (*SQLite, error) {
 	msqlite.StrictPragmas(true)
@@ -67,6 +73,21 @@ func OpenSQLite(path string) (*SQLite, error) {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		return nil, err
 	}
+	deadline := time.Now().Add(openRetryFor)
+	backoff := 5 * time.Millisecond
+	for {
+		s, err := openSQLiteOnce(abs)
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
+			return s, err
+		}
+		time.Sleep(backoff)
+		if backoff < 100*time.Millisecond {
+			backoff *= 2
+		}
+	}
+}
+
+func openSQLiteOnce(abs string) (*SQLite, error) {
 	u := url.URL{Scheme: "file", Path: abs, RawQuery: "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -80,27 +101,42 @@ func OpenSQLite(path string) (*SQLite, error) {
 	return s, nil
 }
 
+// migrate applies pending migrations in one BEGIN IMMEDIATE transaction. The
+// write lock is taken before user_version is read, so concurrent first opens
+// wait on busy_timeout and then see the finished schema instead of racing to
+// create the same tables.
 func (s *SQLite) migrate(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	if err := applyMigrations(ctx, conn); err != nil {
+		conn.ExecContext(context.Background(), "ROLLBACK")
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		conn.ExecContext(context.Background(), "ROLLBACK")
+		return err
+	}
+	return nil
+}
+
+func applyMigrations(ctx context.Context, conn *sql.Conn) error {
 	var v int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
 		return err
 	}
 	for i := v; i < len(migrations); i++ {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
 		for _, stmt := range migrations[i] {
-			if _, err := tx.ExecContext(ctx, stmt); err != nil {
-				tx.Rollback()
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
 			return err
 		}
 	}
@@ -117,6 +153,11 @@ const connColumns = `id, workspace_id, name, engine, secret, secret_key_id, host
 func isUnique(err error) bool {
 	var se *msqlite.Error
 	return errors.As(err, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_UNIQUE
+}
+
+func isBusy(err error) bool {
+	var se *msqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlitelib.SQLITE_BUSY
 }
 
 func (s *SQLite) CreateConnection(ctx context.Context, c *Connection) error {

@@ -57,14 +57,25 @@ func rank(target string, cands []Candidate) []scored {
 	return out
 }
 
-// Closest returns up to n labels whose keys are near target, best first. A key
-// qualifies when its edit distance is at most max(2, len(target)/3), or when
-// one name contains the other (both at least 3 characters).
-func Closest(target string, cands []Candidate, n int) []string {
+// nearest returns the candidates whose keys are near target, best first and
+// de-duplicated by label. A key qualifies when its edit distance is within the
+// limit for the target's length, or when one name contains the other (both at
+// least 3 characters). The limit is 0 for targets of 0-2 characters, 1 for 3,
+// and max(2, len/3) beyond that. An empty target matches nothing.
+func nearest(target string, cands []Candidate) []scored {
 	t := strings.ToLower(target)
 	tl := utf8.RuneCountInString(t)
+	if tl == 0 {
+		return nil
+	}
 	limit := max(2, tl/3)
-	var out []string
+	switch {
+	case tl <= 2:
+		limit = 0
+	case tl == 3:
+		limit = 1
+	}
+	var out []scored
 	seen := map[string]bool{}
 	for _, s := range rank(target, cands) {
 		k := strings.ToLower(s.key)
@@ -72,10 +83,23 @@ func Closest(target string, cands []Candidate, n int) []string {
 		near := s.d <= limit || tl >= 3 && kl >= 3 && (strings.Contains(k, t) || strings.Contains(t, k))
 		if near && !seen[s.label] {
 			seen[s.label] = true
-			out = append(out, s.label)
-			if len(out) == n {
-				break
-			}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Closest returns up to n labels whose keys are near target, best first. See
+// nearest for the matching rules. It returns nil when n is not positive.
+func Closest(target string, cands []Candidate, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	var out []string
+	for _, s := range nearest(target, cands) {
+		out = append(out, s.label)
+		if len(out) == n {
+			break
 		}
 	}
 	return out
@@ -100,18 +124,38 @@ func ColumnHint(c *engine.Catalog, column string, tables []string) string {
 		}
 	}
 	if len(objs) == 0 {
+		qualify := len(c.Namespaces) > 1
 		var all []Candidate
 		for _, ns := range c.Namespaces {
 			for _, o := range ns.Objects {
 				for _, f := range o.Fields {
-					all = append(all, Candidate{Key: f.Name, Label: o.Name + "." + f.Name})
+					label := o.Name + "." + f.Name
+					if qualify {
+						label = ns.Name + "." + label
+					}
+					all = append(all, Candidate{Key: f.Name, Label: label})
 				}
 			}
 		}
-		if top := Closest(col, all, 5); len(top) > 0 {
-			return "Did you mean " + strings.Join(top, ", ") + "?"
+		ranked := nearest(col, all)
+		if len(ranked) == 0 {
+			return ""
 		}
-		return ""
+		ties := 0
+		for _, s := range ranked {
+			if s.d == ranked[0].d {
+				ties++
+			}
+		}
+		if ties > 5 {
+			// Too many equally good matches to point at one of them.
+			return ""
+		}
+		top := make([]string, 0, 5)
+		for _, s := range ranked[:min(5, len(ranked))] {
+			top = append(top, s.label)
+		}
+		return "Did you mean " + strings.Join(top, ", ") + "?"
 	}
 	var parts, best []string
 	for _, o := range objs {

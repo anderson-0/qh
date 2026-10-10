@@ -1,6 +1,7 @@
 package suggest
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -42,6 +43,24 @@ func TestClosest(t *testing.T) {
 	}
 }
 
+func TestClosestShortTargetsAreExact(t *testing.T) {
+	if got := Closest("id", cands("ip", "pk", "id"), 3); !reflect.DeepEqual(got, []string{"id"}) {
+		t.Fatalf("got %v", got)
+	}
+	if got := Closest("", cands("ip", "id"), 3); got != nil {
+		t.Fatalf("got %v", got)
+	}
+	if got := Closest("id", cands("id"), 0); got != nil {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestClosestThreeCharTargetAllowsOneEdit(t *testing.T) {
+	if got := Closest("abc", cands("abd", "axy"), 3); !reflect.DeepEqual(got, []string{"abd"}) {
+		t.Fatalf("got %v", got)
+	}
+}
+
 func hintCatalog() *engine.Catalog {
 	return &engine.Catalog{Namespaces: []engine.Namespace{
 		{Name: "audit", Objects: []*engine.Object{{Namespace: "audit", Name: "AuditLog",
@@ -71,7 +90,7 @@ func TestColumnHintCaseInsensitive(t *testing.T) {
 }
 
 func TestColumnHintWithoutKnownTables(t *testing.T) {
-	if got := ColumnHint(hintCatalog(), "emial", nil); got != "Did you mean users.email?" {
+	if got := ColumnHint(hintCatalog(), "emial", nil); got != "Did you mean public.users.email?" {
 		t.Fatalf("got %q", got)
 	}
 	if got := ColumnHint(hintCatalog(), "zzzzzz", []string{"nope"}); got != "" {
@@ -82,6 +101,25 @@ func TestColumnHintWithoutKnownTables(t *testing.T) {
 func TestColumnHintNoCloseMatchStillListsColumns(t *testing.T) {
 	got := ColumnHint(hintCatalog(), "zzzzzz", []string{"users"})
 	if strings.Contains(got, "Did you mean") || !strings.HasPrefix(got, "users has: ") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// manyTables builds one namespace with n tables that all have an "email" column.
+func manyTables(n int) *engine.Catalog {
+	objs := make([]*engine.Object, n)
+	for i := range objs {
+		objs[i] = &engine.Object{Namespace: "public", Name: fmt.Sprintf("t%d", i),
+			Fields: []engine.Field{{Name: "email"}}}
+	}
+	return &engine.Catalog{Namespaces: []engine.Namespace{{Name: "public", Objects: objs}}}
+}
+
+func TestColumnHintAmbiguousTiesGiveNoHint(t *testing.T) {
+	if got := ColumnHint(manyTables(6), "email", nil); got != "" {
+		t.Fatalf("got %q", got)
+	}
+	if got := ColumnHint(manyTables(5), "email", nil); !strings.HasPrefix(got, "Did you mean t0.email, ") {
 		t.Fatalf("got %q", got)
 	}
 }

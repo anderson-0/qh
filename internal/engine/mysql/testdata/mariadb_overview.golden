@@ -1,2 +1,2 @@
 qh: 4 tables, 1 view
-  AuditLog ~1 · orders ~250 · order_items ~20 · paid_orders (view) · users ~3
+  AuditLog ~1 · order_items ~20 · orders ~250 · paid_orders (view) · users ~3

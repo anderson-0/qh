@@ -138,28 +138,35 @@ func (c *conn) acquire(ctx context.Context) (*sql.Conn, error) {
 func discard(sc *sql.Conn) { _ = sc.Raw(func(any) error { return driver.ErrBadConn }) }
 
 // finish ends the transaction and resets session state so the pooled
-// connection carries nothing into the next call. Any failure discards it.
+// connection carries nothing into the next call. Contract: a failure of
+// UNLOCK TABLES, COMMIT or ROLLBACK is returned and discards the connection.
+// A failure of the reset statement discards the connection too, but is
+// returned only when commit is false: after a successful COMMIT the write
+// has happened, so reporting an error would make an agent retry it.
 func (c *conn) finish(sc *sql.Conn, commit, rw bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var err error
 	if rw {
-		_, err = sc.ExecContext(ctx, "UNLOCK TABLES")
-	}
-	if err == nil {
-		end := "ROLLBACK"
-		if commit {
-			end = "COMMIT"
+		if _, err := sc.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+			discard(sc)
+			return err
 		}
-		_, err = sc.ExecContext(ctx, end)
 	}
-	if err == nil {
-		_, err = sc.ExecContext(ctx, c.resetSQL())
+	end := "ROLLBACK"
+	if commit {
+		end = "COMMIT"
 	}
-	if err != nil {
+	if _, err := sc.ExecContext(ctx, end); err != nil {
 		discard(sc)
+		return err
 	}
-	return err
+	if _, err := sc.ExecContext(ctx, c.resetSQL()); err != nil {
+		discard(sc)
+		if !commit {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly bool) (*engine.Result, error) {
@@ -214,6 +221,13 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sql
 	}
 	if err := c.finish(sc, true, !readOnly); err != nil {
 		return nil, classify(ctx, err)
+	}
+	if !readOnly && access != sqlx.Read {
+		// Statements on a read-write connection can leave session state that
+		// the reset cannot clear (CREATE TEMPORARY TABLE, HANDLER ... OPEN,
+		// CALL changing sql_mode, LOCK INSTANCE FOR BACKUP). Never pool the
+		// connection after one.
+		discard(sc)
 	}
 	res.Duration = time.Since(start)
 	return res, nil

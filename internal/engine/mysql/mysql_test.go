@@ -245,3 +245,21 @@ func TestConnectionFailed(t *testing.T) {
 		}
 	}
 }
+
+func TestReadWriteConnectionDoesNotKeepTemporaryTables(t *testing.T) {
+	_, rw := specs(startDB(t, "mysql:8.4"))
+	rw.PoolSize = 1
+	c := openConn(t, rw)
+	ctx := context.Background()
+	opts := engine.QueryOpts{MaxRows: 10, Timeout: 5 * time.Second}
+	if _, err := c.Query(ctx, "CREATE TEMPORARY TABLE tmp_leak (x int)", opts); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Query(ctx, "SELECT * FROM tmp_leak", opts)
+	if err == nil {
+		t.Fatal("temporary table survived on a pooled connection")
+	}
+	if e := qerr.From(err); e.Category != qerr.QueryError || e.UnknownTable != "tmp_leak" {
+		t.Fatalf("err = %v", err)
+	}
+}

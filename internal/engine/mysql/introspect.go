@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
@@ -216,6 +217,18 @@ func (c *conn) assemble(tables []tableRow, columns []columnRow, keys []keyRow, i
 	for _, id := range ixOrder {
 		o := objs[key(id.schema, id.table)]
 		o.Indexes = append(o.Indexes, *ixs[id])
+	}
+	// Server collations order names differently (MariaDB and MySQL disagree
+	// about "_"), so sort here for the same output on both.
+	byName := func(a, b string) int {
+		if c := strings.Compare(strings.ToLower(a), strings.ToLower(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	}
+	slices.SortFunc(cat.Namespaces, func(a, b engine.Namespace) int { return byName(a.Name, b.Name) })
+	for i := range cat.Namespaces {
+		slices.SortFunc(cat.Namespaces[i].Objects, func(a, b *engine.Object) int { return byName(a.Name, b.Name) })
 	}
 	cat.Link()
 	return cat

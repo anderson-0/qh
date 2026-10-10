@@ -144,6 +144,7 @@ func (a *api) routes() []route {
 		{"GET", "/api/v1/connections/{name}/schema", q, true, true, a.getSchema},
 		{"POST", "/api/v1/connections/{name}/schema/refresh", m, true, true, a.refreshSchema},
 		{"POST", "/api/v1/connections/{name}/query", q, true, true, a.query},
+		{"GET", "/api/v1/query-log", m, true, false, a.queryLog},
 		{"GET", "/api/v1/workspaces", ad, false, false, a.listWorkspaces},
 		{"POST", "/api/v1/workspaces", ad, false, false, a.createWorkspace},
 		{"DELETE", "/api/v1/workspaces/{name}", ad, false, false, a.deleteWorkspace},
@@ -216,6 +217,9 @@ func (a *api) wrap(rt route) http.Handler {
 			return
 		}
 		ctx = context.WithValue(ctx, principalKey{}, p)
+		if a.cfg.Auth != nil {
+			ctx = core.WithKeyID(ctx, p.KeyID) // the query log records which key ran each query
+		}
 		if rt.workspace {
 			ws, err := a.resolveWorkspace(ctx, p, r.Header.Get("X-QH-Workspace"))
 			if err != nil {

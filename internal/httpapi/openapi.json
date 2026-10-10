@@ -20,23 +20,44 @@
       "Problem": { "type": "object", "required": ["type", "title", "status"], "properties": {
         "type": { "type": "string", "enum": ["auth", "forbidden", "unknown_source", "invalid", "read_only", "timeout", "connection_failed", "query_error", "busy", "internal", "not_found", "unavailable"] },
         "title": { "type": "string" }, "detail": { "type": "string" }, "status": { "type": "integer" } } },
-      "ConnectionInput": { "type": "object", "required": ["name", "engine", "dsn"], "additionalProperties": false, "properties": {
+      "ConnectionInput": { "type": "object", "required": ["name", "engine"], "additionalProperties": false,
+        "description": "Give dsn, or host (database for sqlite) with port, database, username, password and params; not both",
+        "properties": {
         "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" }, "engine": { "type": "string", "enum": ["postgres", "mysql", "mariadb", "sqlite"] },
-        "dsn": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string", "enum": ["ro", "rw"] },
+        "dsn": { "type": "string" }, "host": { "type": "string" }, "port": { "type": "integer" }, "database": { "type": "string" },
+        "username": { "type": "string" }, "password": { "type": "string" },
+        "params": { "type": "object", "additionalProperties": { "type": "string" } },
+        "tls": { "$ref": "#/components/schemas/TLS" },
+        "description": { "type": "string" }, "mode": { "type": "string", "enum": ["ro", "rw"] },
         "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" }, "pool_size": { "type": "integer" },
         "allowed_namespaces": { "type": "array", "items": { "type": "string" } } } },
       "ConnectionPatch": { "type": "object", "additionalProperties": false, "properties": {
+        "tls": { "oneOf": [{ "$ref": "#/components/schemas/TLS" }, { "type": "null" }], "description": "An object replaces the TLS settings; null removes them" },
         "dsn": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string", "enum": ["ro", "rw"] },
         "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" }, "pool_size": { "type": "integer" },
         "allowed_namespaces": { "type": "array", "items": { "type": "string" } } } },
       "Connection": { "type": "object", "properties": {
         "name": { "type": "string" }, "engine": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string" },
-        "host": { "type": "string" }, "port": { "type": "integer" }, "database": { "type": "string" }, "user": { "type": "string" },
+        "host": { "type": "string" }, "port": { "type": "integer" }, "database": { "type": "string" }, "username": { "type": "string" },
+        "tls": { "$ref": "#/components/schemas/TLSInfo" },
         "dsn": { "type": "string", "description": "Password replaced by ***" }, "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" },
         "pool_size": { "type": "integer" }, "allowed_namespaces": { "type": "array", "items": { "type": "string" } }, "version": { "type": "integer" },
         "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" },
         "server_version": { "type": "string" }, "connect_ms": { "type": "integer" } } },
       "TestResult": { "type": "object", "properties": { "server_version": { "type": "string" }, "connect_ms": { "type": "integer" } } },
+      "TLS": { "type": "object", "required": ["mode"], "additionalProperties": false, "properties": {
+        "mode": { "type": "string", "enum": ["disable", "require", "verify-ca", "verify-full"] },
+        "ca": { "type": "string", "description": "PEM CA certificates to trust instead of the system roots" },
+        "cert": { "type": "string", "description": "PEM client certificate" },
+        "key": { "type": "string", "description": "PEM private key for cert; stored sealed and never returned" },
+        "server_name": { "type": "string", "description": "Name the server certificate must carry (verify-full)" } } },
+      "TLSInfo": { "type": "object", "properties": {
+        "mode": { "type": "string" }, "ca": { "type": "boolean" }, "client_cert": { "type": "boolean" }, "server_name": { "type": "string" } } },
+      "QueryLogEntry": { "type": "object", "properties": {
+        "id": { "type": "integer" }, "connection": { "type": "string" }, "key_id": { "type": "string" },
+        "tool": { "type": "string", "enum": ["query", "explain"] }, "query": { "type": "string", "description": "Cut to 8 KiB" },
+        "rows": { "type": "integer" }, "duration_ms": { "type": "integer" }, "error_category": { "type": "string" },
+        "at": { "type": "string", "format": "date-time" } } },
       "QueryRequest": { "type": "object", "required": ["query"], "additionalProperties": false, "properties": {
         "query": { "type": "string" }, "max_rows": { "type": "integer" }, "explain": { "type": "boolean" } } },
       "QueryResult": { "type": "object", "properties": {
@@ -94,6 +115,13 @@
       "parameters": [{ "$ref": "#/components/parameters/name" }, { "$ref": "#/components/parameters/workspaceHeader" }],
       "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QueryRequest" } } } },
       "responses": { "200": { "description": "Result", "content": { "text/plain": {}, "application/json": { "schema": { "$ref": "#/components/schemas/QueryResult" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/query-log": { "get": { "summary": "Logged query calls, newest first; scope manage",
+      "parameters": [{ "$ref": "#/components/parameters/workspaceHeader" },
+        { "name": "connection", "in": "query", "schema": { "type": "string" } },
+        { "name": "since", "in": "query", "schema": { "type": "string" }, "description": "RFC 3339 time, or a duration back from now such as 24h or 7d" },
+        { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 } }],
+      "responses": { "200": { "description": "Entries", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/QueryLogEntry" } } } } },
+        "default": { "$ref": "#/components/responses/problem" } } } },
     "/api/v1/workspaces": {
       "get": { "summary": "List workspaces; scope admin", "responses": { "200": { "description": "Workspaces", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Workspace" } } } } }, "default": { "$ref": "#/components/responses/problem" } } },
       "post": { "summary": "Create a workspace; scope admin",

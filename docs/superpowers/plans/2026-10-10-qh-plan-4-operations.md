@@ -4735,9 +4735,13 @@ qh logs every `query` call: connection, API key, statement (up to 8 KiB), rows, 
 
 ```bash
 qh serve ...                                   # stop the server first
-export QH_MASTER_KEY=$(openssl rand -base64 32) # the new key (local mode: move master.key away instead)
+export QH_MASTER_KEY=$(openssl rand -base64 32) # the new key
 qh masterkey rotate --old-key-file old.key --home /var/lib/qh
 ```
+
+In local mode, move `master.key` aside (e.g. to `old.key`) and run `qh masterkey rotate --old-key-file old.key --generate`;
+`--generate` creates the new `master.key`. Without it, rotate refuses to run when no current key exists, so a missing
+`QH_MASTER_KEY` can never silently re-seal everything with a key you did not choose.
 
 Every stored connection is re-sealed with the new key in one transaction. If one cannot be opened with the old
 key, nothing changes. Restart the server with the new key. The old key is no longer needed.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,5 +93,37 @@ func TestKeyFile(t *testing.T) {
 	k2, err := LoadOrCreateKeyFile(path)
 	if err != nil || !bytes.Equal(k1, k2) {
 		t.Fatal("reload returned a different key")
+	}
+}
+
+func TestEmptyKeyFileRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "master.key")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadOrCreateKeyFile(path)
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("empty key file err = %v, want an error naming %s", err, path)
+	}
+	if b, _ := os.ReadFile(path); len(b) != 0 {
+		t.Fatal("existing key file was replaced")
+	}
+}
+
+func TestKeyFileNoTempLeftovers(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateKeyFile(filepath.Join(dir, "master.key")); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "master.key" {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("directory entries = %v, want only master.key", names)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -107,12 +108,14 @@ func ParseKey(b64 string) ([]byte, error) {
 	return key, nil
 }
 
-// LoadOrCreateKeyFile reads a base64 master key from path, creating it with
-// mode 0600 when it does not exist.
+// LoadOrCreateKeyFile reads a base64 master key from path. When path does not
+// exist it generates a key and publishes it with mode 0600: the key is written
+// to a temp file in the same directory, fsynced, then hard-linked to path, so
+// readers never see a partial file. An existing file is never replaced.
 func LoadOrCreateKeyFile(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err == nil {
-		return ParseKey(string(b))
+		return parseKeyFile(path, b)
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
@@ -121,16 +124,54 @@ func LoadOrCreateKeyFile(path string) ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return LoadOrCreateKeyFile(path) // another process created it first
-	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".master.key-*")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := f.WriteString(base64.StdEncoding.EncodeToString(key) + "\n"); err != nil {
-		f.Close()
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(base64.StdEncoding.EncodeToString(key) + "\n"); err != nil {
+		tmp.Close()
 		return nil, err
 	}
-	return key, f.Close()
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			// Another process published a key first; use theirs.
+			existing, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return nil, rerr
+			}
+			return parseKeyFile(path, existing)
+		}
+		return nil, err
+	}
+	syncDir(dir)
+	return key, nil
+}
+
+func parseKeyFile(path string, b []byte) ([]byte, error) {
+	key, err := ParseKey(string(b))
+	if err != nil {
+		return nil, fmt.Errorf("secret: master key file %s: %w", path, err)
+	}
+	return key, nil
+}
+
+// syncDir fsyncs a directory so a newly linked key survives a crash. It is
+// best effort: platforms that cannot sync directories are not an error.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }

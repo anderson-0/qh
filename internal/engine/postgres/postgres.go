@@ -88,6 +88,7 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 		cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	}
 	cfg.ConnConfig.RuntimeParams["application_name"] = "qh"
+	cfg.AfterRelease = resetSession
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, qerr.Wrap(qerr.ConnectionFailed, "cannot create connection pool", err)
@@ -98,6 +99,20 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 		return nil, err
 	}
 	return c, nil
+}
+
+// resetSession runs when a connection goes back to the pool, on every path
+// (success, query error, rollback), after its transaction has ended. A
+// statement may have changed session state (set_config(..., false), advisory
+// locks, temp objects, prepared statements); DISCARD ALL wipes all of it so
+// the next user starts clean. pgxpool keeps the connection checked out until
+// this returns, and destroys it when it returns false, so a failed reset
+// never returns a dirty connection to the pool.
+func resetSession(c *pgx.Conn) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := c.Exec(ctx, "DISCARD ALL", pgx.QueryExecModeSimpleProtocol)
+	return err == nil
 }
 
 type conn struct {
@@ -184,7 +199,7 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, cursor, re
 		return nil, c.classify(ctx, err)
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	err = exec(ctx, tx, `SELECT set_config('statement_timeout', $1, true), set_config('TimeZone', 'UTC', true), set_config('DateStyle', 'ISO, YMD', true)`,
+	err = exec(ctx, tx, `SELECT set_config('statement_timeout', $1, true), set_config('TimeZone', 'UTC', true), set_config('DateStyle', 'ISO, YMD', true), set_config('bytea_output', 'hex', true)`,
 		strconv.FormatInt(timeout.Milliseconds(), 10))
 	if err != nil {
 		return nil, c.classify(ctx, err)

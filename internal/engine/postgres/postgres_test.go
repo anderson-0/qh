@@ -210,3 +210,56 @@ func TestShortType(t *testing.T) {
 		}
 	}
 }
+
+// Session state set by a user statement must not leak to the next user of the
+// pooled connection (pool size 1 forces reuse).
+func TestSessionStateDoesNotLeak(t *testing.T) {
+	dsn := startPostgres(t, "postgres:17-alpine")
+	ro, _ := specs(dsn)
+	ro.PoolSize = 1
+	ctx := context.Background()
+	c, err := Engine{}.Open(ctx, ro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	opts := engine.QueryOpts{MaxRows: 10, ReadOnly: true, Timeout: 5 * time.Second}
+
+	if _, err := c.Query(ctx, `SELECT set_config('search_path', 'nowhere', false)`, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Query(ctx, `SELECT count(*) FROM users`, opts); err != nil {
+		t.Fatalf("search_path leaked: %v", err)
+	}
+
+	if _, err := c.Query(ctx, `SELECT set_config('bytea_output', 'escape', false)`, opts); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Query(ctx, `SELECT avatar FROM users WHERE id = 1`, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := res.Rows[0][0]; !v.Binary || v.Size != 4 {
+		t.Fatalf("bytea_output leaked: %+v", v)
+	}
+
+	if _, err := c.Query(ctx, `SELECT pg_advisory_lock(42)`, opts); err != nil {
+		t.Fatal(err)
+	}
+	other, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close(ctx)
+	// Run another statement so the pooled connection is released and reset.
+	if _, err := c.Query(ctx, `SELECT 1`, opts); err != nil {
+		t.Fatal(err)
+	}
+	var got bool
+	if err := other.QueryRow(ctx, `SELECT pg_try_advisory_lock(42)`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got {
+		t.Fatal("advisory lock still held by the pooled session")
+	}
+}

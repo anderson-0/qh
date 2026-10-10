@@ -26,6 +26,7 @@ func TestConformance(t *testing.T) {
 			"ATTACH DATABASE 'qh-evil-attach.db' AS evil",
 			"VACUUM INTO 'qh-evil-vacuum.db'",
 			"PRAGMA query_only = 0",
+			"EXPLAIN PRAGMA query_only = 0",
 		},
 		GoldenPrefix: "sqlite",
 	})

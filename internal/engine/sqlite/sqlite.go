@@ -133,8 +133,13 @@ func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine
 }
 
 func (c *conn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
-	if _, err := sqlx.Classify(q, sqlx.SQLite); err != nil {
+	access, err := sqlx.Classify(q, sqlx.SQLite)
+	if err != nil {
 		return nil, err
+	}
+	// SQLite applies pragmas while preparing the statement, even under EXPLAIN.
+	if sqlx.FirstKeyword(q, sqlx.SQLite) == "pragma" && access != sqlx.Read {
+		return nil, readOnlyErr()
 	}
 	r, err := c.run(ctx, "EXPLAIN QUERY PLAN "+q, engine.QueryOpts{MaxRows: 500, Timeout: o.Timeout})
 	if err != nil {
@@ -180,6 +185,10 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts) (*engine.R
 		return nil, err
 	}
 	defer sc.Close()
+	var before int64
+	if err := sc.QueryRowContext(ctx, "SELECT total_changes()").Scan(&before); err != nil {
+		return nil, classify(ctx, err)
+	}
 	rows, err := sc.QueryContext(ctx, q)
 	if err != nil {
 		return nil, classify(ctx, err)
@@ -221,8 +230,17 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts) (*engine.R
 	}
 	rows.Close()
 	if len(cts) == 0 {
-		if err := sc.QueryRowContext(ctx, "SELECT changes()").Scan(&res.RowsAffected); err != nil {
+		// changes() keeps the last INSERT/UPDATE/DELETE count through other
+		// statements, so only trust it when this statement changed rows.
+		var after int64
+		if err := sc.QueryRowContext(ctx, "SELECT total_changes()").Scan(&after); err != nil {
 			return nil, classify(ctx, err)
+		}
+		res.RowsAffected = 0
+		if after != before {
+			if err := sc.QueryRowContext(ctx, "SELECT changes()").Scan(&res.RowsAffected); err != nil {
+				return nil, classify(ctx, err)
+			}
 		}
 	}
 	res.Duration = time.Since(start)

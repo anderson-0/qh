@@ -139,6 +139,13 @@ func Classify(sql string, d Dialect) (Access, error) {
 		}
 		return Read, nil
 	case first == "explain":
+		// SQLite applies pragmas at prepare time, so EXPLAIN PRAGMA x = y still runs.
+		if inner := explainInner(t); len(inner) > 0 && inner[0].kind == kWord && inner[0].text == "pragma" {
+			if d == SQLite && readPragma(inner) {
+				return Read, nil
+			}
+			return Write, nil
+		}
 		if words["analyze"] && anyOf(words, "insert", "update", "delete", "merge", "create", "drop", "alter", "truncate", "into") {
 			return Write, nil
 		}
@@ -152,6 +159,39 @@ func Classify(sql string, d Dialect) (Access, error) {
 		return Write, nil
 	}
 	return Write, nil // unknown statements fail closed
+}
+
+// explainInner returns the tokens of the statement an EXPLAIN describes: t
+// after the EXPLAIN keyword, its QUERY, PLAN, ANALYZE and VERBOSE modifiers and
+// one parenthesized option list.
+func explainInner(t []token) []token {
+	i := 0
+	for i < len(t) && !(t[i].kind == kWord && t[i].text == "explain") {
+		i++
+	}
+	i++
+	parens := false
+	for i < len(t) {
+		switch {
+		case t[i].kind == kWord && (t[i].text == "query" || t[i].text == "plan" || t[i].text == "analyze" || t[i].text == "verbose"):
+			i++
+		case t[i].kind == kLParen && !parens:
+			parens = true
+			for depth := 0; i < len(t); i++ {
+				if t[i].kind == kLParen {
+					depth++
+				} else if t[i].kind == kRParen {
+					if depth--; depth == 0 {
+						i++
+						break
+					}
+				}
+			}
+		default:
+			return t[i:]
+		}
+	}
+	return nil
 }
 
 // readPragma reports whether t is PRAGMA [schema.]name[(arg)] for a known

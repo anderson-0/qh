@@ -54,8 +54,10 @@ func parseRaw(dsn string) (*gomysql.Config, error) {
 		native := "tcp(" + net.JoinHostPort(host, port) + ")/"
 		if u.RawQuery != "" {
 			// The driver splits its DSN at the last "/", so a raw "/" in a
-			// value (time_zone=Europe/Paris) would break parsing. Re-encode.
-			native += "?" + u.Query().Encode()
+			// value (time_zone=Europe/Paris) would break parsing. Escape only
+			// "/": the driver unescapes parameter values, but not the charset
+			// list, whose commas must stay literal (charset=utf8mb4,utf8).
+			native += "?" + strings.ReplaceAll(u.RawQuery, "/", "%2F")
 		}
 		cfg, err := gomysql.ParseDSN(native)
 		if err != nil {

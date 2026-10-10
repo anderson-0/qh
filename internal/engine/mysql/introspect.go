@@ -23,10 +23,11 @@ func (c *conn) filter(col string) (string, []any) {
 }
 
 // stringTypes are the information_schema DATA_TYPE values whose literal
-// defaults MySQL reports without quotes.
+// defaults MySQL reports without quotes. binary and varbinary are absent on
+// purpose: MySQL reports their defaults as hex literals (0x78).
 var stringTypes = map[string]bool{
 	"char": true, "varchar": true, "tinytext": true, "text": true, "mediumtext": true, "longtext": true,
-	"enum": true, "set": true, "binary": true, "varbinary": true,
+	"enum": true, "set": true,
 }
 
 type tableRow struct {

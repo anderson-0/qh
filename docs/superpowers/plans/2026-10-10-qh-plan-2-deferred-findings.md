@@ -4,9 +4,9 @@ Findings from the per-task and final reviews of Plan 2 (MySQL/MariaDB) that were
 
 ## Parked after the final fix wave (fix first)
 
-- M4 regression: url.Values.Encode turns "," into %2C so charset=utf8mb4,utf8 URLs fail — Ruling: park for the next plan (fix: escape only "/" in RawQuery) — real but narrow; multi-charset URLs are rare — cost if wrong: users with a charset list must use the native DSN form until fixed.
-- M5 regression: binary/varbinary literal defaults (reported as hex 0x78) now render quoted '0x78' — Ruling: park for the next plan (fix: drop binary/varbinary from the quoted types) — display-only — cost if wrong: misleading default shown for binary columns.
-- sqlx.Classify returns Read for TABLE/VALUES … INTO OUTFILE (server writes the file); on MySQL ro the C1b text guard blocks it — Ruling: park for the next plan (treat "into" after table/values like select) — guarded today — cost if wrong: none while the guard exists.
+- ~~M4 regression: url.Values.Encode turns "," into %2C so charset=utf8mb4,utf8 URLs fail — Ruling: park for the next plan (fix: escape only "/" in RawQuery) — real but narrow; multi-charset URLs are rare — cost if wrong: users with a charset list must use the native DSN form until fixed.~~ **Fixed** on branch fix/mysql-dsn-defaults.
+- ~~M5 regression: binary/varbinary literal defaults (reported as hex 0x78) now render quoted '0x78' — Ruling: park for the next plan (fix: drop binary/varbinary from the quoted types) — display-only — cost if wrong: misleading default shown for binary columns.~~ **Fixed** on branch fix/mysql-dsn-defaults.
+- ~~sqlx.Classify returns Read for TABLE/VALUES … INTO OUTFILE (server writes the file); on MySQL ro the C1b text guard blocks it — Ruling: park for the next plan (treat "into" after table/values like select) — guarded today — cost if wrong: none while the guard exists.~~ **Fixed** on branch fix/mysql-dsn-defaults.
 - C1b guard also refuses ro reads whose identifiers contain "outfile"/"dumpfile", with a misleading read-only message — Ruling: park (dedicated message later) — safety over convenience — cost if wrong: rare false refusals.
 
 ## Deferred by ruling

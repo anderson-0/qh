@@ -76,6 +76,8 @@ func TestClassify(t *testing.T) {
 		// A MySQL number ends at the first character that cannot continue it,
 		// so a keyword may follow directly.
 		{"SELECT 1.5INTO OUTFILE 'x'", MySQL, Write, ""},
+		{"TABLE users INTO OUTFILE 'x'", MySQL, Write, ""},
+		{"VALUES ROW(1) INTO OUTFILE 'x'", MySQL, Write, ""},
 		{"SELECT 1e0INTO OUTFILE 'x'", MySQL, Write, ""},
 		{"SELECT 1.0INTO DUMPFILE 'x'", MySQL, Write, ""},
 		{"SELECT id, 1.0INTO DUMPFILE 'x' FROM users LIMIT 1", MySQL, Write, ""},

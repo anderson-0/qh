@@ -121,7 +121,7 @@ func normalize(in ConnInput) (ConnInput, error) {
 		}
 	}
 	in.AllowedNamespaces = ns
-	in.Description = strings.TrimSpace(in.Description)
+	in.Description = strings.Join(strings.Fields(in.Description), " ") // one line, so Sources stays one line per connection
 	return in, nil
 }
 

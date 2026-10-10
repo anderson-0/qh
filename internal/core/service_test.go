@@ -234,3 +234,21 @@ func TestWriteInvalidatesSchemaCache(t *testing.T) {
 		t.Fatalf("write did not invalidate the cache (%d rebuilds)", n)
 	}
 }
+
+func TestDescriptionWhitespaceCollapsed(t *testing.T) {
+	h := newHarness(t)
+	_, _, err := h.svc.CreateConnection(context.Background(), ws, ConnInput{
+		Name: "shop", Engine: "sqlite", DSN: testutil.SQLiteFixture(t), Description: "  a\n\tb\r\n\n  c ", Mode: engine.ModeRO,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := h.st.GetConnection(context.Background(), ws, "shop")
+	if err != nil || rec.Description != "a b c" {
+		t.Fatalf("description = %q, %v", rec.Description, err)
+	}
+	out, _ := h.svc.Sources(context.Background(), ws)
+	if out != "shop sqlite ro — a b c\n" {
+		t.Fatalf("sources = %q", out)
+	}
+}

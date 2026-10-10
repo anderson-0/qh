@@ -52,6 +52,7 @@
         "id": { "type": "string" }, "prefix": { "type": "string" }, "name": { "type": "string" }, "workspace": { "type": "string" },
         "scopes": { "type": "array", "items": { "type": "string" } }, "created_at": { "type": "string", "format": "date-time" },
         "expires_at": { "type": "string", "format": "date-time" }, "last_used_at": { "type": "string", "format": "date-time" },
+        "created_by": { "type": "string", "description": "Id of the key that created this one; absent for bootstrap and CLI-created keys" },
         "key": { "type": "string", "description": "Full key; present only in the create response" } } }
     }
   },

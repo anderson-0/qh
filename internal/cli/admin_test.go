@@ -23,7 +23,7 @@ func TestWorkspaceAndKeyCommands(t *testing.T) {
 		t.Fatalf("admin key: %d %q", code, out)
 	}
 	out, _, _ = run(t, home, "", "key", "ls")
-	if !strings.HasPrefix(out, "ID") || strings.Count(out, "\n") != 3 || !strings.Contains(out, "query,manage") || strings.Contains(out, "qh_") {
+	if !strings.HasPrefix(out, "ID") || !strings.Contains(strings.Split(out, "\n")[0], "CREATED BY") || strings.Count(out, "\n") != 3 || !strings.Contains(out, "query,manage") || strings.Contains(out, "qh_") {
 		t.Fatalf("key ls: %q", out)
 	}
 	id := strings.Fields(strings.Split(out, "\n")[1])[0]

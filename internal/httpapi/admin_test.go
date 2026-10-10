@@ -3,6 +3,7 @@ package httpapi
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anderson-0/qh/internal/auth"
 )
@@ -75,4 +76,65 @@ func TestWorkspacesAndKeys(t *testing.T) {
 		t.Fatalf("delete workspace: %d %s", r.status, r.body)
 	}
 	expectProblem(t, e.do(t, "GET", "/api/v1/connections", team, nil), 401, "auth", "invalid API key")
+}
+
+// A key created by a workspace's manage key never outlives that key, and
+// records which key created it.
+func TestKeysCannotOutliveTheirCreator(t *testing.T) {
+	e := newEnv(t, true, nil)
+	if r := e.do(t, "POST", "/api/v1/workspaces", e.admin, map[string]any{"name": "team"}); r.status != 201 {
+		t.Fatalf("create workspace: %d %s", r.status, r.body)
+	}
+	type keyOut struct {
+		ID        string     `json:"id"`
+		Key       string     `json:"key"`
+		ExpiresAt *time.Time `json:"expires_at"`
+		CreatedBy string     `json:"created_by"`
+	}
+	create := func(token string, body map[string]any) keyOut {
+		t.Helper()
+		var k keyOut
+		r := e.do(t, "POST", "/api/v1/keys", token, body)
+		r.json(t, &k)
+		if r.status != 201 {
+			t.Fatalf("create key: %d %s", r.status, r.body)
+		}
+		return k
+	}
+	parent := create(e.admin, map[string]any{"workspace": "team", "scopes": []string{"query", "manage"}, "expires_in": "7d"})
+	if parent.ExpiresAt == nil {
+		t.Fatal("parent has no expiry")
+	}
+	for _, expires := range []string{"", "30d"} {
+		child := create(parent.Key, map[string]any{"scopes": []string{"query", "manage"}, "expires_in": expires})
+		if child.ExpiresAt == nil || !child.ExpiresAt.Equal(*parent.ExpiresAt) {
+			t.Errorf("expires_in %q: child expires %v, parent %v", expires, child.ExpiresAt, parent.ExpiresAt)
+		}
+		if child.CreatedBy != parent.ID {
+			t.Errorf("expires_in %q: created_by %q, want %q", expires, child.CreatedBy, parent.ID)
+		}
+	}
+	short := create(parent.Key, map[string]any{"scopes": []string{"query"}, "expires_in": "1d"})
+	if short.ExpiresAt == nil || !short.ExpiresAt.Before(*parent.ExpiresAt) {
+		t.Errorf("a shorter expiry was changed: %v", short.ExpiresAt)
+	}
+
+	var list []keyOut
+	e.do(t, "GET", "/api/v1/keys", e.admin, nil).json(t, &list)
+	by := map[string]string{}
+	for _, k := range list {
+		by[k.ID] = k.CreatedBy
+	}
+	if by[short.ID] != parent.ID {
+		t.Errorf("listing: created_by %q, want %q", by[short.ID], parent.ID)
+	}
+	var adminID string
+	for id, creator := range by {
+		if id != parent.ID && creator == "" {
+			adminID = id // the bootstrap key has no creator
+		}
+	}
+	if adminID == "" || by[parent.ID] != adminID {
+		t.Errorf("parent created_by %q, bootstrap key %q", by[parent.ID], adminID)
+	}
 }

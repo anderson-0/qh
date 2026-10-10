@@ -18,6 +18,12 @@ type KeyInput struct {
 	Scopes    []string
 	Name      string
 	ExpiresIn time.Duration // 0 for no expiry
+	// NotAfter, when set, caps the expiry: the key expires at NotAfter at the
+	// latest, even when ExpiresIn is 0 or longer.
+	NotAfter *time.Time
+	// CreatedBy is the id of the key creating this one; empty for bootstrap
+	// and CLI-created keys.
+	CreatedBy string
 }
 
 // KeyInfo is what may be shown about a key. It never includes the secret.
@@ -30,11 +36,12 @@ type KeyInfo struct {
 	CreatedAt  time.Time
 	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
+	CreatedBy  string
 }
 
 func toInfo(k *store.APIKey) *KeyInfo {
 	return &KeyInfo{ID: k.ID, Prefix: k.Prefix, Name: k.Name, Workspace: k.WorkspaceID, Scopes: k.Scopes,
-		CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt, LastUsedAt: k.LastUsedAt}
+		CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt, LastUsedAt: k.LastUsedAt, CreatedBy: k.CreatedBy}
 }
 
 func validate(in KeyInput) error {
@@ -72,9 +79,13 @@ func CreateKey(ctx context.Context, st store.Store, in KeyInput) (string, *KeyIn
 		if err != nil {
 			return "", nil, err
 		}
-		k := &store.APIKey{ID: store.NewID(), WorkspaceID: in.Workspace, Prefix: prefix, Hash: hash, Scopes: in.Scopes, Name: in.Name}
+		k := &store.APIKey{ID: store.NewID(), WorkspaceID: in.Workspace, Prefix: prefix, Hash: hash, Scopes: in.Scopes, Name: in.Name, CreatedBy: in.CreatedBy}
 		if in.ExpiresIn > 0 {
 			exp := time.Now().UTC().Add(in.ExpiresIn)
+			k.ExpiresAt = &exp
+		}
+		if in.NotAfter != nil && (k.ExpiresAt == nil || k.ExpiresAt.After(*in.NotAfter)) {
+			exp := in.NotAfter.UTC()
 			k.ExpiresAt = &exp
 		}
 		err = st.CreateKey(ctx, k)

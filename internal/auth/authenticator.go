@@ -55,7 +55,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, header string) (*Princ
 		return nil, authErr("API key expired")
 	}
 	a.touch(ctx, k.ID, now)
-	p := &Principal{KeyID: k.ID, Prefix: k.Prefix, Workspace: k.WorkspaceID, Scopes: map[string]bool{}}
+	p := &Principal{KeyID: k.ID, Prefix: k.Prefix, Workspace: k.WorkspaceID, Scopes: map[string]bool{}, ExpiresAt: k.ExpiresAt}
 	for _, s := range k.Scopes {
 		p.Scopes[s] = true
 	}

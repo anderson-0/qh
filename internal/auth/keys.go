@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/store"
@@ -25,6 +26,7 @@ type Principal struct {
 	Prefix    string
 	Workspace string // empty for admin keys
 	Scopes    map[string]bool
+	ExpiresAt *time.Time // the key's expiry; nil when it never expires
 }
 
 // Has reports whether p may use scope. Admin implies every scope.

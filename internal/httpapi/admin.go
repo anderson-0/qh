@@ -60,12 +60,13 @@ type keyJSON struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	Key        string     `json:"key,omitempty"` // only in the response that creates the key
+	CreatedBy  string     `json:"created_by,omitempty"` // id of the key that created this one
+	Key        string     `json:"key,omitempty"`        // only in the response that creates the key
 }
 
 func toKey(k *auth.KeyInfo) keyJSON {
 	return keyJSON{ID: k.ID, Prefix: k.Prefix, Name: k.Name, Workspace: k.Workspace, Scopes: k.Scopes,
-		CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt, LastUsedAt: k.LastUsedAt}
+		CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt, LastUsedAt: k.LastUsedAt, CreatedBy: k.CreatedBy}
 }
 
 // listKeys: admin keys see every key (or one workspace with ?workspace=);
@@ -92,7 +93,9 @@ func (a *api) listKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 // createKey: admin keys create any key; manage keys create query/manage keys
-// for their own workspace only.
+// for their own workspace only, and those keys expire no later than the
+// manage key itself (a longer or missing expiry is capped to it). In server
+// mode the new key records the id of the key that created it.
 func (a *api) createKey(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Workspace string   `json:"workspace,omitempty"`
@@ -109,7 +112,12 @@ func (a *api) createKey(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	if p := principal(r); !p.IsAdmin() {
+	ki := auth.KeyInput{Scopes: in.Scopes, Name: in.Name, ExpiresIn: exp}
+	p := principal(r)
+	if a.cfg.Auth != nil {
+		ki.CreatedBy = p.KeyID
+	}
+	if !p.IsAdmin() {
 		if in.Workspace != "" && in.Workspace != p.Workspace {
 			a.fail(w, r, qerr.New(qerr.Forbidden, "manage keys can only create keys for their own workspace"))
 			return
@@ -121,8 +129,10 @@ func (a *api) createKey(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		in.Workspace = p.Workspace
+		ki.NotAfter = p.ExpiresAt
 	}
-	tok, info, err := auth.CreateKey(r.Context(), a.cfg.Store, auth.KeyInput{Workspace: in.Workspace, Scopes: in.Scopes, Name: in.Name, ExpiresIn: exp})
+	ki.Workspace = in.Workspace
+	tok, info, err := auth.CreateKey(r.Context(), a.cfg.Store, ki)
 	if err != nil {
 		a.fail(w, r, err)
 		return

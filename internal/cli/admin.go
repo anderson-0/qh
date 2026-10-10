@@ -86,7 +86,7 @@ func keyCmd(with withApp) *cobra.Command {
 					return err
 				}
 				w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-				fmt.Fprintln(w, "ID\tPREFIX\tWORKSPACE\tSCOPES\tNAME\tLAST USED\tEXPIRES")
+				fmt.Fprintln(w, "ID\tPREFIX\tWORKSPACE\tSCOPES\tNAME\tLAST USED\tEXPIRES\tCREATED BY")
 				when := func(t *time.Time) string {
 					if t == nil {
 						return "-"
@@ -98,7 +98,11 @@ func keyCmd(with withApp) *cobra.Command {
 					if ws == "" {
 						ws = "(admin)"
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", k.ID, k.Prefix, ws, strings.Join(k.Scopes, ","), k.Name, when(k.LastUsedAt), when(k.ExpiresAt))
+					by := k.CreatedBy
+					if by == "" {
+						by = "-"
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", k.ID, k.Prefix, ws, strings.Join(k.Scopes, ","), k.Name, when(k.LastUsedAt), when(k.ExpiresAt), by)
 				}
 				return w.Flush()
 			})},

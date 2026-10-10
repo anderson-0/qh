@@ -60,7 +60,8 @@ var migrations = [][]string{
 			name TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			expires_at TEXT,
-			last_used_at TEXT
+			last_used_at TEXT,
+			created_by TEXT
 		)`,
 		`CREATE INDEX api_keys_workspace ON api_keys (workspace_id)`,
 	},
@@ -365,16 +366,19 @@ func (s *SQLite) DeleteWorkspace(ctx context.Context, id string) error {
 	return nil
 }
 
-const keyColumns = `id, workspace_id, prefix, hash, scopes, name, created_at, expires_at, last_used_at`
+const keyColumns = `id, workspace_id, prefix, hash, scopes, name, created_at, expires_at, last_used_at, created_by`
 
 func (s *SQLite) CreateKey(ctx context.Context, k *APIKey) error {
 	now := s.now()
-	var ws any
+	var ws, by any
 	if k.WorkspaceID != "" {
 		ws = k.WorkspaceID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (`+keyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-		k.ID, ws, k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now.Format(time.RFC3339Nano), formatTime(k.ExpiresAt))
+	if k.CreatedBy != "" {
+		by = k.CreatedBy
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (`+keyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+		k.ID, ws, k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now.Format(time.RFC3339Nano), formatTime(k.ExpiresAt), by)
 	switch {
 	case isUnique(err):
 		return ErrExists
@@ -389,12 +393,12 @@ func (s *SQLite) CreateKey(ctx context.Context, k *APIKey) error {
 
 func scanKey(r scanner) (*APIKey, error) {
 	var k APIKey
-	var ws, expires, used sql.NullString
+	var ws, expires, used, by sql.NullString
 	var scopes, created string
-	if err := r.Scan(&k.ID, &ws, &k.Prefix, &k.Hash, &scopes, &k.Name, &created, &expires, &used); err != nil {
+	if err := r.Scan(&k.ID, &ws, &k.Prefix, &k.Hash, &scopes, &k.Name, &created, &expires, &used, &by); err != nil {
 		return nil, err
 	}
-	k.WorkspaceID = ws.String
+	k.WorkspaceID, k.CreatedBy = ws.String, by.String
 	if scopes != "" {
 		k.Scopes = strings.Split(scopes, ",")
 	}

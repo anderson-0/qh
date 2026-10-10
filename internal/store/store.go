@@ -59,6 +59,7 @@ type APIKey struct {
 	CreatedAt   time.Time
 	ExpiresAt   *time.Time
 	LastUsedAt  *time.Time
+	CreatedBy   string // id of the key that created this one; empty for bootstrap and CLI keys
 }
 
 // Store is the persistence interface. Plan 3 adds workspaces, keys and the query log.

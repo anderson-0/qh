@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -14,11 +17,13 @@ import (
 func masterkeyCmd(home *string) *cobra.Command {
 	c := &cobra.Command{Use: "masterkey", Short: "Manage the master key that seals connection strings"}
 	var oldFile string
+	var generate bool
 	rotate := &cobra.Command{
 		Use:   "rotate",
 		Short: "Re-seal every connection with the current master key (stop qh serve first)",
 		Long: "Re-seals every stored connection with the current master key (QH_MASTER_KEY, or master.key in the data directory).\n" +
-			"--old-key-file holds the previous key. Stop any running qh serve or qh mcp first, and restart it with the new key afterwards.",
+			"--old-key-file holds the previous key. Stop any running qh serve or qh mcp first, and restart it with the new key afterwards.\n" +
+			"In local mode, when QH_MASTER_KEY is unset and master.key does not exist, pass --generate to create a new master.key.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if oldFile == "" {
@@ -36,6 +41,17 @@ func masterkeyCmd(home *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			keyPath := filepath.Join(dir, "master.key")
+			created := false
+			if os.Getenv("QH_MASTER_KEY") == "" {
+				if _, err := os.Stat(keyPath); errors.Is(err, fs.ErrNotExist) {
+					if !generate {
+						return qerr.New(qerr.Invalid, "no current master key: QH_MASTER_KEY is unset and "+keyPath+" does not exist").
+							WithHint("Set QH_MASTER_KEY to the new key, or pass --generate to create master.key")
+					}
+					created = true
+				}
+			}
 			a, err := openAppWith(dir, core.Options{}, old)
 			if err != nil {
 				return err
@@ -50,10 +66,14 @@ func masterkeyCmd(home *string) *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "re-sealed %d of %d connections with master key %08x\n", n, n+cur, a.keys.PrimaryID())
+			if created {
+				fmt.Fprintf(cmd.OutOrStdout(), "generated a new master key in %s; keep it safe\n", keyPath)
+			}
 			return nil
 		},
 	}
 	rotate.Flags().StringVar(&oldFile, "old-key-file", "", "file holding the previous base64 master key")
+	rotate.Flags().BoolVar(&generate, "generate", false, "create a new master.key when QH_MASTER_KEY is unset and none exists (local mode)")
 	c.AddCommand(rotate)
 	return c
 }

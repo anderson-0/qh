@@ -76,8 +76,8 @@ func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
 
 // connSpec builds the spec engines open for workspace ws, carrying the
 // server's options. Workspace names cannot contain path separators.
-func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int) engine.ConnSpec {
-	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial}
+func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int, tls *engine.TLS) engine.ConnSpec {
+	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial, TLS: tls}
 	if s.opts.SQLiteRoot != "" {
 		spec.FileRoot = filepath.Join(s.opts.SQLiteRoot, ws)
 	}
@@ -128,7 +128,7 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	info, _ := eng.Inspect(in.DSN)
 	return &target{
 		rec: rec, eng: eng, info: info,
-		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize),
+		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),
 	}, nil
 }
 

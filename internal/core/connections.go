@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -24,11 +25,20 @@ const (
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
-// ConnInput describes a connection to create.
+// ConnInput describes a connection to create. Connection details are either
+// DSN, or the separate fields Host … Params, which the engine turns into a
+// connection string.
 type ConnInput struct {
 	Name              string
 	Engine            string
 	DSN               string
+	Host              string
+	Port              int
+	Database          string
+	Username          string
+	Password          string
+	Params            map[string]string
+	TLS               *engine.TLS
 	Description       string
 	Mode              engine.Mode
 	MaxRows           int
@@ -46,6 +56,8 @@ type ConnPatch struct {
 	TimeoutMS         *int
 	PoolSize          *int
 	AllowedNamespaces *[]string
+	TLS               *engine.TLS // replaces the TLS settings
+	ClearTLS          bool        // removes the TLS settings
 }
 
 // ConnInfo is what may be shown about a connection. DSN is redacted.
@@ -59,6 +71,7 @@ type ConnInfo struct {
 	Database          string
 	User              string
 	DSN               string
+	TLS               *engine.TLSInfo
 	MaxRows           int
 	TimeoutMS         int
 	PoolSize          int
@@ -91,12 +104,21 @@ func normalize(in ConnInput) (ConnInput, error) {
 			WithHint("Use lowercase letters, digits, _ and -, starting with a letter or digit, at most 64 characters")
 	}
 	in.Engine = strings.ToLower(strings.TrimSpace(in.Engine))
-	if _, err := engine.Get(in.Engine); err != nil {
+	eng, err := engine.Get(in.Engine)
+	if err != nil {
 		return in, err
 	}
-	in.DSN = strings.TrimSpace(in.DSN)
-	if in.DSN == "" {
-		return in, qerr.New(qerr.Invalid, "connection string is required")
+	if in.DSN, err = connString(eng, in); err != nil {
+		return in, err
+	}
+	in.Host, in.Port, in.Database, in.Username, in.Password, in.Params = "", 0, "", "", "", nil
+	if in.TLS != nil {
+		if in.Engine == "sqlite" {
+			return in, qerr.New(qerr.Invalid, "tls applies only to network databases")
+		}
+		if err := in.TLS.Validate(); err != nil {
+			return in, err
+		}
 	}
 	if in.Mode == "" {
 		in.Mode = engine.ModeRO
@@ -104,7 +126,6 @@ func normalize(in ConnInput) (ConnInput, error) {
 	if in.Mode != engine.ModeRO && in.Mode != engine.ModeRW {
 		return in, qerr.New(qerr.Invalid, "mode must be ro or rw")
 	}
-	var err error
 	if in.MaxRows, err = bounded("max_rows", in.MaxRows, DefaultMaxRows, MaxMaxRows); err != nil {
 		return in, err
 	}
@@ -125,22 +146,53 @@ func normalize(in ConnInput) (ConnInput, error) {
 	return in, nil
 }
 
+// connString returns in.DSN, or builds a connection string from the
+// separate fields. Giving both is an error.
+func connString(eng engine.Engine, in ConnInput) (string, error) {
+	dsn := strings.TrimSpace(in.DSN)
+	fields := in.Host != "" || in.Port != 0 || in.Database != "" || in.Username != "" || in.Password != "" || len(in.Params) > 0
+	if !fields {
+		if dsn == "" {
+			return "", qerr.New(qerr.Invalid, "connection string is required").
+				WithHint("Give dsn, or host (database for sqlite) with port, database, username, password and params")
+		}
+		return dsn, nil
+	}
+	if dsn != "" {
+		return "", qerr.New(qerr.Invalid, "give either dsn or host, port, database, username, password and params, not both")
+	}
+	b, ok := eng.(engine.DSNBuilder)
+	if !ok {
+		return "", qerr.New(qerr.Invalid, fmt.Sprintf("engine %q needs a connection string (dsn)", eng.Name()))
+	}
+	return b.BuildDSN(engine.DSNFields{Host: strings.TrimSpace(in.Host), Port: in.Port, Database: in.Database,
+		User: in.Username, Password: in.Password, Params: in.Params})
+}
+
 // load opens a stored connection's secret.
 func (s *Service) load(rec *store.Connection) (ConnInput, error) {
-	dsn, err := s.keys.Open(rec.Secret, []byte(rec.ID))
+	pt, err := s.keys.Open(rec.Secret, []byte(rec.ID))
 	if err != nil {
 		return ConnInput{}, fmt.Errorf("connection %q: %w", rec.Name, err)
 	}
+	dsn, tls, err := decodeSecret(pt)
+	if err != nil {
+		return ConnInput{}, fmt.Errorf("connection %q: cannot read its sealed settings: %w", rec.Name, err)
+	}
 	return ConnInput{
-		Name: rec.Name, Engine: rec.Engine, DSN: string(dsn), Description: rec.Description,
+		Name: rec.Name, Engine: rec.Engine, DSN: dsn, TLS: tls, Description: rec.Description,
 		Mode: engine.Mode(rec.Mode), MaxRows: rec.MaxRows, TimeoutMS: rec.TimeoutMS, PoolSize: rec.PoolSize,
 		AllowedNamespaces: rec.AllowedNamespaces,
 	}, nil
 }
 
-// fill seals in.DSN into rec and copies the other fields.
+// fill seals in.DSN and in.TLS into rec and copies the other fields.
 func (s *Service) fill(rec *store.Connection, in ConnInput, info engine.DSNInfo) error {
-	sealed, err := s.keys.Seal([]byte(in.DSN), []byte(rec.ID))
+	pt, err := encodeSecret(in.DSN, in.TLS)
+	if err != nil {
+		return err
+	}
+	sealed, err := s.keys.Seal(pt, []byte(rec.ID))
 	if err != nil {
 		return err
 	}
@@ -149,14 +201,34 @@ func (s *Service) fill(rec *store.Connection, in ConnInput, info engine.DSNInfo)
 	rec.Description, rec.Mode = in.Description, string(in.Mode)
 	rec.MaxRows, rec.TimeoutMS, rec.PoolSize = in.MaxRows, in.TimeoutMS, in.PoolSize
 	rec.AllowedNamespaces = in.AllowedNamespaces
+	rec.TLS = ""
+	if in.TLS != nil {
+		b, err := json.Marshal(in.TLS.Info())
+		if err != nil {
+			return err
+		}
+		rec.TLS = string(b)
+	}
 	return nil
+}
+
+// tlsInfo parses a stored TLS summary.
+func tlsInfo(s string) *engine.TLSInfo {
+	if s == "" {
+		return nil
+	}
+	var t engine.TLSInfo
+	if json.Unmarshal([]byte(s), &t) != nil {
+		return nil
+	}
+	return &t
 }
 
 func (s *Service) testConn(ctx context.Context, ws string, eng engine.Engine, in ConnInput, info engine.DSNInfo) (*TestResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	start := time.Now()
-	conn, err := eng.Open(ctx, s.connSpec(ws, "test", 0, in.Engine, in.DSN, in.Mode, 1))
+	conn, err := eng.Open(ctx, s.connSpec(ws, "test", 0, in.Engine, in.DSN, in.Mode, 1, in.TLS))
 	if err != nil {
 		return nil, scrub(err, secretsOf(in.DSN, info)...)
 	}
@@ -171,7 +243,7 @@ func (s *Service) testConn(ctx context.Context, ws string, eng engine.Engine, in
 func toInfo(rec *store.Connection, info engine.DSNInfo) *ConnInfo {
 	return &ConnInfo{
 		Name: rec.Name, Engine: rec.Engine, Description: rec.Description, Mode: engine.Mode(rec.Mode),
-		Host: rec.Host, Port: rec.Port, Database: rec.Database, User: rec.Username, DSN: info.Redacted,
+		Host: rec.Host, Port: rec.Port, Database: rec.Database, User: rec.Username, DSN: info.Redacted, TLS: tlsInfo(rec.TLS),
 		MaxRows: rec.MaxRows, TimeoutMS: rec.TimeoutMS, PoolSize: rec.PoolSize,
 		AllowedNamespaces: rec.AllowedNamespaces, Version: rec.Version,
 		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
@@ -250,6 +322,15 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	if p.AllowedNamespaces != nil {
 		in.AllowedNamespaces = *p.AllowedNamespaces
 	}
+	if p.ClearTLS && p.TLS != nil {
+		return nil, nil, qerr.New(qerr.Invalid, "give tls or clear it, not both")
+	}
+	if p.ClearTLS {
+		in.TLS = nil
+	}
+	if p.TLS != nil {
+		in.TLS = p.TLS
+	}
 	if in, err = normalize(in); err != nil {
 		return nil, nil, err
 	}
@@ -265,7 +346,7 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 		return nil, nil, scrub(err, in.DSN)
 	}
 	var tr *TestResult
-	if test && (p.DSN != nil || p.Mode != nil) {
+	if test && (p.DSN != nil || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
 		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
 			return nil, nil, err
 		}
@@ -348,7 +429,7 @@ func (s *Service) TestConnection(ctx context.Context, ws, name string) (*TestRes
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, ws, t.eng, ConnInput{Engine: t.rec.Engine, DSN: t.spec.DSN, Mode: t.spec.Mode}, t.info)
+	return s.testConn(ctx, ws, t.eng, ConnInput{Engine: t.rec.Engine, DSN: t.spec.DSN, Mode: t.spec.Mode, TLS: t.spec.TLS}, t.info)
 }
 
 // RefreshSchema rebuilds a connection's cached schema.

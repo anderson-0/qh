@@ -42,6 +42,25 @@ type Connection struct {
 	UpdatedAt         time.Time
 }
 
+// Workspace isolates connections and keys. Its ID is its name.
+type Workspace struct {
+	ID        string
+	CreatedAt time.Time
+}
+
+// APIKey is a stored API key. Only the SHA-256 of the key's secret is kept.
+type APIKey struct {
+	ID          string
+	WorkspaceID string // empty for admin keys, which belong to no workspace
+	Prefix      string
+	Hash        []byte
+	Scopes      []string
+	Name        string
+	CreatedAt   time.Time
+	ExpiresAt   *time.Time
+	LastUsedAt  *time.Time
+}
+
 // Store is the persistence interface. Plan 3 adds workspaces, keys and the query log.
 type Store interface {
 	CreateConnection(ctx context.Context, c *Connection) error
@@ -49,6 +68,17 @@ type Store interface {
 	DeleteConnection(ctx context.Context, workspaceID, name string) error
 	GetConnection(ctx context.Context, workspaceID, name string) (*Connection, error)
 	ListConnections(ctx context.Context, workspaceID string) ([]*Connection, error)
+	CreateWorkspace(ctx context.Context, id string) (*Workspace, error)
+	ListWorkspaces(ctx context.Context) ([]*Workspace, error)
+	DeleteWorkspace(ctx context.Context, id string) error
+	CreateKey(ctx context.Context, k *APIKey) error
+	GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error)
+	ListKeys(ctx context.Context, workspaceID string) ([]*APIKey, error)
+	ListAllKeys(ctx context.Context) ([]*APIKey, error)
+	DeleteKey(ctx context.Context, id string) error
+	TouchKey(ctx context.Context, id string, at time.Time) error
+	CountKeys(ctx context.Context) (int, error)
+	Ping(ctx context.Context) error
 	Close() error
 }
 

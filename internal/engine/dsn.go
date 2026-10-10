@@ -61,8 +61,12 @@ func BuildURL(scheme string, f DSNFields) (string, error) {
 		}
 		// Encode writes a space as "+", which pgx does not read back as a
 		// space. A literal "+" is already escaped as %2B, so every "+" left
-		// in the output is a space.
-		u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20") // sorted by key
+		// in the output is a space. Encode also writes "," as %2C, but the
+		// MySQL driver splits charset on a literal comma without unescaping
+		// it first, and a comma is legal in a query string.
+		enc := q.Encode() // sorted by key
+		enc = strings.ReplaceAll(enc, "+", "%20")
+		u.RawQuery = strings.ReplaceAll(enc, "%2C", ",")
 	}
 	return u.String(), nil
 }

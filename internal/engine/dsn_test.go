@@ -35,4 +35,7 @@ func TestBuildURL(t *testing.T) {
 	if got, _ := BuildURL("postgres", DSNFields{Host: "::1"}); got != "postgres://[::1]/" {
 		t.Fatalf("%q", got)
 	}
+	if got, err := BuildURL("mysql", DSNFields{Host: "db", Params: map[string]string{"x": "a,b c+d"}}); err != nil || got != "mysql://db/?x=a,b%20c%2Bd" {
+		t.Fatalf("%q %v", got, err)
+	}
 }

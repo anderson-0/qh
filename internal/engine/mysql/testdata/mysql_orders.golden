@@ -1,0 +1,8 @@
+qh.orders ~250 rows
+  id bigint PK =auto
+  user_id bigint NN → users.id
+  status enum NN [pending|paid|shipped] =pending
+  total decimal(12,2)
+  note text
+  ← order_items.order_id
+  idx (user_id)

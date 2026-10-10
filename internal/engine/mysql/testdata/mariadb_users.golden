@@ -1,0 +1,9 @@
+qh.users ~3 rows: App users
+  id bigint(20) PK
+  email varchar(255) NN  # Login email
+  name varchar(255)
+  bio text
+  avatar blob
+  created_at datetime
+  ← orders.user_id
+  idx unique(email)

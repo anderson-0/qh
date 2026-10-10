@@ -28,21 +28,46 @@ func Execute(version string, args []string, stdin io.Reader, stdout, stderr io.W
 	return 0
 }
 
+// withApp wraps a command so it runs with an opened app.
+type withApp func(fn func(cmd *cobra.Command, a *app, args []string) error) func(*cobra.Command, []string) error
+
 func newRoot(version string) *cobra.Command {
+	var home string
 	root := &cobra.Command{
 		Use:           "qh",
 		Short:         "Token-efficient database server for AI agents",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(&cobra.Command{
-		Use:   "version",
-		Short: "Print the version",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), version)
-			return nil
+	root.PersistentFlags().StringVar(&home, "home", "", "data directory (default $QH_HOME, else $XDG_CONFIG_HOME/qh or ~/.config/qh)")
+	with := func(fn func(cmd *cobra.Command, a *app, args []string) error) func(*cobra.Command, []string) error {
+		return func(cmd *cobra.Command, args []string) error {
+			dir, err := homeDir(home)
+			if err != nil {
+				return err
+			}
+			a, err := openApp(dir)
+			if err != nil {
+				return err
+			}
+			defer a.Close()
+			return fn(cmd, a, args)
+		}
+	}
+	root.AddCommand(
+		&cobra.Command{
+			Use:   "version",
+			Short: "Print the version",
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				fmt.Fprintln(cmd.OutOrStdout(), version)
+				return nil
+			},
 		},
-	})
+		mcpCmd(with, version),
+		connCmd(with),
+		queryCmd(with),
+		schemaCmd(with),
+	)
 	return root
 }

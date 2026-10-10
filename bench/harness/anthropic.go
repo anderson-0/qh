@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -143,4 +144,17 @@ func CountToolTokens(ctx context.Context, apiKey, model string, tools []ToolDef)
 		return 0, err
 	}
 	return with - base, nil
+}
+
+// IsTransient reports whether err from the model is worth excluding a run
+// over rather than counting against the server: rate limits (429), server
+// errors (5xx, including 529 overloaded) once the SDK's retries are spent, and
+// network or context errors. Other API errors (400 "prompt is too long",
+// invalid requests, 401, 404) are properties of the request, so the run failed.
+func IsTransient(err error) bool {
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
+	}
+	return true
 }

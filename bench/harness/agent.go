@@ -111,7 +111,8 @@ type Result struct {
 	// StopReasons is the API stop_reason of every reply, in order.
 	StopReasons []string `json:"stop_reasons,omitempty"`
 	// Aborted marks a run that did not really happen (server start failure,
-	// model API error): it is excluded from every average.
+	// transient model API error such as 429, 5xx or a network failure): it is
+	// excluded from every average. Other failures are ordinary failed runs.
 	Aborted bool `json:"aborted,omitempty"`
 }
 
@@ -145,7 +146,7 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 	reply, err := m.Start(ctx, SystemPrompt, PromptFor(q), tools)
 	for {
 		if err != nil {
-			r.Error, r.Aborted = "model: "+err.Error(), true
+			r.Error, r.Aborted = "model: "+err.Error(), IsTransient(err)
 			return r
 		}
 		r.Turns++
@@ -186,6 +187,9 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 			}
 			r.ToolCalls++
 			out, isErr := srv.Call(ctx, c.Name, c.Input)
+			if out == "" {
+				out = "(no output)" // an empty tool_result is ambiguous for the model
+			}
 			out, cut := capOutput(out)
 			if cut {
 				r.Truncations++

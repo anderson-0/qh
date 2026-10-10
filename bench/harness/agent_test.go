@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -215,5 +219,52 @@ func TestRunStopsAtTheTokenBudget(t *testing.T) {
 	s = &script{replies: []*Reply{{Calls: []ToolCall{call("c", "submit_answer", `{"rows":[[1]]}`)}, Usage: Usage{Input: 5000000}}}}
 	if r := Run(context.Background(), s, &fakeServer{}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10}); !r.Correct {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// apiErr is the error the SDK returns for an HTTP status.
+func apiErr(code int) error {
+	u, _ := url.Parse("https://api.anthropic.com/v1/messages")
+	return &anthropic.Error{StatusCode: code, Request: &http.Request{Method: "POST", URL: u}, Response: &http.Response{StatusCode: code}}
+}
+
+// failModel fails its first call with err.
+type failModel struct{ err error }
+
+func (f failModel) Start(context.Context, string, string, []ToolDef) (*Reply, error) {
+	return nil, f.err
+}
+func (f failModel) Continue(context.Context, []ToolResult) (*Reply, error) { return nil, f.err }
+
+func TestRunAbortsOnlyOnTransientErrors(t *testing.T) {
+	for _, c := range []struct {
+		err     error
+		aborted bool
+	}{
+		{apiErr(429), true},
+		{apiErr(500), true},
+		{apiErr(529), true},
+		{fmt.Errorf("wrapped: %w", apiErr(503)), true},
+		{errors.New("read tcp: connection reset by peer"), true},
+		{context.DeadlineExceeded, true},
+		{apiErr(400), false}, // "prompt is too long", invalid request
+		{apiErr(401), false},
+		{apiErr(404), false},
+	} {
+		r := Run(context.Background(), failModel{c.err}, &fakeServer{}, "chinook", q1, nil, 1, RunOpts{MaxTurns: 5})
+		if r.Aborted != c.aborted || !strings.HasPrefix(r.Error, "model: ") {
+			t.Errorf("%v: aborted %v, want %v: %+v", c.err, r.Aborted, c.aborted, r)
+		}
+	}
+}
+
+func TestRunReplacesEmptyToolOutput(t *testing.T) {
+	s := &script{replies: []*Reply{
+		{Calls: []ToolCall{call("a", "query", `{}`)}},
+		{Calls: []ToolCall{call("b", "submit_answer", `{"rows":[[1]]}`)}},
+	}}
+	Run(context.Background(), s, &fakeServer{out: ""}, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 5})
+	if got := s.sent[0][0].Content; got != "(no output)" {
+		t.Fatalf("content %q", got)
 	}
 }

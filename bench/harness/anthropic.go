@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -169,4 +170,25 @@ func IsTransient(err error) bool {
 		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
 	}
 	return true
+}
+
+// Preflight makes the two cheapest real requests of the benchmark, a
+// count_tokens call and a 16-token message with the configured effort, so a
+// bad key, an unknown model or a rejected parameter fails before hundreds of
+// conversations do.
+func Preflight(ctx context.Context, apiKey, model, effort string) error {
+	if _, err := CountToolTokens(ctx, apiKey, model, []ToolDef{{Name: "ping", Description: "Does nothing.", Schema: map[string]any{"type": "object", "properties": map[string]any{}}}}, ""); err != nil {
+		return fmt.Errorf("count_tokens: %w", err)
+	}
+	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(2), option.WithRequestTimeout(requestTimeout))
+	_, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:        anthropic.Model(model),
+		MaxTokens:    16,
+		Messages:     []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Reply with OK"))},
+		OutputConfig: anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(effort)},
+	})
+	if err != nil {
+		return fmt.Errorf("messages: %w", err)
+	}
+	return nil
 }

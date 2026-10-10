@@ -29,6 +29,9 @@ type Deps struct {
 	StartServer  func(ctx context.Context, server string, conns []Conn) (Server, error)
 	StartDataset func(ctx context.Context, name string) (*Dataset, func(), error)
 	CountTokens  func(ctx context.Context, tools []ToolDef, instructions string) (int64, error)
+	// Preflight checks the API key, the model id and the request shape once,
+	// before the agent phase; nil skips it.
+	Preflight func(ctx context.Context) error
 }
 
 // DefaultRunTimeout is how long one conversation may take. A run that exceeds
@@ -79,6 +82,7 @@ func DefaultDeps(cfg Config, qhBin string) Deps {
 		CountTokens: func(ctx context.Context, tools []ToolDef, instructions string) (int64, error) {
 			return CountToolTokens(ctx, cfg.APIKey, cfg.Model, tools, instructions)
 		},
+		Preflight: func(ctx context.Context) error { return Preflight(ctx, cfg.APIKey, cfg.Model, cfg.Effort) },
 	}
 }
 
@@ -103,6 +107,12 @@ func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
 		if cfg.Raw != nil {
 			b, _ := json.Marshal(r)
 			cfg.Raw.Write(append(b, '\n'))
+		}
+	}
+	if !cfg.SkipAgent && deps.Preflight != nil {
+		if err := deps.Preflight(ctx); err != nil {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("preflight failed, nothing was run: %v", err))
+			return rep, nil
 		}
 	}
 	if !cfg.SkipAgent {

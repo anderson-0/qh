@@ -198,3 +198,32 @@ func TestRunWithTimeoutIsAFailedRunNotAnAbort(t *testing.T) {
 		t.Fatal(DefaultRunTimeout)
 	}
 }
+
+func TestRunnerPreflightFailureSkipsTheAgentPhase(t *testing.T) {
+	deps := fakeDeps(false)
+	var touched atomic.Int32
+	deps.Preflight = func(context.Context) error { return errors.New("401 invalid x-api-key") }
+	deps.Models = func() Model { touched.Add(1); return answerModel{} }
+	deps.StartDataset = func(context.Context, string) (*Dataset, func(), error) {
+		touched.Add(1)
+		return nil, nil, errors.New("unused")
+	}
+	cfg := Config{Model: "fake", Datasets: []string{"chinook"}, Servers: []string{"qh", "dbhub"}, Runs: 3, Limit: 0, Parallel: 2, MaxTurns: 5}
+	rep, err := RunBenchmark(context.Background(), cfg, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(rep.Notes, "\n")
+	if len(rep.Results) != 0 || touched.Load() != 0 || !strings.Contains(notes, "preflight failed") || !strings.Contains(notes, "401 invalid x-api-key") {
+		t.Fatalf("%d results, touched %d, notes %v", len(rep.Results), touched.Load(), rep.Notes)
+	}
+}
+
+func TestRunnerPreflightIsOptionalAndSkippedWithoutTheAgentPhase(t *testing.T) {
+	deps := fakeDeps(false)
+	deps.Preflight = func(context.Context) error { t.Fatal("preflight ran"); return nil }
+	cfg := Config{Model: "fake", Servers: []string{"qh"}, SkipAgent: true, SkipTokens: true, SkipMicro: true}
+	if _, err := RunBenchmark(context.Background(), cfg, deps); err != nil {
+		t.Fatal(err)
+	}
+}

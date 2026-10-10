@@ -44,6 +44,11 @@ func masterkeyCmd(home *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			dbPath := filepath.Join(dir, "qh.db")
+			if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
+				return qerr.New(qerr.Invalid, "no qh store at "+dbPath).
+					WithHint("Pass --home DIR, where DIR is the server's --data-dir")
+			}
 			keyPath := filepath.Join(dir, "master.key")
 			created := false
 			if os.Getenv("QH_MASTER_KEY") == "" {
@@ -66,6 +71,9 @@ func masterkeyCmd(home *string) *cobra.Command {
 			}
 			n, cur, err := a.svc.RotateMasterKey(cmd.Context())
 			if err != nil {
+				if created {
+					_ = os.Remove(keyPath) // nothing was sealed with it: the transaction rolled back
+				}
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "re-sealed %d of %d connections with master key %08x\n", n, n+cur, a.keys.PrimaryID())

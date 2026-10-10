@@ -64,4 +64,32 @@ func TestMasterkeyRotate(t *testing.T) {
 		!strings.HasPrefix(errOut, `error[invalid]: connection "shop" in workspace "default" cannot be opened`) {
 		t.Fatalf("wrong key: %d %q", code, errOut)
 	}
+	if _, err := os.Stat(filepath.Join(home2, "master.key")); !os.IsNotExist(err) {
+		t.Fatalf("a failed rotation left master.key behind: %v", err)
+	}
+}
+
+func TestMasterkeyRotateNeedsStore(t *testing.T) {
+	k := make([]byte, 32)
+	rand.Read(k)
+	t.Setenv("QH_MASTER_KEY", base64.StdEncoding.EncodeToString(k))
+	old := filepath.Join(t.TempDir(), "old.key")
+	rand.Read(k)
+	os.WriteFile(old, []byte(base64.StdEncoding.EncodeToString(k)+"\n"), 0o600)
+	home := t.TempDir()
+	if _, errOut, code := run(t, home, "", "masterkey", "rotate", "--old-key-file", old); code != 1 ||
+		!strings.HasPrefix(errOut, "error[invalid]: no qh store at ") || !strings.Contains(errOut, "Pass --home DIR") {
+		t.Fatalf("missing store: %d %q", code, errOut)
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Fatalf("rotate created files in %s: %v", home, entries)
+	}
+	t.Setenv("QH_MASTER_KEY", "")
+	if _, errOut, code := run(t, home, "", "masterkey", "rotate", "--generate", "--old-key-file", old); code != 1 ||
+		!strings.HasPrefix(errOut, "error[invalid]: no qh store at ") {
+		t.Fatalf("missing store with --generate: %d %q", code, errOut)
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Fatalf("rotate --generate created files: %v", entries)
+	}
 }

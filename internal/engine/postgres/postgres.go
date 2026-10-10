@@ -90,6 +90,12 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	cfg.MaxConns = int32(max(spec.PoolSize, 1))
 	cfg.MaxConnIdleTime = 10 * time.Minute
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	if spec.Dial != nil {
+		cfg.ConnConfig.DialFunc = spec.Dial
+		// Resolve inside Dial only: pgx would otherwise look the host up
+		// itself first, and the policy must see (and dial) the one answer.
+		cfg.ConnConfig.LookupFunc = func(_ context.Context, host string) ([]string, error) { return []string{host}, nil }
+	}
 	if cfg.ConnConfig.ConnectTimeout == 0 {
 		cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	}

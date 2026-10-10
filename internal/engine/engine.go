@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,11 @@ type ConnSpec struct {
 	DSN      string // plaintext connection string; never log it
 	Mode     Mode
 	PoolSize int
+	// Dial, when set, opens every network connection to the database. Server
+	// mode passes the netguard policy here. Nil uses the engine's default.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// FileRoot, when set, confines file-based databases to this directory.
+	FileRoot string
 }
 
 // QueryOpts controls one query.

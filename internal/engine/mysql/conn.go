@@ -38,6 +38,9 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	if err != nil {
 		return nil, err
 	}
+	if spec.Dial != nil {
+		cfg.DialFunc = spec.Dial
+	}
 	connector, err := gomysql.NewConnector(cfg)
 	if err != nil {
 		return nil, invalidDSN()

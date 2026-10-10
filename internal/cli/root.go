@@ -65,6 +65,7 @@ func newRoot(version string) *cobra.Command {
 			},
 		},
 		mcpCmd(with, version),
+		masterkeyCmd(&home),
 		connCmd(with),
 		queryCmd(with),
 		schemaCmd(with),

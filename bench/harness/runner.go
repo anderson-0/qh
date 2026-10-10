@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -53,6 +54,47 @@ func runTimeoutText(d time.Duration) string {
 	return t
 }
 
+// errTap remembers the last error its model returned.
+type errTap struct {
+	Model
+	err error
+}
+
+func (t *errTap) Start(ctx context.Context, system, user string, tools []ToolDef) (*Reply, error) {
+	r, err := t.Model.Start(ctx, system, user, tools)
+	t.err = err
+	return r, err
+}
+
+func (t *errTap) Continue(ctx context.Context, results []ToolResult) (*Reply, error) {
+	r, err := t.Model.Continue(ctx, results)
+	t.err = err
+	return r, err
+}
+
+// failureNotes counts, per server, the failed runs that hit the token budget
+// or the run timeout; there is no note when there are none.
+func failureNotes(results []Result) []string {
+	var notes []string
+	for _, kind := range []string{"token budget exceeded", "run timed out"} {
+		var qh, db int
+		for _, r := range results {
+			if r.Aborted || !strings.Contains(r.Error, kind) {
+				continue
+			}
+			if r.Server == "qh" {
+				qh++
+			} else if r.Server == "dbhub" {
+				db++
+			}
+		}
+		if qh+db > 0 {
+			notes = append(notes, fmt.Sprintf("%d qh and %d dbhub runs failed with %q (they count against their server)", qh, db, kind))
+		}
+	}
+	return notes
+}
+
 // runWithTimeout is Run under the per-run timeout.
 func runWithTimeout(ctx context.Context, cfg Config, m Model, srv Server, ds string, q Question, truth [][]any, run int) Result {
 	d := cfg.RunTimeout
@@ -61,8 +103,13 @@ func runWithTimeout(ctx context.Context, cfg Config, m Model, srv Server, ds str
 	}
 	runCtx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
-	r := Run(runCtx, m, srv, ds, q, truth, run, RunOpts{MaxTurns: cfg.MaxTurns, TokenBudget: cfg.TokenBudget})
-	if runCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil && !r.Submitted {
+	tap := &errTap{Model: m}
+	r := Run(runCtx, tap, srv, ds, q, truth, run, RunOpts{MaxTurns: cfg.MaxTurns, TokenBudget: cfg.TokenBudget})
+	// A run that ended on a transient API error (say a 429 whose backoff the
+	// deadline cut short) stays aborted; only a run that ended on the bare
+	// deadline, or on something else, is a timeout.
+	cutByDeadline := !r.Aborted || errors.Is(tap.err, context.DeadlineExceeded)
+	if runCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil && !r.Submitted && cutByDeadline {
 		r.Aborted, r.Error = false, "run timed out after "+runTimeoutText(d)
 	}
 	return r
@@ -143,6 +190,7 @@ func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
 		rep.Notes = append(rep.Notes, fmt.Sprintf("%d qh and %d dbhub runs were aborted (server start or model API failures) and are excluded from every figure",
 			aborted["qh"], aborted["dbhub"]))
 	}
+	rep.Notes = append(rep.Notes, failureNotes(rep.Results)...)
 	if ctx.Err() != nil {
 		rep.Notes = append(rep.Notes, "interrupted; results are partial")
 	}

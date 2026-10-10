@@ -227,3 +227,39 @@ func TestRunnerPreflightIsOptionalAndSkippedWithoutTheAgentPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// errAfterDeadline returns err once its context is done.
+type errAfterDeadline struct{ err error }
+
+func (e errAfterDeadline) Start(ctx context.Context, _, _ string, _ []ToolDef) (*Reply, error) {
+	<-ctx.Done()
+	return nil, e.err
+}
+func (e errAfterDeadline) Continue(context.Context, []ToolResult) (*Reply, error) { return nil, e.err }
+
+func TestRunWithTimeoutKeepsATransientErrorAborted(t *testing.T) {
+	cfg := Config{MaxTurns: 5, RunTimeout: 30 * time.Millisecond}
+	r := runWithTimeout(context.Background(), cfg, errAfterDeadline{apiErr(429)}, &fakeServer{}, "chinook", q1, nil, 1)
+	if !r.Aborted || strings.Contains(r.Error, "timed out") || !strings.Contains(r.Error, "429") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestRunnerNotesBudgetAndTimeoutFailures(t *testing.T) {
+	rep := &Report{Results: []Result{
+		{Server: "qh", Error: "token budget exceeded (1200 tokens)"},
+		{Server: "dbhub", Error: "token budget exceeded (1300 tokens)"},
+		{Server: "dbhub", Error: "token budget exceeded (1100 tokens)"},
+		{Server: "dbhub", Error: "run timed out after 10m"},
+		{Server: "qh", Error: "token budget exceeded (1)", Aborted: true},
+	}}
+	notes := failureNotes(rep.Results)
+	got := strings.Join(notes, "\n")
+	if !strings.Contains(got, "1 qh and 2 dbhub runs failed with \"token budget exceeded\"") ||
+		!strings.Contains(got, "0 qh and 1 dbhub runs failed with \"run timed out\"") {
+		t.Fatalf("%q", got)
+	}
+	if n := failureNotes([]Result{{Server: "qh"}}); len(n) != 0 {
+		t.Fatalf("%v", n)
+	}
+}

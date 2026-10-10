@@ -77,6 +77,12 @@ func (m *anthropicModel) newParams() anthropic.MessageNewParams {
 }
 
 func (m *anthropicModel) Start(ctx context.Context, system, user string, tools []ToolDef) (*Reply, error) {
+	m.begin(system, user, tools)
+	return m.send(ctx)
+}
+
+// begin opens a conversation without sending it.
+func (m *anthropicModel) begin(system, user string, tools []ToolDef) {
 	m.system = system
 	m.tools = nil
 	for _, t := range tools {
@@ -84,7 +90,6 @@ func (m *anthropicModel) Start(ctx context.Context, system, user string, tools [
 		m.tools = append(m.tools, anthropic.ToolUnionParam{OfTool: &p})
 	}
 	m.messages = []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user))}
-	return m.send(ctx)
 }
 
 func (m *anthropicModel) Continue(ctx context.Context, results []ToolResult) (*Reply, error) {
@@ -172,22 +177,25 @@ func IsTransient(err error) bool {
 	return true
 }
 
+// preflightModel is the conversation Preflight sends: the real request shape
+// (max_tokens, effort, cache control, a system prompt, a tool) with a trivial
+// prompt.
+func preflightModel(client anthropic.Client, model, effort string) *anthropicModel {
+	m := &anthropicModel{client: client, model: model, effort: effort}
+	m.begin("You are a connectivity check.", "Reply with OK", []ToolDef{noopTool})
+	return m
+}
+
 // Preflight makes the two cheapest real requests of the benchmark, a
-// count_tokens call and a 16-token message with the configured effort, so a
-// bad key, an unknown model or a rejected parameter fails before hundreds of
-// conversations do.
+// count_tokens call and one message built by the same newParams as every
+// conversation, so a bad key, an unknown model or a rejected parameter fails
+// before hundreds of conversations do. Any reply is accepted.
 func Preflight(ctx context.Context, apiKey, model, effort string) error {
 	if _, err := CountToolTokens(ctx, apiKey, model, []ToolDef{{Name: "ping", Description: "Does nothing.", Schema: map[string]any{"type": "object", "properties": map[string]any{}}}}, ""); err != nil {
 		return fmt.Errorf("count_tokens: %w", err)
 	}
 	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(2), option.WithRequestTimeout(requestTimeout))
-	_, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:        anthropic.Model(model),
-		MaxTokens:    16,
-		Messages:     []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Reply with OK"))},
-		OutputConfig: anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(effort)},
-	})
-	if err != nil {
+	if _, err := preflightModel(client, model, effort).send(ctx); err != nil {
 		return fmt.Errorf("messages: %w", err)
 	}
 	return nil

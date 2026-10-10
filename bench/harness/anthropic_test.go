@@ -131,3 +131,34 @@ func TestCountParamsPutInstructionsInSystem(t *testing.T) {
 		t.Fatalf("system with instructions: %s", got)
 	}
 }
+
+// TestPreflightSendsTheRealRequestShape marshals the preflight request offline.
+func TestPreflightSendsTheRealRequestShape(t *testing.T) {
+	m := preflightModel(anthropic.Client{}, DefaultModel, "high")
+	b, err := json.Marshal(m.newParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		MaxTokens    int `json:"max_tokens"`
+		CacheControl struct {
+			Type string `json:"type"`
+		} `json:"cache_control"`
+		OutputConfig struct {
+			Effort string `json:"effort"`
+		} `json:"output_config"`
+		System   []struct{ Text string }
+		Tools    []struct{ Name string }
+		Messages []struct {
+			Content []struct{ Text string }
+		}
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxTokens != 16000 || got.CacheControl.Type != "ephemeral" || got.OutputConfig.Effort != "high" ||
+		len(got.System) != 1 || got.System[0].Text == "" || len(got.Tools) != 1 || got.Tools[0].Name != noopTool.Name ||
+		len(got.Messages) != 1 || got.Messages[0].Content[0].Text != "Reply with OK" {
+		t.Fatalf("%s", b)
+	}
+}

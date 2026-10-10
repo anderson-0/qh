@@ -196,10 +196,14 @@ func dbhubEnv(env []string) []string {
 			continue
 		}
 		switch name {
-		case "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP", "SHELL":
+		case "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP", "SHELL",
+			"SSL_CERT_FILE", "SSL_CERT_DIR", // proxies and CAs: npx must still reach the registry
+			"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+			"http_proxy", "https_proxy", "no_proxy", "all_proxy":
 		default:
-			if !strings.HasPrefix(name, "LC_") && !strings.HasPrefix(name, "NODE_") &&
-				!strings.HasPrefix(name, "npm_config_") && !strings.HasPrefix(name, "NVM_") {
+			if !strings.HasPrefix(name, "LC_") && !strings.HasPrefix(name, "NODE_") && // NODE_EXTRA_CA_CERTS included
+				!strings.HasPrefix(name, "npm_config_") && !strings.HasPrefix(name, "NPM_CONFIG_") &&
+				!strings.HasPrefix(name, "NVM_") && !strings.HasPrefix(name, "XDG_") {
 				continue
 			}
 		}

@@ -157,11 +157,10 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 		r.InputTokens += reply.Usage.Input
 		r.OutputTokens += reply.Usage.Output
 		r.StopReasons = append(r.StopReasons, reply.StopReason)
-		if opts.TokenBudget > 0 && r.InputTokens+r.OutputTokens > opts.TokenBudget {
-			r.Error = fmt.Sprintf("token budget exceeded (%d tokens)", r.InputTokens+r.OutputTokens)
-			return r
-		}
-		if len(reply.Calls) == 0 {
+		// A reply that crosses the budget has already been paid for: an answer
+		// it submits is kept, but nothing else runs.
+		over := opts.TokenBudget > 0 && r.InputTokens+r.OutputTokens > opts.TokenBudget
+		if len(reply.Calls) == 0 && !over {
 			switch reply.StopReason {
 			case "max_tokens":
 				r.Error = "the model hit max_tokens without calling submit_answer"
@@ -189,6 +188,9 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 				results = append(results, ToolResult{ID: c.ID, Content: "answer recorded"})
 				continue
 			}
+			if over {
+				continue
+			}
 			r.ToolCalls++
 			out, isErr := srv.Call(ctx, c.Name, c.Input)
 			if out == "" {
@@ -201,6 +203,10 @@ func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth 
 			results = append(results, ToolResult{ID: c.ID, Content: out, IsError: isErr})
 		}
 		if r.Submitted {
+			return r
+		}
+		if over {
+			r.Error = fmt.Sprintf("token budget exceeded (%d tokens)", r.InputTokens+r.OutputTokens)
 			return r
 		}
 		if r.Turns >= opts.MaxTurns {

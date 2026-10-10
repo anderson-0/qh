@@ -82,9 +82,13 @@ func TestDBHubServer(t *testing.T) {
 func TestDBHubEnvIsAnAllowList(t *testing.T) {
 	in := []string{"PATH=/usr/bin", "HOME=/h", "USER=u", "LANG=en_US.UTF-8", "LC_ALL=C", "TMPDIR=/t", "TEMP=/t", "TMP=/t",
 		"NODE_OPTIONS=--x", "npm_config_cache=/c", "NVM_DIR=/n", "SHELL=/bin/zsh",
+		"HTTP_PROXY=p", "https_proxy=p", "NO_PROXY=n", "no_proxy=n", "ALL_PROXY=a", "all_proxy=a", "HTTPS_PROXY=p", "http_proxy=p",
+		"NPM_CONFIG_REGISTRY=r", "SSL_CERT_FILE=/f", "SSL_CERT_DIR=/d", "NODE_EXTRA_CA_CERTS=/c", "XDG_CONFIG_HOME=/x",
 		"DSN=postgres://secret", "DBHUB_DSN=x", "DB_TYPE=mysql", "TRANSPORT=http", "PORT=1", "READONLY=false", "ANTHROPIC_API_KEY=sk", "QH_KEY=k", "malformed"}
 	got := strings.Join(dbhubEnv(in), "\n")
-	for _, keep := range []string{"PATH=", "HOME=", "USER=", "LANG=", "LC_ALL=", "TMPDIR=", "TEMP=", "TMP=", "NODE_OPTIONS=", "npm_config_cache=", "NVM_DIR=", "SHELL="} {
+	for _, keep := range []string{"PATH=", "HOME=", "USER=", "LANG=", "LC_ALL=", "TMPDIR=", "TEMP=", "TMP=", "NODE_OPTIONS=", "npm_config_cache=", "NVM_DIR=", "SHELL=",
+		"HTTP_PROXY=", "https_proxy=", "NO_PROXY=", "no_proxy=", "ALL_PROXY=", "all_proxy=", "HTTPS_PROXY=", "http_proxy=",
+		"NPM_CONFIG_REGISTRY=", "SSL_CERT_FILE=", "SSL_CERT_DIR=", "NODE_EXTRA_CA_CERTS=", "XDG_CONFIG_HOME="} {
 		if !strings.Contains(got, keep) {
 			t.Errorf("dropped %s", keep)
 		}

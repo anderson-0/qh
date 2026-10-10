@@ -286,3 +286,28 @@ func TestRunAppendsServerInstructionsToTheSystemPrompt(t *testing.T) {
 		t.Fatalf("system %q", s.system)
 	}
 }
+
+func TestRunKeepsAnAnswerSubmittedInTheBudgetCrossingReply(t *testing.T) {
+	srv := &fakeServer{out: "x"}
+	s := &script{replies: []*Reply{
+		{Calls: []ToolCall{call("a", "query", `{}`), call("b", "submit_answer", `{"rows":[[1]]}`)}, Usage: Usage{Input: 900, Output: 200}},
+	}}
+	r := Run(context.Background(), s, srv, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10, TokenBudget: 1000})
+	if !r.Submitted || !r.Correct || r.Error != "" || r.Aborted || srv.calls != 0 {
+		t.Fatalf("%+v, server calls %d", r, srv.calls)
+	}
+	// a malformed submit in the crossing reply does not count as an answer
+	s = &script{replies: []*Reply{{Calls: []ToolCall{call("b", "submit_answer", `{}`)}, Usage: Usage{Input: 2000}}}}
+	if r := Run(context.Background(), s, srv, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10, TokenBudget: 1000}); r.Submitted || r.Error != "token budget exceeded (2000 tokens)" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestRunDoesNotCallTheServerInABudgetCrossingReply(t *testing.T) {
+	srv := &fakeServer{out: "x"}
+	s := &script{replies: []*Reply{{Calls: []ToolCall{call("a", "query", `{}`)}, Usage: Usage{Input: 1500}}}}
+	r := Run(context.Background(), s, srv, "chinook", q1, [][]any{{int64(1)}}, 1, RunOpts{MaxTurns: 10, TokenBudget: 1000})
+	if r.Error != "token budget exceeded (1500 tokens)" || r.Aborted || r.Submitted || srv.calls != 0 || r.ToolCalls != 0 || len(s.sent) != 0 {
+		t.Fatalf("%+v, server calls %d", r, srv.calls)
+	}
+}

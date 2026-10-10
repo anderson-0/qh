@@ -40,16 +40,23 @@ type failure struct {
 	err     error
 }
 
+// pendingOpen is an open in progress. Its size counts toward the cap.
+type pendingOpen struct {
+	size int
+	done chan struct{}
+}
+
 // Manager hands out pooled connections.
 type Manager struct {
 	open Opener
 	opt  Options
 
-	mu       sync.Mutex
-	closed   bool
-	handles  map[string]*handle       // by connection id
-	failures map[string]*failure      // by connection id
-	opening  map[string]chan struct{} // by id@version
+	mu           sync.Mutex
+	closed       bool
+	handles      map[string]*handle      // by connection id
+	failures     map[string]*failure     // by connection id
+	opening      map[string]*pendingOpen // by id@version
+	retiredInUse int                     // sizes of retired pools still in use
 }
 
 var errClosed = errors.New("pool: manager closed")
@@ -67,7 +74,7 @@ func New(open Opener, opt Options) *Manager {
 	}
 	return &Manager{
 		open: open, opt: opt,
-		handles: map[string]*handle{}, failures: map[string]*failure{}, opening: map[string]chan struct{}{},
+		handles: map[string]*handle{}, failures: map[string]*failure{}, opening: map[string]*pendingOpen{},
 	}
 }
 
@@ -91,7 +98,7 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 				return h.conn, m.releaser(h), nil
 			}
 			delete(m.handles, spec.ID)
-			toClose = append(toClose, retire(h)...)
+			toClose = append(toClose, m.retire(h)...)
 		}
 		if f := m.failures[spec.ID]; f != nil && f.version == spec.Version && now.Before(f.retryAt) {
 			err := f.err
@@ -103,7 +110,7 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 			m.mu.Unlock()
 			closeAll(toClose)
 			select {
-			case <-wait:
+			case <-wait.done:
 				continue
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()
@@ -117,7 +124,7 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 			return nil, nil, err
 		}
 		done := make(chan struct{})
-		m.opening[key] = done
+		m.opening[key] = &pendingOpen{size: size, done: done}
 		m.mu.Unlock()
 		closeAll(toClose)
 
@@ -141,7 +148,7 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 		delete(m.failures, spec.ID)
 		var late []engine.Conn
 		if old := m.handles[spec.ID]; old != nil {
-			late = retire(old)
+			late = m.retire(old)
 		}
 		h := &handle{conn: conn, version: spec.Version, size: size, inflight: 1, lastUsed: m.opt.Now()}
 		m.handles[spec.ID] = h
@@ -151,12 +158,15 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 	}
 }
 
-// retire marks h as replaced and returns its conn if nobody is using it.
-func retire(h *handle) []engine.Conn {
+// retire marks h as replaced and returns its conn if nobody is using it. A
+// pool still in use keeps counting toward the cap until its last release. It
+// must be called with m.mu held.
+func (m *Manager) retire(h *handle) []engine.Conn {
 	h.retired = true
 	if h.inflight == 0 {
 		return []engine.Conn{h.conn}
 	}
+	m.retiredInUse += h.size
 	return nil
 }
 
@@ -168,6 +178,9 @@ func (m *Manager) releaser(h *handle) func() {
 			h.inflight--
 			h.lastUsed = m.opt.Now()
 			closeIt := h.retired && h.inflight == 0
+			if closeIt {
+				m.retiredInUse -= h.size
+			}
 			m.mu.Unlock()
 			if closeIt {
 				h.conn.Close()
@@ -177,11 +190,15 @@ func (m *Manager) releaser(h *handle) func() {
 }
 
 // makeRoom evicts least-recently-used idle pools until size more connections
-// fit under the cap. It must be called with m.mu held.
+// fit under the cap. Live pools, opens in progress and retired pools still in
+// use all count toward the cap. It must be called with m.mu held.
 func (m *Manager) makeRoom(size int) ([]engine.Conn, error) {
-	total := 0
+	total := m.retiredInUse
 	for _, h := range m.handles {
 		total += h.size
+	}
+	for _, p := range m.opening {
+		total += p.size
 	}
 	var out []engine.Conn
 	for total+size > m.opt.MaxTotalConns {
@@ -227,7 +244,7 @@ func (m *Manager) Drop(id string) {
 	m.mu.Lock()
 	if h := m.handles[id]; h != nil {
 		delete(m.handles, id)
-		toClose = retire(h)
+		toClose = m.retire(h)
 	}
 	delete(m.failures, id)
 	m.mu.Unlock()

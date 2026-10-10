@@ -246,3 +246,71 @@ func TestDropAndClose(t *testing.T) {
 		t.Fatal("Get after Close succeeded")
 	}
 }
+
+func TestCapCountsOpensInProgress(t *testing.T) {
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	var calls atomic.Int32
+	open := func(ctx context.Context, s engine.ConnSpec) (engine.Conn, error) {
+		calls.Add(1)
+		entered <- struct{}{}
+		<-gate
+		return &fakeConn{}, nil
+	}
+	m := New(open, Options{MaxTotalConns: 10})
+	ctx := context.Background()
+	type result struct {
+		rel func()
+		err error
+	}
+	results := make(chan result, 2)
+	for _, id := range []string{"a", "b"} {
+		go func() {
+			_, rel, err := m.Get(ctx, spec(id, 1, 5))
+			results <- result{rel, err}
+		}()
+	}
+	<-entered
+	<-entered
+	_, _, err := m.Get(ctx, spec("c", 1, 5))
+	if err == nil || qerr.From(err).Category != qerr.Busy {
+		t.Fatalf("cap ignored opens in progress: err = %v", err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("opener called %d times; c must not reach it", n)
+	}
+	close(gate)
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		r.rel()
+	}
+	m.Close()
+}
+
+func TestCapCountsRetiredInUse(t *testing.T) {
+	o := newOpener()
+	m := New(o.open, Options{MaxTotalConns: 10})
+	ctx := context.Background()
+	_, relOld, err := m.Get(ctx, spec("a", 1, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, relNew, err := m.Get(ctx, spec("a", 2, 5)) // retires a@1 while it is in use
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Get(ctx, spec("b", 1, 5)); err == nil || qerr.From(err).Category != qerr.Busy {
+		t.Fatalf("retired in-use pool not counted: err = %v", err)
+	}
+	relOld()
+	_, relB, err := m.Get(ctx, spec("b", 1, 5))
+	if err != nil {
+		t.Fatalf("should fit once the retired pool is released: %v", err)
+	}
+	relB()
+	relNew()
+	m.Close()
+}

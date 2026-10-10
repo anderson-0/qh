@@ -115,8 +115,8 @@ func refusedSettings() error {
 		WithHint("Remove the other settings from the connection string")
 }
 
-// withSettings adds key=” settings to dsn, in its own form (URL or
-// keyword/value).
+// withSettings appends key=value settings to dsn, in its own form (URL or
+// keyword/value). Every append to a connection string goes through here.
 func withSettings(dsn string, keys []string, value string) string {
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
 		pairs := make([]string, len(keys))
@@ -132,7 +132,7 @@ func withSettings(dsn string, keys []string, value string) string {
 		switch {
 		case !strings.Contains(rest, "?"):
 			return dsn + "?" + strings.Join(pairs, "&")
-		case strings.HasSuffix(dsn, "?"):
+		case strings.HasSuffix(dsn, "?") || strings.HasSuffix(dsn, "&"):
 			return dsn + strings.Join(pairs, "&")
 		default:
 			return dsn + "&" + strings.Join(pairs, "&")
@@ -142,7 +142,10 @@ func withSettings(dsn string, keys []string, value string) string {
 	for i, k := range keys {
 		pairs[i] = k + "='" + value + "'"
 	}
-	return dsn + " " + strings.Join(pairs, " ")
+	// Two spaces: in an unquoted value a trailing backslash escapes the next
+	// character, so with one space `application_name=x\` would swallow the
+	// first appended setting into its value.
+	return dsn + "  " + strings.Join(pairs, " ")
 }
 
 // usesOnly reports whether every setting in dsn is in allowed, without

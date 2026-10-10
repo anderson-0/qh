@@ -50,6 +50,13 @@ func TestServeFlagValidation(t *testing.T) {
 }
 
 func TestServeClearsPGEnvironment(t *testing.T) {
+	// serve runs in-process and unsets every PG* variable; put the test
+	// process's own back afterwards.
+	for _, kv := range os.Environ() {
+		if name, value, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "PG") {
+			t.Cleanup(func() { os.Setenv(name, value) })
+		}
+	}
 	t.Setenv("QH_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 	t.Setenv("PGPASSWORD", "operator-secret")
 	t.Setenv("PGSERVICE", "operator-service")

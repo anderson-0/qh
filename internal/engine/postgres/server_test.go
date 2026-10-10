@@ -134,13 +134,25 @@ func TestServerDSNAcceptsAllowedKeys(t *testing.T) {
 		"postgres://u:pw@db.example.com:5433/app?sslmode=require&sslsni=1&connect_timeout=5&target_session_attrs=any&application_name=x&channel_binding=prefer&require_auth=password&min_protocol_version=3.0&max_protocol_version=3.0&sslnegotiation=postgres",
 		"postgres://u@db.example.com/app?ssl=true&dbname=other",
 		"host=db.example.com port=5432 dbname=app user=u password='p w' sslmode=verify-full",
+		// A trailing backslash escapes one following space; the settings qh
+		// appends must survive it.
+		`host=db.example.com user=victim password='' sslmode=disable application_name=x\`,
+		// pgconn accepts a URL whose query ends in a separator.
+		"postgres://u@db.example.com/app?sslmode=disable&",
+		"postgres://u@db.example.com/app?",
 	} {
 		if err := (Engine{}).CheckServerDSN(dsn); err != nil {
 			t.Errorf("%q: %v", dsn, err)
 		}
 	}
-	if err := (Engine{}).CheckServerDSN("postgres://u@db.example.com/app?pool_max_conns=50"); err == nil {
-		t.Error("pool_max_conns accepted")
+	for _, dsn := range []string{
+		"postgres://u@db.example.com/app?pool_max_conns=50",
+		`host=db.example.com user=u password=hunter22 passfile=/x application_name=x\`,
+		`host=db.example.com user=u passfile=/x\`,
+	} {
+		if err := (Engine{}).CheckServerDSN(dsn); err == nil || !strings.HasPrefix(err.Error(), "error[invalid]: this server only accepts") {
+			t.Errorf("%q: %v", dsn, err)
+		}
 	}
 }
 
@@ -174,6 +186,13 @@ func TestServerIgnoresPgpass(t *testing.T) {
 	server.Dial = dialTo(addr)
 	if l := firstLogin(t, server, logins); l.password != "" {
 		t.Fatalf("server login %+v", l)
+	}
+	// An empty password plus a trailing backslash: the backslash must not
+	// swallow the forced passfile='' (pgconn reads ~/.pgpass when the
+	// password is empty).
+	server.DSN = "host=" + host + " port=" + port + ` user=victim password='' sslmode=disable application_name=x\`
+	if l := firstLogin(t, server, logins); l.password != "" {
+		t.Fatalf("server login after a trailing backslash %+v", l)
 	}
 }
 

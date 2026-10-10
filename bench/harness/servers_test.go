@@ -78,3 +78,20 @@ func TestDBHubServer(t *testing.T) {
 		t.Fatalf("dbhub accepted a write in read-only mode: %q", out)
 	}
 }
+
+func TestDBHubEnvIsAnAllowList(t *testing.T) {
+	in := []string{"PATH=/usr/bin", "HOME=/h", "USER=u", "LANG=en_US.UTF-8", "LC_ALL=C", "TMPDIR=/t", "TEMP=/t", "TMP=/t",
+		"NODE_OPTIONS=--x", "npm_config_cache=/c", "NVM_DIR=/n", "SHELL=/bin/zsh",
+		"DSN=postgres://secret", "DBHUB_DSN=x", "DB_TYPE=mysql", "TRANSPORT=http", "PORT=1", "READONLY=false", "ANTHROPIC_API_KEY=sk", "QH_KEY=k", "malformed"}
+	got := strings.Join(dbhubEnv(in), "\n")
+	for _, keep := range []string{"PATH=", "HOME=", "USER=", "LANG=", "LC_ALL=", "TMPDIR=", "TEMP=", "TMP=", "NODE_OPTIONS=", "npm_config_cache=", "NVM_DIR=", "SHELL="} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("dropped %s", keep)
+		}
+	}
+	for _, drop := range []string{"DSN", "DBHUB_DSN", "DB_TYPE", "TRANSPORT", "PORT", "READONLY", "ANTHROPIC_API_KEY", "QH_KEY", "malformed"} {
+		if strings.Contains(got, drop) {
+			t.Errorf("kept %s", drop)
+		}
+	}
+}

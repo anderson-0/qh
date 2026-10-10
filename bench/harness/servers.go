@@ -185,6 +185,29 @@ func dbhubDSN(c Conn) string {
 	return c.DSN
 }
 
+// dbhubEnv keeps only what npx and node need from env. dbhub reads its
+// configuration from the environment too (DSN, TRANSPORT, READONLY, ...), so a
+// stray variable of the user's must not change what is benchmarked.
+func dbhubEnv(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP", "SHELL":
+		default:
+			if !strings.HasPrefix(name, "LC_") && !strings.HasPrefix(name, "NODE_") &&
+				!strings.HasPrefix(name, "npm_config_") && !strings.HasPrefix(name, "NVM_") {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // StartDBHub writes a dbhub.toml for conns (read-only execute_sql plus
 // search_objects, dbhub's own tools; dbhub's defaults otherwise) and serves
 // dbhub over stdio through npx.
@@ -212,5 +235,6 @@ func StartDBHub(ctx context.Context, version string, conns []Conn) (Server, erro
 	}
 	cmd := exec.Command("npx", "-y", "@bytebase/dbhub@"+version, "--transport", "stdio", "--config", path)
 	cmd.Dir = dir
+	cmd.Env = dbhubEnv(os.Environ())
 	return connect(ctx, "dbhub", cmd, cleanup)
 }

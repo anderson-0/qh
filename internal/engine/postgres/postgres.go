@@ -142,16 +142,25 @@ func withSettings(dsn string, keys []string, value string) string {
 	for i, k := range keys {
 		pairs[i] = k + "='" + value + "'"
 	}
-	// Two spaces: in an unquoted value a trailing backslash escapes the next
-	// character, so with one space `application_name=x\` would swallow the
-	// first appended setting into its value.
-	return dsn + "  " + strings.Join(pairs, " ")
+	// The settings go both before and after dsn. A tenant's last value can
+	// swallow what follows it (`application_name=` takes the next word, since
+	// pgconn skips blanks after '='; a trailing backslash escapes the next
+	// space), but nothing can swallow the prefix, and the tenant cannot
+	// override it because the allow-list refuses these keys. The suffix,
+	// after two spaces, keeps the last word when it is not swallowed (the
+	// connect_timeout sentinel relies on that).
+	joined := strings.Join(pairs, " ")
+	return joined + " " + dsn + "  " + joined
 }
 
 // usesOnly reports whether every setting in dsn is in allowed, without
 // reading any file. pgconn checks the allow-list first; the invalid
 // connect_timeout appended here (the last occurrence of a key wins) then
-// stops it before it opens a passfile, service file or certificate.
+// stops it before it opens a passfile, service file or certificate. If the
+// tenant's last value swallows the sentinel, the verdict is still the
+// allow-list's (taken before any file access); the parse then continues and
+// may read only the operator's own default files (no file key can pass the
+// allow-list, and qh serve clears PG*), and its result is discarded.
 func usesOnly(dsn string, allowed []string) bool {
 	_, err := pgconn.ParseConfigWithOptions(withSettings(dsn, []string{"connect_timeout"}, "-1"),
 		pgconn.ParseConfigOptions{ConnStringAllowedKeys: allowed})

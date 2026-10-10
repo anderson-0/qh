@@ -149,6 +149,9 @@ func TestServerDSNAcceptsAllowedKeys(t *testing.T) {
 		"postgres://u@db.example.com/app?pool_max_conns=50",
 		`host=db.example.com user=u password=hunter22 passfile=/x application_name=x\`,
 		`host=db.example.com user=u passfile=/x\`,
+		// A swallowed sentinel leaves the allow-list verdict in place.
+		"host=db.example.com user=u passfile=/x application_name=",
+		"host=db.example.com user=u sslrootcert=/etc/hosts application_name=\t",
 	} {
 		if err := (Engine{}).CheckServerDSN(dsn); err == nil || !strings.HasPrefix(err.Error(), "error[invalid]: this server only accepts") {
 			t.Errorf("%q: %v", dsn, err)
@@ -267,6 +270,60 @@ func TestServerIgnoresDefaultClientCertificate(t *testing.T) {
 			if c != nil && (len(c.Certificates) > 0 || c.GetClientCertificate != nil) {
 				t.Errorf("%q: TLS config %d still carries a client certificate", dsn, i)
 			}
+		}
+	}
+}
+
+// Tenant connection strings whose last value could swallow the settings qh
+// appends: each is refused, or logs in without the operator's ~/.pgpass.
+func TestServerPgpassSwallowVariants(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".pgpass"), []byte("*:*:*:*:pgpass-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addr, logins := fakeServer(t)
+	host, port, _ := net.SplitHostPort(addr)
+	tails := []string{
+		`application_name=`,
+		`application_name= `,
+		"application_name=\t",
+		`application_name=x\`,
+		`application_name=x\\`,
+		`application_name=x\\\`,
+		`application_name=x\'`,
+		"application_name=x\\\t",
+		`application_name=\`,
+	}
+	var dsns []string
+	for _, tail := range tails {
+		dsns = append(dsns,
+			"host="+host+" port="+port+" user=victim password='' sslmode=disable "+tail,
+			"host="+host+" port="+port+" user=victim sslmode=disable "+tail)
+	}
+	dsns = append(dsns, "postgres://victim@"+net.JoinHostPort(host, port)+"/app?sslmode=disable&password=&application_name=")
+	for _, dsn := range dsns {
+		spec := engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, Dial: dialTo(addr)}
+		_, err := Engine{}.Open(context.Background(), spec)
+		if err == nil {
+			t.Errorf("%q: open succeeded against the fake server", dsn)
+			continue
+		}
+		if qerr.From(err).Category == qerr.Invalid {
+			select {
+			case l := <-logins:
+				t.Errorf("%q: refused (%v) but logged in %+v", dsn, err, l)
+			default:
+			}
+			continue
+		}
+		select {
+		case l := <-logins:
+			if l.password != "" {
+				t.Errorf("%q: sent password %q", dsn, l.password)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%q: no login and not refused: %v", dsn, err)
 		}
 	}
 }

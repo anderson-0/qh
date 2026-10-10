@@ -36,6 +36,17 @@ type Engine struct{}
 func (Engine) Name() string          { return "sqlite" }
 func (Engine) Dialect() sqlx.Dialect { return sqlx.SQLite }
 
+// BuildDSN implements engine.DSNBuilder: a SQLite database is a file path.
+func (Engine) BuildDSN(f engine.DSNFields) (string, error) {
+	if f.Host != "" || f.Port != 0 || f.User != "" || f.Password != "" || len(f.Params) > 0 {
+		return "", qerr.New(qerr.Invalid, "sqlite takes only database, the path of the database file")
+	}
+	if strings.TrimSpace(f.Database) == "" {
+		return "", qerr.New(qerr.Invalid, "database (the file path) is required")
+	}
+	return f.Database, nil
+}
+
 // Path returns the absolute database path in dsn: a file path, optionally
 // prefixed with sqlite:// or file:. Query strings and fragments are rejected
 // so driver parameters cannot be injected.

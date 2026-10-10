@@ -43,6 +43,9 @@ type Engine struct{}
 func (Engine) Name() string          { return "postgres" }
 func (Engine) Dialect() sqlx.Dialect { return sqlx.Postgres }
 
+// BuildDSN implements engine.DSNBuilder.
+func (Engine) BuildDSN(f engine.DSNFields) (string, error) { return engine.BuildURL("postgres", f) }
+
 var kvPassword = regexp.MustCompile(`(?i)(password\s*=\s*)('(?:[^'\\]|\\.)*'|\S+)`)
 
 func (Engine) Inspect(dsn string) (engine.DSNInfo, error) {

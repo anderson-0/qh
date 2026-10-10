@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	msqlite "modernc.org/sqlite"
@@ -48,6 +49,21 @@ var migrations = [][]string{
 		)`,
 		`INSERT INTO workspaces (id, name, created_at)
 		 VALUES ('default', 'default', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+	},
+	{
+		`CREATE TABLE api_keys (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+			prefix TEXT NOT NULL UNIQUE,
+			hash BLOB NOT NULL,
+			scopes TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			expires_at TEXT,
+			last_used_at TEXT,
+			created_by TEXT
+		)`,
+		`CREATE INDEX api_keys_workspace ON api_keys (workspace_id)`,
 	},
 }
 
@@ -276,4 +292,183 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+func isForeignKey(err error) bool {
+	var se *msqlite.Error
+	return errors.As(err, &se) && se.Code() == sqlitelib.SQLITE_CONSTRAINT_FOREIGNKEY
+}
+
+func formatTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func parseTime(s sql.NullString) (*time.Time, error) {
+	if !s.Valid {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, s.String)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *SQLite) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+func (s *SQLite) CreateWorkspace(ctx context.Context, id string) (*Workspace, error) {
+	now := s.now()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)`,
+		id, id, now.Format(time.RFC3339Nano))
+	if isUnique(err) {
+		return nil, ErrExists
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Workspace{ID: id, CreatedAt: now}, nil
+}
+
+func (s *SQLite) ListWorkspaces(ctx context.Context) ([]*Workspace, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, created_at FROM workspaces ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Workspace
+	for rows.Next() {
+		var w Workspace
+		var created string
+		if err := rows.Scan(&w.ID, &created); err != nil {
+			return nil, err
+		}
+		if w.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+			return nil, err
+		}
+		out = append(out, &w)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) DeleteWorkspace(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+const keyColumns = `id, workspace_id, prefix, hash, scopes, name, created_at, expires_at, last_used_at, created_by`
+
+func (s *SQLite) CreateKey(ctx context.Context, k *APIKey) error {
+	now := s.now()
+	var ws, by any
+	if k.WorkspaceID != "" {
+		ws = k.WorkspaceID
+	}
+	if k.CreatedBy != "" {
+		by = k.CreatedBy
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (`+keyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+		k.ID, ws, k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now.Format(time.RFC3339Nano), formatTime(k.ExpiresAt), by)
+	switch {
+	case isUnique(err):
+		return ErrExists
+	case isForeignKey(err):
+		return ErrNotFound
+	case err != nil:
+		return err
+	}
+	k.CreatedAt = now
+	return nil
+}
+
+func scanKey(r scanner) (*APIKey, error) {
+	var k APIKey
+	var ws, expires, used, by sql.NullString
+	var scopes, created string
+	if err := r.Scan(&k.ID, &ws, &k.Prefix, &k.Hash, &scopes, &k.Name, &created, &expires, &used, &by); err != nil {
+		return nil, err
+	}
+	k.WorkspaceID, k.CreatedBy = ws.String, by.String
+	if scopes != "" {
+		k.Scopes = strings.Split(scopes, ",")
+	}
+	var err error
+	if k.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return nil, err
+	}
+	if k.ExpiresAt, err = parseTime(expires); err != nil {
+		return nil, err
+	}
+	if k.LastUsedAt, err = parseTime(used); err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+func (s *SQLite) GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error) {
+	k, err := scanKey(s.db.QueryRowContext(ctx, `SELECT `+keyColumns+` FROM api_keys WHERE prefix = ?`, prefix))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return k, err
+}
+
+func (s *SQLite) listKeys(ctx context.Context, where string, args ...any) ([]*APIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+keyColumns+` FROM api_keys `+where+` ORDER BY created_at, id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*APIKey
+	for rows.Next() {
+		k, err := scanKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) ListKeys(ctx context.Context, workspaceID string) ([]*APIKey, error) {
+	if workspaceID == "" {
+		return s.listKeys(ctx, `WHERE workspace_id IS NULL`)
+	}
+	return s.listKeys(ctx, `WHERE workspace_id = ?`, workspaceID)
+}
+
+func (s *SQLite) ListAllKeys(ctx context.Context) ([]*APIKey, error) { return s.listKeys(ctx, ``) }
+
+func (s *SQLite) DeleteKey(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) TouchKey(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE api_keys SET last_used_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339Nano), id)
+	return err
+}
+
+func (s *SQLite) CountKeys(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM api_keys`).Scan(&n)
+	return n, err
 }

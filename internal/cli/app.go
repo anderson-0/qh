@@ -35,7 +35,9 @@ func homeDir(flagValue string) (string, error) {
 	return filepath.Join(h, ".config", "qh"), nil
 }
 
-func openApp(home string) (*app, error) {
+func openApp(home string) (*app, error) { return openAppWith(home, core.Options{}) }
+
+func openAppWith(home string, opts core.Options) (*app, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
@@ -58,7 +60,7 @@ func openApp(home string) (*app, error) {
 		return nil, err
 	}
 	pools := pool.New(core.OpenConn, pool.Options{})
-	return &app{svc: core.New(st, keys, pools, catalog.New(10*time.Minute)), pools: pools, st: st}, nil
+	return &app{svc: core.New(st, keys, pools, catalog.New(10*time.Minute), opts), pools: pools, st: st}, nil
 }
 
 func (a *app) Close() {

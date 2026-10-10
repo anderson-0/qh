@@ -68,6 +68,9 @@ func newRoot(version string) *cobra.Command {
 		connCmd(with),
 		queryCmd(with),
 		schemaCmd(with),
+		serveCmd(&home, version),
+		workspaceCmd(with),
+		keyCmd(with),
 	)
 	return root
 }

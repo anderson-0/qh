@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,15 +14,7 @@ import (
 )
 
 func TestStdioEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds the binary")
-	}
-	bin := filepath.Join(t.TempDir(), "qh")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
+	bin := buildBinary(t)
 	home, db := t.TempDir(), testutil.SQLiteFixture(t)
 	qh := func(args ...string) {
 		t.Helper()

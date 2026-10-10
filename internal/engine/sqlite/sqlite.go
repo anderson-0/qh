@@ -72,8 +72,26 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	if err != nil {
 		return nil, err
 	}
+	if spec.FileRoot != "" {
+		if err := within(spec.FileRoot, path); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := os.Stat(path); err != nil {
 		return nil, qerr.Wrap(qerr.ConnectionFailed, "database file not found: "+path, err)
+	}
+	if spec.FileRoot != "" {
+		real, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, qerr.Wrap(qerr.ConnectionFailed, "database file not found: "+path, err)
+		}
+		root, err := filepath.EvalSymlinks(spec.FileRoot)
+		if err != nil {
+			return nil, qerr.Wrap(qerr.Invalid, "the allowed sqlite directory does not exist", err)
+		}
+		if err := within(root, real); err != nil {
+			return nil, err
+		}
 	}
 	readOnly := spec.Mode != engine.ModeRW
 	q := "mode=rw&_busy_timeout=5000"
@@ -303,4 +321,14 @@ func classify(ctx context.Context, err error) error {
 		e.UnknownTable = strings.TrimPrefix(m[1], "main.")
 	}
 	return e
+}
+
+// within rejects path unless it lies inside root.
+func within(root, path string) error {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return qerr.New(qerr.Invalid, "sqlite path is outside the allowed directory").
+			WithHint("This server only opens SQLite files under its --sqlite-root")
+	}
+	return nil
 }

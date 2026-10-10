@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,11 @@ type ConnSpec struct {
 	DSN      string // plaintext connection string; never log it
 	Mode     Mode
 	PoolSize int
+	// Dial, when set, opens every network connection to the database. Server
+	// mode passes the netguard policy here. Nil uses the engine's default.
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// FileRoot, when set, confines file-based databases to this directory.
+	FileRoot string
 }
 
 // QueryOpts controls one query.
@@ -79,6 +85,13 @@ type Engine interface {
 	// Inspect parses dsn without connecting.
 	Inspect(dsn string) (DSNInfo, error)
 	Open(ctx context.Context, spec ConnSpec) (Conn, error)
+}
+
+// ServerDSNChecker is implemented by engines that restrict what a connection
+// string may contain in server mode. CheckServerDSN must not connect or read
+// files, and its error must not quote dsn.
+type ServerDSNChecker interface {
+	CheckServerDSN(dsn string) error
 }
 
 // Conn is an open connection pool to one database. Methods return

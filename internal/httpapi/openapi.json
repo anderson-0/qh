@@ -1,0 +1,116 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "qh API",
+    "version": "1",
+    "description": "Manage database connections, workspaces and API keys, and query databases. Authenticate with Authorization: Bearer qh_…; admin keys name a workspace with X-QH-Workspace."
+  },
+  "components": {
+    "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer" } },
+    "parameters": {
+      "name": { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } },
+      "workspaceHeader": { "name": "X-QH-Workspace", "in": "header", "required": false, "schema": { "type": "string" }, "description": "Required for admin keys on workspace endpoints." },
+      "skipTest": { "name": "skip_test", "in": "query", "required": false, "schema": { "type": "boolean" } }
+    },
+    "responses": {
+      "problem": { "description": "Error", "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } } },
+      "noContent": { "description": "Done" }
+    },
+    "schemas": {
+      "Problem": { "type": "object", "required": ["type", "title", "status"], "properties": {
+        "type": { "type": "string", "enum": ["auth", "forbidden", "unknown_source", "invalid", "read_only", "timeout", "connection_failed", "query_error", "busy", "internal", "not_found", "unavailable"] },
+        "title": { "type": "string" }, "detail": { "type": "string" }, "status": { "type": "integer" } } },
+      "ConnectionInput": { "type": "object", "required": ["name", "engine", "dsn"], "additionalProperties": false, "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" }, "engine": { "type": "string", "enum": ["postgres", "mysql", "mariadb", "sqlite"] },
+        "dsn": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string", "enum": ["ro", "rw"] },
+        "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" }, "pool_size": { "type": "integer" },
+        "allowed_namespaces": { "type": "array", "items": { "type": "string" } } } },
+      "ConnectionPatch": { "type": "object", "additionalProperties": false, "properties": {
+        "dsn": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string", "enum": ["ro", "rw"] },
+        "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" }, "pool_size": { "type": "integer" },
+        "allowed_namespaces": { "type": "array", "items": { "type": "string" } } } },
+      "Connection": { "type": "object", "properties": {
+        "name": { "type": "string" }, "engine": { "type": "string" }, "description": { "type": "string" }, "mode": { "type": "string" },
+        "host": { "type": "string" }, "port": { "type": "integer" }, "database": { "type": "string" }, "user": { "type": "string" },
+        "dsn": { "type": "string", "description": "Password replaced by ***" }, "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" },
+        "pool_size": { "type": "integer" }, "allowed_namespaces": { "type": "array", "items": { "type": "string" } }, "version": { "type": "integer" },
+        "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" },
+        "server_version": { "type": "string" }, "connect_ms": { "type": "integer" } } },
+      "TestResult": { "type": "object", "properties": { "server_version": { "type": "string" }, "connect_ms": { "type": "integer" } } },
+      "QueryRequest": { "type": "object", "required": ["query"], "additionalProperties": false, "properties": {
+        "query": { "type": "string" }, "max_rows": { "type": "integer" }, "explain": { "type": "boolean" } } },
+      "QueryResult": { "type": "object", "properties": {
+        "columns": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "type": { "type": "string" } } } },
+        "rows": { "type": "array", "items": { "type": "array", "items": {} }, "description": "Text values as strings, NULL as null, binary as {\"bytes\": N}" },
+        "truncated": { "type": "boolean" }, "rows_affected": { "type": "integer" }, "duration_ms": { "type": "integer" } } },
+      "Workspace": { "type": "object", "properties": { "name": { "type": "string" }, "created_at": { "type": "string", "format": "date-time" } } },
+      "KeyInput": { "type": "object", "required": ["scopes"], "additionalProperties": false, "properties": {
+        "workspace": { "type": "string", "description": "Omit for admin keys; manage keys always create keys for their own workspace" },
+        "scopes": { "type": "array", "items": { "type": "string", "enum": ["query", "manage", "admin"] } },
+        "name": { "type": "string" }, "expires_in": { "type": "string", "description": "90d or a Go duration such as 720h" } } },
+      "Key": { "type": "object", "properties": {
+        "id": { "type": "string" }, "prefix": { "type": "string" }, "name": { "type": "string" }, "workspace": { "type": "string" },
+        "scopes": { "type": "array", "items": { "type": "string" } }, "created_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" }, "last_used_at": { "type": "string", "format": "date-time" },
+        "created_by": { "type": "string", "description": "Id of the key that created this one; absent for bootstrap and CLI-created keys" },
+        "key": { "type": "string", "description": "Full key; present only in the create response" } } }
+    }
+  },
+  "security": [{ "bearer": [] }],
+  "paths": {
+    "/healthz": { "get": { "summary": "Process is up", "security": [], "responses": { "200": { "description": "ok" } } } },
+    "/readyz": { "get": { "summary": "Store is reachable", "security": [], "responses": { "200": { "description": "ok" }, "503": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/openapi.json": { "get": { "summary": "This document", "security": [], "responses": { "200": { "description": "OpenAPI document" } } } },
+    "/mcp": { "post": { "summary": "MCP Streamable HTTP endpoint (stateless); scope query", "parameters": [{ "$ref": "#/components/parameters/workspaceHeader" }],
+      "responses": { "200": { "description": "JSON-RPC response" }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections": {
+      "get": { "summary": "List connections; scope query", "parameters": [{ "$ref": "#/components/parameters/workspaceHeader" }],
+        "responses": { "200": { "description": "Connections", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Connection" } } } } }, "default": { "$ref": "#/components/responses/problem" } } },
+      "post": { "summary": "Create a connection (tested first unless skip_test=true); scope manage",
+        "parameters": [{ "$ref": "#/components/parameters/workspaceHeader" }, { "$ref": "#/components/parameters/skipTest" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectionInput" } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Connection" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections/test": { "post": { "summary": "Test connection details without saving; scope manage", "parameters": [{ "$ref": "#/components/parameters/workspaceHeader" }],
+      "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectionInput" } } } },
+      "responses": { "200": { "description": "Reachable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TestResult" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections/{name}": {
+      "parameters": [{ "$ref": "#/components/parameters/name" }, { "$ref": "#/components/parameters/workspaceHeader" }],
+      "get": { "summary": "Get a connection; scope query", "responses": { "200": { "description": "Connection", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Connection" } } } }, "default": { "$ref": "#/components/responses/problem" } } },
+      "patch": { "summary": "Change a connection; scope manage", "parameters": [{ "$ref": "#/components/parameters/skipTest" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectionPatch" } } } },
+        "responses": { "200": { "description": "Updated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Connection" } } } }, "default": { "$ref": "#/components/responses/problem" } } },
+      "delete": { "summary": "Delete a connection; scope manage", "responses": { "204": { "$ref": "#/components/responses/noContent" }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections/{name}/test": { "post": { "summary": "Test a stored connection; scope manage",
+      "parameters": [{ "$ref": "#/components/parameters/name" }, { "$ref": "#/components/parameters/workspaceHeader" }],
+      "responses": { "200": { "description": "Reachable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TestResult" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections/{name}/schema": { "get": { "summary": "Schema overview or details (text/plain by default, JSON with Accept: application/json); scope query",
+      "parameters": [{ "$ref": "#/components/parameters/name" }, { "$ref": "#/components/parameters/workspaceHeader" },
+        { "name": "pattern", "in": "query", "schema": { "type": "string" } }, { "name": "object", "in": "query", "schema": { "type": "string" } }],
+      "responses": { "200": { "description": "Schema", "content": { "text/plain": {}, "application/json": {} } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections/{name}/schema/refresh": { "post": { "summary": "Rebuild the cached schema; scope manage",
+      "parameters": [{ "$ref": "#/components/parameters/name" }, { "$ref": "#/components/parameters/workspaceHeader" }],
+      "responses": { "200": { "description": "Objects and time taken", "content": { "application/json": {} } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/connections/{name}/query": { "post": { "summary": "Run one statement (TSV by default, JSON with Accept: application/json); scope query",
+      "parameters": [{ "$ref": "#/components/parameters/name" }, { "$ref": "#/components/parameters/workspaceHeader" }],
+      "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QueryRequest" } } } },
+      "responses": { "200": { "description": "Result", "content": { "text/plain": {}, "application/json": { "schema": { "$ref": "#/components/schemas/QueryResult" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/workspaces": {
+      "get": { "summary": "List workspaces; scope admin", "responses": { "200": { "description": "Workspaces", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Workspace" } } } } }, "default": { "$ref": "#/components/responses/problem" } } },
+      "post": { "summary": "Create a workspace; scope admin",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Workspace" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/workspaces/{name}": { "delete": { "summary": "Delete a workspace with its connections and keys; scope admin",
+      "parameters": [{ "$ref": "#/components/parameters/name" }],
+      "responses": { "204": { "$ref": "#/components/responses/noContent" }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/keys": {
+      "get": { "summary": "List keys (admin: all or ?workspace=; manage: own workspace); scope manage",
+        "parameters": [{ "name": "workspace", "in": "query", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Keys", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Key" } } } } }, "default": { "$ref": "#/components/responses/problem" } } },
+      "post": { "summary": "Create a key; the full key appears only in this response; scope manage",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KeyInput" } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Key" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
+    "/api/v1/keys/{id}": { "delete": { "summary": "Revoke a key; scope manage",
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+      "responses": { "204": { "$ref": "#/components/responses/noContent" }, "default": { "$ref": "#/components/responses/problem" } } } }
+  }
+}

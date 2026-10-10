@@ -122,3 +122,31 @@ func TestQueryLogEndpoint(t *testing.T) {
 	expectProblem(t, e.do(t, "GET", "/api/v1/query-log?since=yesterday", m, nil), 400, "invalid", "since must be an RFC 3339 time")
 	expectProblem(t, e.do(t, "GET", "/api/v1/query-log", q, nil), 403, "forbidden", "this API key lacks the manage scope")
 }
+
+// A manage key of another workspace never sees this workspace's query log,
+// even when its request names the other workspace in X-QH-Workspace.
+func TestQueryLogStaysInItsWorkspace(t *testing.T) {
+	e := newEnv(t, true, nil)
+	m := e.key(t, "default", auth.ScopeQuery, auth.ScopeManage)
+	if r := e.do(t, "POST", "/api/v1/connections", m, map[string]any{"name": "shop", "engine": "sqlite", "dsn": testutil.SQLiteFixture(t)}); r.status != 201 {
+		t.Fatalf("create: %d %s", r.status, r.body)
+	}
+	if r := e.do(t, "POST", "/api/v1/connections/shop/query", m, map[string]any{"query": "SELECT id FROM users"}); r.status != 200 {
+		t.Fatalf("query: %d %s", r.status, r.body)
+	}
+	var own []map[string]any
+	e.do(t, "GET", "/api/v1/query-log", m, nil).json(t, &own)
+	if len(own) == 0 {
+		t.Fatal("the default workspace logged nothing")
+	}
+	if _, err := e.svc.CreateWorkspace(context.Background(), "other"); err != nil {
+		t.Fatal(err)
+	}
+	o := e.key(t, "other", auth.ScopeManage)
+	for _, headers := range [][]string{nil, {"X-QH-Workspace", "default"}} {
+		r := e.do(t, "GET", "/api/v1/query-log", o, nil, headers...)
+		if r.status != 200 || strings.TrimSpace(r.body) != "[]" {
+			t.Errorf("headers %v: %d %s", headers, r.status, r.body)
+		}
+	}
+}

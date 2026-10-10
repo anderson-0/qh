@@ -68,6 +68,9 @@ func (Engine) Inspect(dsn string) (engine.DSNInfo, error) {
 }
 
 func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
+	if spec.TLS != nil {
+		return nil, qerr.New(qerr.Invalid, "tls applies only to network databases")
+	}
 	path, err := Path(spec.DSN)
 	if err != nil {
 		return nil, err

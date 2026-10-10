@@ -36,6 +36,8 @@ type ConnSpec struct {
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// FileRoot, when set, confines file-based databases to this directory.
 	FileRoot string
+	// TLS, when set, replaces the connection string's TLS settings.
+	TLS *TLS
 }
 
 // QueryOpts controls one query.

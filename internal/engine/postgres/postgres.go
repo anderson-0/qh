@@ -168,9 +168,39 @@ func usesOnly(dsn string, allowed []string) bool {
 	return err == nil || !strings.Contains(err.Error(), "is not in ConnStringAllowedKeys")
 }
 
+// questionInBrackets reports whether a URL connection string has a '?'
+// inside a bracketed host. pgconn reads that '?' as part of the host, so the
+// settings withSettings appends would not reach the query.
+func questionInBrackets(dsn string) bool {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return false
+	}
+	rest := dsn[strings.Index(dsn, "://")+3:]
+	if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+		rest = rest[i+1:]
+	}
+	inside := false
+	for _, r := range rest {
+		switch {
+		case r == '[':
+			inside = true
+		case r == ']':
+			inside = false
+		case r == '?' && inside:
+			return true
+		case r == '/' && !inside:
+			return false
+		}
+	}
+	return false
+}
+
 // checkServerDSN validates a server-mode connection string and reports
 // whether it carries a password itself. Errors never quote dsn.
 func checkServerDSN(dsn string) (hasPassword bool, err error) {
+	if questionInBrackets(dsn) {
+		return false, qerr.New(qerr.Invalid, "invalid postgres connection string")
+	}
 	if !usesOnly(dsn, serverKeys) {
 		return false, refusedSettings()
 	}
@@ -198,6 +228,32 @@ func withoutClientCert(c *tls.Config) *tls.Config {
 	return c
 }
 
+// applyTLS replaces the connection string's TLS settings with t, for the
+// main host and every fallback host. It drops the extra plain/TLS attempt
+// that sslmode=prefer or allow adds for each host.
+func applyTLS(cc *pgconn.Config, t *engine.TLS) error {
+	c, err := t.Config(cc.Host)
+	if err != nil {
+		return err
+	}
+	cc.TLSConfig = c
+	seen := map[string]bool{net.JoinHostPort(cc.Host, strconv.Itoa(int(cc.Port))): true}
+	var fallbacks []*pgconn.FallbackConfig
+	for _, fb := range cc.Fallbacks {
+		k := net.JoinHostPort(fb.Host, strconv.Itoa(int(fb.Port)))
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if fb.TLSConfig, err = t.Config(fb.Host); err != nil {
+			return err
+		}
+		fallbacks = append(fallbacks, fb)
+	}
+	cc.Fallbacks = fallbacks
+	return nil
+}
+
 // poolConfig builds the pool configuration for spec. In server mode
 // (spec.Dial set) the connection string may use only serverKeys, the
 // password comes only from it (never PGPASSWORD, PGPASSFILE, ~/.pgpass or a
@@ -223,6 +279,11 @@ func poolConfig(spec engine.ConnSpec) (*pgxpool.Config, error) {
 		cc.TLSConfig = withoutClientCert(cc.TLSConfig)
 		for _, fb := range cc.Fallbacks {
 			fb.TLSConfig = withoutClientCert(fb.TLSConfig)
+		}
+	}
+	if spec.TLS != nil {
+		if err := applyTLS(&cfg.ConnConfig.Config, spec.TLS); err != nil {
+			return nil, err
 		}
 	}
 	cfg.MaxConns = int32(max(spec.PoolSize, 1))

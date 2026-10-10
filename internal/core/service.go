@@ -185,7 +185,9 @@ func (s *Service) Query(ctx context.Context, ws string, in QueryInput) (string, 
 	if err != nil {
 		return "", t.scrub(s.withSuggestions(ctx, conn, t, in.Query, err))
 	}
-	if access == sqlx.DDL && !in.Explain {
+	// Any statement that is not a plain read may change the schema (DDL, but
+	// also a DO block or a function call), so drop the cached catalog.
+	if access != sqlx.Read && !in.Explain {
 		s.cache.Invalidate(t.rec.ID)
 	}
 	return format.Result(res), nil

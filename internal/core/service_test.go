@@ -189,3 +189,48 @@ func TestExplain(t *testing.T) {
 		t.Fatalf("explain of a write on ro: %q, %v", out, err)
 	}
 }
+
+// A write can change the schema without being classified as DDL (for example
+// a DO block or a function call), so any successful non-read statement must
+// drop the cached catalog.
+func TestWriteInvalidatesSchemaCache(t *testing.T) {
+	h := newHarness(t)
+	h.addShop(t, engine.ModeRW)
+	ctx := context.Background()
+	if _, err := h.svc.Schema(ctx, ws, SchemaInput{Source: "shop"}); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := h.st.GetConnection(ctx, ws, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	builds := 0
+	probe := func() int {
+		builds = 0
+		if _, err := h.svc.cache.Get(ctx, rec.ID, rec.Version, func(context.Context) (*engine.Catalog, error) {
+			builds++
+			return &engine.Catalog{}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return builds
+	}
+	// A read leaves the cache alone: the probe finds the schema cached.
+	if _, err := h.query(t, QueryInput{Query: "SELECT count(*) FROM users"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := probe(); n != 0 {
+		t.Fatalf("read invalidated the cache (%d rebuilds)", n)
+	}
+	// Re-prime with the real catalog, then run a write.
+	h.svc.cache.Invalidate(rec.ID)
+	if _, err := h.svc.Schema(ctx, ws, SchemaInput{Source: "shop"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.query(t, QueryInput{Query: "INSERT INTO users (id, email) VALUES (900, 'w@example.com')"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := probe(); n != 1 {
+		t.Fatalf("write did not invalidate the cache (%d rebuilds)", n)
+	}
+}

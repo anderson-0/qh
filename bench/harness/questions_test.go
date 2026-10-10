@@ -24,7 +24,7 @@ func TestQuestionFiles(t *testing.T) {
 			}
 			seen[q.ID], got[q.Kind] = true, true
 		}
-		for _, k := range []string{"lookup", "join", "aggregate", "large", "misspell"} {
+		for _, k := range []string{"lookup", "join", "enum", "aggregate", "large", "misspell"} {
 			if !got[k] {
 				t.Fatalf("%s has no %s question", ds, k)
 			}
@@ -49,7 +49,10 @@ func TestReferenceQueries(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer stop()
-			qs, _ := LoadQuestions(name)
+			qs, err := LoadQuestions(name)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, q := range qs {
 				rows, err := Truth(context.Background(), ds.DB, q.SQL)
 				if err != nil {

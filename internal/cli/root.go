@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/anderson-0/qh/internal/client"
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/store"
 )
@@ -30,6 +31,8 @@ func Execute(version string, args []string, stdin io.Reader, stdout, stderr io.W
 	}
 	return 0
 }
+
+var _ backend = (*client.Client)(nil)
 
 // withBackend wraps a command so it runs against a backend.
 type withBackend func(fn func(cmd *cobra.Command, b backend, args []string) error) func(*cobra.Command, []string) error
@@ -66,10 +69,30 @@ func newRoot(version string) *cobra.Command {
 	pf := root.PersistentFlags()
 	pf.StringVar(&home, "home", "", "data directory (default $QH_HOME, else $XDG_CONFIG_HOME/qh or ~/.config/qh)")
 	pf.String("workspace", store.DefaultWorkspace, "workspace to act on (default $QH_WORKSPACE, else default)")
-	pf.String("server", "", "") // defined here so local-only commands can refuse it; Task 9 gives it meaning
-	pf.MarkHidden("server")
+	var server, key string
+	pf.StringVar(&server, "server", "", "qh server URL; commands then use its REST API (default $QH_SERVER)")
+	pf.StringVar(&key, "key", "", "API key for --server (default $QH_KEY)")
 	with := func(fn func(cmd *cobra.Command, b backend, args []string) error) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, args []string) error {
+			srv := server
+			if srv == "" {
+				srv = os.Getenv("QH_SERVER")
+			}
+			if srv != "" {
+				k := key
+				if k == "" {
+					k = os.Getenv("QH_KEY")
+				}
+				header := ""
+				if ws, explicit := workspaceOf(cmd); explicit {
+					header = ws // sent only when named, so admin keys never act on default by accident
+				}
+				c, err := client.New(srv, k, header)
+				if err != nil {
+					return err
+				}
+				return fn(cmd, c, args)
+			}
 			ws, _ := workspaceOf(cmd)
 			dir, err := homeDir(home)
 			if err != nil {

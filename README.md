@@ -66,8 +66,7 @@ if you set it; that must be a `qh_` key whose secret has at least 32 characters 
   query/manage keys for the same workspace, which expire no later than the key that creates them), `admin`
   (everything).
 - **MCP** is served at `/mcp` (Streamable HTTP). The REST API is under `/api/v1`; see `/api/v1/openapi.json`.
-- **`qh workspace` and `qh key`** work on the store at `--home` (or `$QH_HOME`), not through the server. Point
-  them at the server's data directory with the same `QH_MASTER_KEY`, e.g. `qh key ls --home /var/lib/qh`.
+- **`qh key` and `qh workspace`** act on the local store at `--home`, or on a server with `--server`/`--key` (see Remote CLI).
 
 ```bash
 curl -s -X POST localhost:8080/api/v1/workspaces -H "Authorization: Bearer $ADMIN" -d '{"name":"team"}'
@@ -94,6 +93,71 @@ files on the server (`passfile`, `service`, `sslcert`, `sslrootcert`, …) are r
 Without `--http`, `qh serve` runs in local mode on `127.0.0.1:8765` with no keys, for tools on your own machine.
 Local mode is unauthenticated: every process on the machine can use it, with all your connections. It only
 accepts requests addressed to localhost and refuses cross-origin browser requests.
+
+## Connection details and TLS
+
+Instead of a connection string you can give the parts, which qh assembles and escapes:
+
+```bash
+printf '%s\n' "$PASSWORD" | qh conn add shop --engine postgres --host db.internal --database shop \
+  --user reader --password-stdin --param application_name=qh
+```
+
+Over REST, send `host`, `port`, `database`, `username`, `password` and `params` instead of `dsn`.
+
+TLS settings replace whatever the connection string says about TLS:
+
+```bash
+qh conn add shop --engine postgres --dsn - --tls-mode verify-full --tls-ca ca.pem --tls-cert client.pem --tls-key client.key
+```
+
+- Modes:
+  - `disable`;
+  - `require`, which encrypts without checking the certificate;
+  - `verify-ca`, which checks the certificate chain;
+  - `verify-full`, which checks the chain and the host name, or `--tls-server-name`.
+- The private key is sealed with the connection string, and it is never shown again.
+- In server mode this is the only way to use client certificates, because connection-string settings that read
+  server files are refused.
+- `qh conn edit NAME --no-tls` removes the settings.
+
+## Query log
+
+qh logs every `query` call: connection, API key, statement (up to 8 KiB), rows, duration and error category.
+
+- Show it with `qh log [--connection NAME] [--since 24h] [--limit N]`, or `GET /api/v1/query-log` (scope `manage`).
+- `qh serve` and `qh mcp` keep 30 days (`--query-log-retention 7d`), or log nothing with `--no-query-log`.
+- The log stores statements as sent. If statements carry sensitive literals, turn it off or shorten the retention.
+
+## Rotating the master key
+
+```bash
+qh serve ...                                   # stop the server first
+export QH_MASTER_KEY=$(openssl rand -base64 32) # the new key
+qh masterkey rotate --old-key-file old.key --home /var/lib/qh
+```
+
+In local mode, move `master.key` aside (e.g. to `old.key`) and run `qh masterkey rotate --old-key-file old.key --generate`;
+`--generate` creates the new `master.key`. Without it, rotate refuses to run when no current key exists, so a missing
+`QH_MASTER_KEY` can never silently re-seal everything with a key you did not choose.
+
+Every stored connection is re-sealed with the new key in one transaction. If one cannot be opened with the old
+key, nothing changes. Restart the server with the new key. The old key is no longer needed.
+
+## Remote CLI
+
+Every `conn`, `query`, `schema`, `log`, `workspace` and `key` command can run against a server:
+
+```bash
+export QH_SERVER=https://qh.example.com QH_KEY=qh_…
+qh conn ls
+qh query shop "SELECT count(*) FROM orders"
+qh --key "$ADMIN" --workspace team key create --scopes query,manage   # admin keys name a workspace
+```
+
+- `--workspace` (or `QH_WORKSPACE`) also picks the workspace for local commands.
+- The CLI refuses to send a key over plain `http://` to another machine.
+- `mcp`, `serve` and `masterkey` always run locally.
 
 ## Read-only safety
 

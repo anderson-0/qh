@@ -150,7 +150,12 @@ func Classify(sql string, d Dialect) (Access, error) {
 			return Write, nil
 		}
 		return Read, nil
-	case first == "values" || first == "table" || first == "show" || first == "describe" || first == "desc":
+	case first == "values" || first == "table":
+		if words["into"] { // MySQL: TABLE t INTO OUTFILE / VALUES ROW(...) INTO OUTFILE write files
+			return Write, nil
+		}
+		return Read, nil
+	case first == "show" || first == "describe" || first == "desc":
 		return Read, nil
 	case first == "pragma":
 		if d == SQLite && readPragma(t) {

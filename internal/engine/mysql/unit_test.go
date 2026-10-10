@@ -307,7 +307,12 @@ func TestParseRawQueryValuesWithSlashes(t *testing.T) {
 			t.Errorf("%s: parseConfig params=%v err=%v", dsn, cfg.Params, err)
 		}
 	}
-	_, err := parseRaw("mysql://u:p%zz@h/db")
+	// A comma-separated charset list must reach the driver unescaped.
+	cfg, err := parseRaw("mysql://u:p@h/db?charset=utf8mb4,utf8")
+	if err != nil || !strings.Contains(cfg.FormatDSN(), "charset=utf8mb4,utf8") {
+		t.Errorf("charset list: %v %v", cfg, err)
+	}
+	_, err = parseRaw("mysql://u:p%zz@h/db")
 	if err == nil || !strings.Contains(err.Error(), "percent-encoded") {
 		t.Errorf("hint: %v", err)
 	}
@@ -324,12 +329,12 @@ func TestAssembleStringDefaultsAreQuotedOnMySQL(t *testing.T) {
 		col("c", "int", "0", ""),
 		col("d", "datetime", "CURRENT_TIMESTAMP", "DEFAULT_GENERATED"),
 		col("e", "varchar", "concat(_utf8mb4\\'a\\',_utf8mb4\\'b\\')", "DEFAULT_GENERATED"),
-		col("f", "varbinary", "x", ""),
+		col("f", "varbinary", "0x78", ""), // MySQL reports binary literal defaults as hex
 		{schema: "s", table: "t", name: "g", colType: "varchar(9)", dataType: "varchar", nullable: "YES"},
 	}
 	tables := []tableRow{{schema: "s", name: "t", kind: "BASE TABLE"}}
 	cat := (&conn{flavor: flavorMySQL}).assemble(tables, columns, nil, nil)
-	want := []string{"'pending'", "'it''s'", "0", "CURRENT_TIMESTAMP", "concat(_utf8mb4\\'a\\',_utf8mb4\\'b\\')", "'x'", ""}
+	want := []string{"'pending'", "'it''s'", "0", "CURRENT_TIMESTAMP", "concat(_utf8mb4\\'a\\',_utf8mb4\\'b\\')", "0x78", ""}
 	for i, f := range cat.Namespaces[0].Objects[0].Fields {
 		if f.Default != want[i] {
 			t.Errorf("%s: default %q, want %q", f.Name, f.Default, want[i])

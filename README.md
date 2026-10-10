@@ -157,6 +157,7 @@ qh --key "$ADMIN" --workspace team key create --scopes query,manage   # admin ke
 
 - `--workspace` (or `QH_WORKSPACE`) also picks the workspace for local commands.
 - The CLI refuses to send a key over plain `http://` to another machine.
+- Prefer `QH_KEY` to `--key`: command-line arguments are visible to other users of the machine and saved in shell history.
 - `mcp`, `serve` and `masterkey` always run locally.
 
 ## Read-only safety

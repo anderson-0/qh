@@ -71,6 +71,12 @@ func TestRemoteMode(t *testing.T) {
 	if out, _, _ := as(tok, "log"); !strings.Contains(out, "shop") || !strings.Contains(out, "SELECT count(*) AS n FROM orders") {
 		t.Fatalf("log: %q", out)
 	}
+	if out, errOut, code := as(tok, "key", "create", "--scopes", "query"); code != 0 || !strings.Contains(out, "workspace team") {
+		t.Fatalf("manage key without --workspace: %d %q %q", code, out, errOut)
+	}
+	if _, errOut, code := as(admin, "key", "create", "--scopes", "query"); code != 1 || !strings.HasPrefix(errOut, "error[invalid]") || strings.Contains(errOut, "default") {
+		t.Fatalf("admin key without --workspace: %d %q", code, errOut)
+	}
 	if _, errOut, code := as(tok, "conn", "show", "nope"); code != 1 || !strings.HasPrefix(errOut, `error[unknown_source]: no connection named "nope"`) {
 		t.Fatalf("unknown: %d %q", code, errOut)
 	}

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -58,7 +59,8 @@ func TestClientAgainstServer(t *testing.T) {
 	if list, _ := a.ListWorkspaces(ctx); len(list) != 2 {
 		t.Fatalf("workspaces: %+v", list)
 	}
-	tok, info, err := a.CreateKey(ctx, auth.KeyInput{Workspace: "team", Scopes: []string{"query", "manage"}, Name: "ci", ExpiresIn: 48 * time.Hour})
+	inTeam, _ := New(url, admin, "team") // CreateKey names a workspace only when the client was given one
+	tok, info, err := inTeam.CreateKey(ctx, auth.KeyInput{Workspace: "team", Scopes: []string{"query", "manage"}, Name: "ci", ExpiresIn: 48 * time.Hour})
 	if err != nil || !strings.HasPrefix(tok, "qh_") || info.Workspace != "team" || info.ExpiresAt == nil {
 		t.Fatalf("key: %q %+v %v", tok, info, err)
 	}
@@ -145,5 +147,29 @@ func TestNewRefuses(t *testing.T) {
 	_, err := c.ListConnections(context.Background())
 	if err == nil || err.Error() != "error[connection_failed]: cannot reach qh server at http://127.0.0.1:1" {
 		t.Fatalf("unreachable: %v", err)
+	}
+}
+
+func TestNoRedirects(t *testing.T) {
+	var got string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got += r.Header.Get("Authorization")
+	}))
+	defer plain.Close()
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+"/api/v1/connections", http.StatusTemporaryRedirect)
+	}))
+	defer tlsSrv.Close()
+	c, err := New(tlsSrv.URL, "qh_secretkey", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http.Transport = tlsSrv.Client().Transport // trust the test certificate
+	_, err = c.ListConnections(context.Background())
+	if err == nil || !strings.HasPrefix(err.Error(), "error[connection_failed]: qh server at https://") || !strings.Contains(err.Error(), "answered HTTP 307") {
+		t.Fatalf("redirect: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("the key reached the redirect target: %q", got)
 	}
 }

@@ -42,7 +42,11 @@ func New(base, key, workspace string) (*Client, error) {
 	if key == "" {
 		return nil, qerr.New(qerr.Invalid, "remote mode needs an API key").WithHint("Pass --key or set QH_KEY")
 	}
-	return &Client{base: u.String(), key: key, workspace: workspace, http: &http.Client{Timeout: 6 * time.Minute}}, nil
+	return &Client{base: u.String(), key: key, workspace: workspace, http: &http.Client{
+		Timeout: 6 * time.Minute,
+		// Never follow redirects: Go would resend the Authorization header, even from https to http.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}, nil
 }
 
 func loopback(host string) bool {
@@ -85,12 +89,13 @@ func (c *Client) send(ctx context.Context, method, path string, body any, accept
 	if err != nil {
 		return nil, qerr.New(qerr.ConnectionFailed, "lost the connection to qh server at "+c.base)
 	}
-	if res.StatusCode >= 400 {
+	if res.StatusCode >= 300 {
 		var p struct{ Type, Title, Detail string }
 		if strings.HasPrefix(res.Header.Get("Content-Type"), "application/problem+json") && json.Unmarshal(b, &p) == nil && p.Type != "" {
 			return nil, &qerr.Error{Category: qerr.Category(p.Type), Message: p.Title, Hint: p.Detail}
 		}
-		return nil, qerr.New(qerr.ConnectionFailed, fmt.Sprintf("qh server at %s answered HTTP %d", c.base, res.StatusCode))
+		return nil, qerr.New(qerr.ConnectionFailed, fmt.Sprintf("qh server at %s answered HTTP %d", c.base, res.StatusCode)).
+			WithHint("Use the server's final URL; qh does not follow redirects")
 	}
 	return b, nil
 }
@@ -371,7 +376,7 @@ func (j keyJSON) info() *auth.KeyInfo {
 
 func (c *Client) CreateKey(ctx context.Context, in auth.KeyInput) (string, *auth.KeyInfo, error) {
 	body := map[string]any{"scopes": in.Scopes}
-	if in.Workspace != "" {
+	if c.workspace != "" && in.Workspace != "" { // the CLI fills in "default" when none was named; send only an explicit one
 		body["workspace"] = in.Workspace
 	}
 	if in.Name != "" {

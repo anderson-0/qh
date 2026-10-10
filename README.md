@@ -57,13 +57,17 @@ qh serve --http :8080 --data-dir /var/lib/qh
 ```
 
 On first start qh prints one admin API key (`admin API key (shown once): qh_…`), or uses `QH_BOOTSTRAP_ADMIN_KEY`
-if you set it. Every request needs `Authorization: Bearer <key>`:
+if you set it; that must be a `qh_` key whose secret has at least 32 characters (for example one printed by
+`qh key create --scopes admin`). Every request needs `Authorization: Bearer <key>`:
 
 - **Workspaces** isolate connections. Admin keys manage workspaces and keys and pick a workspace with the
   `X-QH-Workspace` header.
 - **Scopes:** `query` (MCP tools, schema, query), `manage` (create, change and delete connections; create
-  query/manage keys for the same workspace), `admin` (everything).
+  query/manage keys for the same workspace, which expire no later than the key that creates them), `admin`
+  (everything).
 - **MCP** is served at `/mcp` (Streamable HTTP). The REST API is under `/api/v1`; see `/api/v1/openapi.json`.
+- **`qh workspace` and `qh key`** work on the store at `--home` (or `$QH_HOME`), not through the server. Point
+  them at the server's data directory with the same `QH_MASTER_KEY`, e.g. `qh key ls --home /var/lib/qh`.
 
 ```bash
 curl -s -X POST localhost:8080/api/v1/workspaces -H "Authorization: Bearer $ADMIN" -d '{"name":"team"}'
@@ -77,9 +81,19 @@ claude mcp add --transport http qh http://localhost:8080/mcp --header "Authoriza
 Server mode refuses database addresses on loopback and link-local ranges (including cloud metadata at
 169.254.169.254), and Unix sockets. Use `--allow-cidr 127.0.0.0/8` to allow a local database, and `--deny-cidr`
 to block more (for example your private ranges). SQLite is off unless you pass `--sqlite-root DIR`; files must
-then live under `DIR/<workspace>/`, so each workspace sees only its own directory. Each API key may run 4 queries at once; extra requests get HTTP 429.
+then live under `DIR/<workspace>/`, so each workspace sees only its own directory. Each API key may run 4
+queries at once; an extra request waits up to 10 s for a free slot, then gets HTTP 429.
 
-Without `--http`, `qh serve` runs in local mode on `127.0.0.1:8765` with no keys, for tools on your own machine. Local mode has no keys, so it only accepts requests addressed to localhost and refuses cross-origin browser requests.
+Server mode ignores `PG*` environment variables (it unsets them at startup and names them on stderr), and a
+Postgres connection string may only use these settings: `host`, `port`, `dbname`, `user`, `password`,
+`sslmode`, `sslsni`, `sslnegotiation`, `connect_timeout`, `target_session_attrs`, `application_name`,
+`channel_binding`, `require_auth`, `min_protocol_version` and `max_protocol_version`. Settings that read
+files on the server (`passfile`, `service`, `sslcert`, `sslrootcert`, …) are refused, and `~/.pgpass` and
+`~/.postgresql/` are not used.
+
+Without `--http`, `qh serve` runs in local mode on `127.0.0.1:8765` with no keys, for tools on your own machine.
+Local mode is unauthenticated: every process on the machine can use it, with all your connections. It only
+accepts requests addressed to localhost and refuses cross-origin browser requests.
 
 ## Read-only safety
 

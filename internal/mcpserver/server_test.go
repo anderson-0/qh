@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -128,8 +129,25 @@ func TestConnectionsLine(t *testing.T) {
 	if got := connectionsLine(list[:2]); got != "Connections (pass one as source): db0 (postgres, rw): Billing; db1 (postgres, rw)." {
 		t.Errorf("two: %q", got)
 	}
-	if got := connectionsLine(list); !strings.HasSuffix(got, "db19 (postgres, rw); and 2 more (sources lists all).") {
+	if got := connectionsLine(list); !strings.HasSuffix(got, "db19 (postgres, rw); and 2 more (schema lists all).") {
 		t.Errorf("capped: %q", got)
+	}
+}
+
+func TestClipDescription(t *testing.T) {
+	long := "Pagila: a DVD rental store (films, actors, customers, rentals, payments) on PostgreSQL"
+	if got := clipDescription(long); got != "Pagila: a DVD rental store (films, actors, customers, renta…" || utf8.RuneCountInString(got) != maxDescription {
+		t.Errorf("long: %q", got)
+	}
+	if got := clipDescription("Billing\n\treplica"); got != "Billing replica" {
+		t.Errorf("whitespace: %q", got)
+	}
+	multi := strings.Repeat("é", 70)
+	if got := clipDescription(multi); !utf8.ValidString(got) || utf8.RuneCountInString(got) != maxDescription {
+		t.Errorf("multi-byte: %q", got)
+	}
+	if got := clipDescription("short"); got != "short" {
+		t.Errorf("short: %q", got)
 	}
 }
 

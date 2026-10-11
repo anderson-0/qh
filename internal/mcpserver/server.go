@@ -17,18 +17,33 @@ import (
 //
 // Every word here and in the tool definitions is paid on every model turn,
 // so they stay terse.
-const instructions = "Query directly if you know the names; otherwise call schema first. Errors on unknown names suggest close matches."
+const instructions = "Query directly if you know the names; else call schema first."
 
 // maxListed caps the connections named in the instructions.
 const maxListed = 20
 
+// maxDescription caps each connection description in the instructions, in
+// characters; the full text stays in the schema connection list.
+const maxDescription = 60
+
+// clipDescription collapses whitespace and cuts s to maxDescription
+// characters, ending a cut one with "…".
+func clipDescription(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= maxDescription {
+		return s
+	}
+	return string(r[:maxDescription-1]) + "…"
+}
+
 // connectionsLine names the workspace's connections so an agent can query
-// without calling sources first.
+// without a schema call first.
 func connectionsLine(list []*core.ConnInfo) string {
 	describe := func(c *core.ConnInfo) string {
 		s := fmt.Sprintf("%s (%s, %s)", c.Name, c.Engine, c.Mode)
 		if c.Description != "" {
-			s += ": " + c.Description
+			s += ": " + clipDescription(c.Description)
 		}
 		return s
 	}
@@ -44,7 +59,7 @@ func connectionsLine(list []*core.ConnInfo) string {
 	}
 	line := "Connections (pass one as source): " + strings.Join(names, "; ")
 	if len(list) > maxListed {
-		line += fmt.Sprintf("; and %d more (sources lists all)", len(list)-maxListed)
+		line += fmt.Sprintf("; and %d more (schema lists all)", len(list)-maxListed)
 	}
 	return line + "."
 }

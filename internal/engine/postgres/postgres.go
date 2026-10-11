@@ -9,6 +9,7 @@ package postgres
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -302,7 +303,6 @@ func poolConfig(spec engine.ConnSpec) (*pgxpool.Config, error) {
 		cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	}
 	cfg.ConnConfig.RuntimeParams["application_name"] = "qh"
-	cfg.AfterRelease = resetSession
 	return cfg, nil
 }
 
@@ -321,20 +321,6 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 		return nil, err
 	}
 	return c, nil
-}
-
-// resetSession runs when a connection goes back to the pool, on every path
-// (success, query error, rollback), after its transaction has ended. A
-// statement may have changed session state (set_config(..., false), advisory
-// locks, temp objects, prepared statements); DISCARD ALL wipes all of it so
-// the next user starts clean. pgxpool keeps the connection checked out until
-// this returns, and destroys it when it returns false, so a failed reset
-// never returns a dirty connection to the pool.
-func resetSession(c *pgx.Conn) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := c.Exec(ctx, "DISCARD ALL", pgx.QueryExecModeSimpleProtocol)
-	return err == nil
 }
 
 type conn struct {
@@ -363,6 +349,11 @@ func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine
 		return nil, err
 	}
 	kw := sqlx.FirstKeyword(q, sqlx.Postgres)
+	if kw == "copy" {
+		// COPY streams through its own sub-protocol, which the pipeline does
+		// not speak; COPY to or from a server file needs superuser anyway.
+		return nil, qerr.New(qerr.Invalid, "COPY is not supported").WithHint("Use SELECT to read rows and INSERT to add them")
+	}
 	cursor := access == sqlx.Read && (kw == "select" || kw == "values" || kw == "table" || kw == "with")
 	return c.run(ctx, q, o, cursor, o.ReadOnly || c.readOnly)
 }
@@ -388,16 +379,23 @@ func (c *conn) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	return pc, nil
 }
 
-// exec runs a statement that returns nothing, through the extended protocol.
-func exec(ctx context.Context, tx pgx.Tx, sql string, args ...any) error {
-	rows, err := tx.Query(ctx, sql, append([]any{pgx.QueryExecModeExec}, args...)...)
-	if err != nil {
-		return err
-	}
-	rows.Close()
-	return rows.Err()
-}
-
+// run executes q in one pipelined round trip:
+//
+//	BEGIN [READ ONLY]; set_config(...); [DECLARE qh_cur ... FOR q; FETCH n] | q; COMMIT; Sync
+//	DISCARD ALL; Sync
+//
+// Each statement is its own Parse message in the extended protocol, which
+// rejects more than one statement, so q cannot end the read-only
+// transaction. DISCARD ALL wipes session state the statement may have
+// changed (set_config(..., false), advisory locks, temp objects, prepared
+// statements), so the next user starts clean; it cannot run inside a
+// transaction or a pipelined implicit transaction, so it has a segment of its
+// own. A failed statement makes the server skip the rest of its segment and
+// leaves the transaction aborted, so DISCARD ALL fails too; a second round
+// trip then sends ROLLBACK and DISCARD ALL. (Sending ROLLBACK every time would
+// write "there is no transaction in progress" to the server log on every
+// successful call.) A connection whose reset did not complete is closed, so
+// pgxpool destroys it instead of pooling it.
 func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, cursor, readOnly bool) (*engine.Result, error) {
 	start := time.Now()
 	timeout := o.Timeout
@@ -412,74 +410,145 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, cursor, re
 		return nil, err
 	}
 	defer pc.Release()
-	mode := pgx.ReadWrite
-	if readOnly {
-		mode = pgx.ReadOnly
-	}
-	tx, err := pc.BeginTx(ctx, pgx.TxOptions{AccessMode: mode})
-	if err != nil {
-		return nil, c.classify(ctx, err)
-	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
-	err = exec(ctx, tx, `SELECT set_config('statement_timeout', $1, true), set_config('TimeZone', 'UTC', true), set_config('DateStyle', 'ISO, YMD', true), set_config('bytea_output', 'hex', true)`,
-		strconv.FormatInt(timeout.Milliseconds(), 10))
-	if err != nil {
-		return nil, c.classify(ctx, err)
-	}
 	limit := o.MaxRows
 	if limit <= 0 {
 		limit = 100
 	}
-	stmt := q
+	begin := "BEGIN READ WRITE"
+	if readOnly {
+		begin = "BEGIN READ ONLY"
+	}
+	ms := [][]byte{[]byte(strconv.FormatInt(timeout.Milliseconds(), 10))}
+	stmts := []pstmt{{sql: begin}, {sql: `SELECT set_config('statement_timeout', $1, true), set_config('TimeZone', 'UTC', true), set_config('DateStyle', 'ISO, YMD', true), set_config('bytea_output', 'hex', true)`, params: ms}}
 	if cursor {
-		if err := exec(ctx, tx, "DECLARE qh_cur NO SCROLL CURSOR FOR "+q); err != nil {
-			return nil, c.classify(ctx, err)
+		stmts = append(stmts, pstmt{sql: "DECLARE qh_cur NO SCROLL CURSOR FOR " + q}, pstmt{sql: fmt.Sprintf("FETCH FORWARD %d FROM qh_cur", limit+1)})
+	} else {
+		stmts = append(stmts, pstmt{sql: q})
+	}
+	data := len(stmts) - 1
+	stmts = append(stmts, pstmt{sql: "COMMIT"})
+
+	pgc := pc.Conn().PgConn()
+	var res *engine.Result
+	errs, connErr := pipeline(ctx, pgc, [][]pstmt{stmts, {{sql: "DISCARD ALL"}}}, func(seg, i int, r *pgconn.ResultReader) error {
+		if seg != 0 || i != data {
+			_, err := r.Close()
+			return err
 		}
-		stmt = fmt.Sprintf("FETCH FORWARD %d FROM qh_cur", limit+1)
+		var err error
+		res, err = collect(r, pc.Conn().TypeMap(), limit)
+		return err
+	})
+	queryErr, resetErr := errs[0], errs[1]
+	if connErr == nil && resetErr != nil && queryErr != nil {
+		// The failed statement left its transaction aborted.
+		errs, connErr = pipeline(ctx, pgc, [][]pstmt{{{sql: "ROLLBACK"}}, {{sql: "DISCARD ALL"}}}, nil)
+		resetErr = cmp.Or(errs[0], errs[1])
 	}
-	rows, err := tx.Query(ctx, stmt, pgx.QueryExecModeExec)
-	if err != nil {
-		return nil, c.classify(ctx, err)
+	if connErr != nil || resetErr != nil {
+		// The session may hold state from q: never pool it.
+		_ = pgc.Close(context.WithoutCancel(ctx))
 	}
-	res, err := collect(rows, pc.Conn().TypeMap(), limit)
-	if err != nil {
-		return nil, c.classify(ctx, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, c.classify(ctx, err)
+	switch {
+	case queryErr != nil:
+		return nil, c.classify(ctx, queryErr)
+	case res == nil && connErr != nil:
+		return nil, c.classify(ctx, connErr)
+	case res == nil:
+		return nil, c.classify(ctx, errors.New("postgres: statement returned no result"))
 	}
 	res.Duration = time.Since(start)
 	return res, nil
 }
 
-func collect(rows pgx.Rows, tm *pgtype.Map, limit int) (*engine.Result, error) {
-	defer rows.Close()
-	fds := rows.FieldDescriptions()
+// pstmt is one statement of a pipeline segment.
+type pstmt struct {
+	sql    string
+	params [][]byte
+}
+
+// pipeline sends every segment, each followed by a Sync, in one write and
+// reads all the results. read (nil: discard) consumes each statement's
+// result; a statement skipped after an error in its segment has none. errs
+// holds the first server error of each segment; connErr is set when the
+// connection broke, and the remaining results are lost.
+func pipeline(ctx context.Context, pgc *pgconn.PgConn, segs [][]pstmt, read func(seg, i int, r *pgconn.ResultReader) error) (errs []error, connErr error) {
+	errs = make([]error, len(segs))
+	p := pgc.StartPipeline(ctx)
+	for _, seg := range segs {
+		for _, st := range seg {
+			p.SendQueryParams(st.sql, st.params, nil, nil, nil)
+		}
+		p.SendPipelineSync()
+	}
+	connErr = p.Flush()
+	seg, i := 0, 0
+	note := func(err error) {
+		var pe *pgconn.PgError
+		switch {
+		case err == nil:
+		case errors.As(err, &pe):
+			errs[seg] = cmp.Or(errs[seg], err)
+		default:
+			connErr = err
+		}
+	}
+	for connErr == nil && seg < len(segs) {
+		r, err := p.GetResults()
+		if err != nil {
+			note(err)
+			continue
+		}
+		switch r := r.(type) {
+		case *pgconn.ResultReader:
+			if read == nil {
+				_, err = r.Close()
+			} else {
+				err = read(seg, i, r)
+			}
+			i++
+			note(err)
+		case *pgconn.PipelineSync:
+			seg, i = seg+1, 0
+		default:
+			connErr = fmt.Errorf("postgres: unexpected pipeline result %T", r)
+		}
+	}
+	if err := p.Close(); err != nil && connErr == nil && seg < len(segs) {
+		connErr = err
+	}
+	return errs, connErr
+}
+
+// collect reads at most limit rows from r and closes it.
+func collect(r *pgconn.ResultReader, tm *pgtype.Map, limit int) (*engine.Result, error) {
+	fds := r.FieldDescriptions()
 	res := &engine.Result{RowsAffected: -1}
 	for _, fd := range fds {
 		if fd.Format != pgx.TextFormatCode {
+			r.Close()
 			return nil, fmt.Errorf("postgres: unexpected binary result for column %q", fd.Name)
 		}
 		res.Columns = append(res.Columns, engine.Column{Name: fd.Name, Type: typeName(tm, fd.DataTypeOID)})
 	}
-	for rows.Next() {
+	for r.NextRow() {
 		if len(res.Rows) == limit {
 			res.Truncated = true
-			break
+			continue // Close would drain the rest anyway
 		}
-		raw := rows.RawValues()
+		raw := r.Values()
 		row := make([]engine.Value, len(raw))
 		for i, b := range raw {
 			row[i] = toValue(fds[i].DataTypeOID, b)
 		}
 		res.Rows = append(res.Rows, row)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	tag, err := r.Close()
+	if err != nil {
 		return nil, err
 	}
 	if len(fds) == 0 {
-		res.RowsAffected = rows.CommandTag().RowsAffected()
+		res.RowsAffected = tag.RowsAffected()
 	}
 	return res, nil
 }

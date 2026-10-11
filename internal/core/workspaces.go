@@ -82,6 +82,7 @@ func (s *Service) DeleteWorkspace(ctx context.Context, name string) error {
 	for _, c := range conns {
 		s.pools.Drop(c.ID)
 		s.cache.Invalidate(c.ID)
+		s.forget(name, c.ID)
 	}
 	return nil
 }

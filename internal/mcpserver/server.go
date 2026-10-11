@@ -3,6 +3,8 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -10,25 +12,85 @@ import (
 	"github.com/anderson-0/qh/internal/qerr"
 )
 
-const instructions = "Use sources to pick a connection, schema to learn tables, columns, keys and joins, then query. " +
-	"Prefer schema with a pattern over guessing names."
+// instructions is the fixed part of the initialize instructions; the
+// workspace's connections follow it (see connectionsLine).
+//
+// Every word here and in the tool definitions is paid on every model turn,
+// so they stay terse.
+const instructions = "Query directly if you know the names; otherwise call schema first. Errors on unknown names suggest close matches."
+
+// maxListed caps the connections named in the instructions.
+const maxListed = 20
+
+// connectionsLine names the workspace's connections so an agent can query
+// without calling sources first.
+func connectionsLine(list []*core.ConnInfo) string {
+	describe := func(c *core.ConnInfo) string {
+		s := fmt.Sprintf("%s (%s, %s)", c.Name, c.Engine, c.Mode)
+		if c.Description != "" {
+			s += ": " + c.Description
+		}
+		return s
+	}
+	switch {
+	case len(list) == 0:
+		return "No connections exist yet."
+	case len(list) == 1:
+		return "Connection: " + describe(list[0]) + ". source may be omitted."
+	}
+	names := make([]string, 0, min(len(list), maxListed))
+	for _, c := range list[:min(len(list), maxListed)] {
+		names = append(names, describe(c))
+	}
+	line := "Connections (pass one as source): " + strings.Join(names, "; ")
+	if len(list) > maxListed {
+		line += fmt.Sprintf("; and %d more (sources lists all)", len(list)-maxListed)
+	}
+	return line + "."
+}
+
+// withConnections adds the workspace's connections to the instructions of
+// each initialize (and discover) result, so they are current per session.
+func withConnections(svc *core.Service, ws WorkspaceFunc) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if err != nil {
+				return res, err
+			}
+			var in *string
+			switch r := res.(type) {
+			case *mcp.InitializeResult:
+				in = &r.Instructions
+			case *mcp.DiscoverResult:
+				in = &r.Instructions
+			default:
+				return res, nil
+			}
+			if list, lerr := svc.ListConnections(ctx, ws(ctx)); lerr == nil {
+				*in += " " + connectionsLine(list)
+			}
+			return res, nil
+		}
+	}
+}
 
 // WorkspaceFunc returns the workspace a request belongs to.
 type WorkspaceFunc func(ctx context.Context) string
 
 // SchemaArgs is the schema tool's input.
 type SchemaArgs struct {
-	Source  string `json:"source" jsonschema:"connection name from sources"`
-	Pattern string `json:"pattern,omitempty" jsonschema:"name filter; * is a wildcard, e.g. *order*"`
-	Object  string `json:"object,omitempty" jsonschema:"exact table, e.g. orders or public.orders"`
+	Source  string `json:"source,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
+	Object  string `json:"object,omitempty"`
 }
 
 // QueryArgs is the query tool's input.
 type QueryArgs struct {
-	Source  string `json:"source" jsonschema:"connection name from sources"`
-	Query   string `json:"query" jsonschema:"one statement in the source's language (SQL)"`
-	MaxRows int    `json:"max_rows,omitempty" jsonschema:"row cap, at most the connection's limit"`
-	Explain bool   `json:"explain,omitempty" jsonschema:"show the plan without running"`
+	Source  string `json:"source,omitempty"`
+	Query   string `json:"query"`
+	MaxRows int    `json:"max_rows,omitempty"`
+	Explain bool   `json:"explain,omitempty" jsonschema:"plan only"`
 }
 
 // New returns an MCP server with the sources, schema and query tools.
@@ -36,10 +98,11 @@ func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "qh", Version: version}, &mcp.ServerOptions{Instructions: instructions})
 	closed := false
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &closed}
+	s.AddReceivingMiddleware(withConnections(svc, ws))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "sources",
-		Description: "List database connections: name, engine, ro/rw, description.",
+		Description: "List connections.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 		return text(svc.Sources(ctx, ws(ctx)))
@@ -47,17 +110,16 @@ func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "schema",
-		Description: "Describe tables. No pattern/object: overview with row estimates. " +
-			"With pattern or object: columns, types, PK, NN (not null), FKs (→ references, ← referenced by), enum values, indexes.",
+		Description: "No arguments: tables with columns, PKs and FK targets (names only for large schemas). " +
+			"pattern (* wildcard) or object: types, NN (not null), FKs (→ references, ← referenced by), enums, indexes.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a SchemaArgs) (*mcp.CallToolResult, any, error) {
 		return text(svc.Schema(ctx, ws(ctx), core.SchemaInput{Source: a.Source, Pattern: a.Pattern, Object: a.Object}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "query",
-		Description: "Run one statement; returns TSV (default cap 100 rows; the footer says when rows were cut). " +
-			"Read-only connections reject writes. explain=true returns the plan without running.",
+		Name:        "query",
+		Description: "Run one SQL statement. Returns TSV, at most 100 rows unless max_rows is set.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: &closed},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a QueryArgs) (*mcp.CallToolResult, any, error) {
 		return text(svc.Query(ctx, ws(ctx), core.QueryInput{Source: a.Source, Query: a.Query, MaxRows: a.MaxRows, Explain: a.Explain}))

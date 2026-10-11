@@ -1,2 +1,5 @@
 main: 3 tables, 1 view
-  order_items · orders · paid_orders (view) · users
+  order_items: order_id PK→orders.id, sku PK, qty
+  orders: id PK, user_id→users.id, status, total, note
+  paid_orders (view): id, user_id, total
+  users: id PK, email, name, bio, avatar, created_at

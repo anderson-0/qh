@@ -7,9 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anderson-0/qh/internal/catalog"
@@ -30,6 +33,15 @@ type Service struct {
 	pools *pool.Manager
 	cache *catalog.Cache
 	opts  Options
+
+	// resolved caches targets by workspace and connection ID; an entry is
+	// valid while its record's version is current.
+	resolved sync.Map
+
+	log        logWriter
+	logDropped atomic.Int64 // entries dropped since the last warning
+	logMu      sync.RWMutex // guards logClosed against sends on a closed queue
+	logClosed  bool
 }
 
 // Options configures a Service for server mode. The zero value is local mode.
@@ -43,6 +55,8 @@ type Options struct {
 	SQLiteDisabled bool
 	// NoQueryLog turns the query log off.
 	NoQueryLog bool
+	// Logger, when set, receives warnings (query-log entries dropped).
+	Logger *slog.Logger
 }
 
 // New returns a Service. opts (at most one) configures server mode.
@@ -105,7 +119,19 @@ type target struct {
 
 func (t *target) scrub(err error) error { return scrub(err, secretsOf(t.spec.DSN, t.info)...) }
 
+// resolve finds connection name in ws. An empty name means the workspace's
+// only connection.
 func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error) {
+	if name == "" {
+		list, err := s.store.ListConnections(ctx, ws)
+		if err != nil {
+			return nil, err
+		}
+		if len(list) != 1 {
+			return nil, s.unknownSource(ctx, ws, name)
+		}
+		name = list[0].Name
+	}
 	rec, err := s.store.GetConnection(ctx, ws, name)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, s.unknownSource(ctx, ws, name)
@@ -115,6 +141,12 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	}
 	if err := s.allowEngine(rec.Engine); err != nil {
 		return nil, err
+	}
+	key := ws + "\x00" + rec.ID
+	if p, ok := s.resolved.Load(key); ok && p.(*target).rec.Version == rec.Version {
+		t := *p.(*target)
+		t.rec = rec
+		return &t, nil
 	}
 	in, err := s.load(rec)
 	if err != nil {
@@ -128,14 +160,24 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 		return nil, err
 	}
 	info, _ := eng.Inspect(in.DSN)
-	return &target{
+	t := &target{
 		rec: rec, eng: eng, info: info,
 		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),
-	}, nil
+	}
+	// Every change to a connection bumps its version, so the unsealed
+	// settings are reused until then.
+	s.resolved.Store(key, t)
+	return t, nil
 }
+
+// forget drops a connection's cached unsealed settings.
+func (s *Service) forget(ws, id string) { s.resolved.Delete(ws + "\x00" + id) }
 
 func (s *Service) unknownSource(ctx context.Context, ws, name string) error {
 	e := qerr.New(qerr.UnknownSource, fmt.Sprintf("no connection named %q", name))
+	if name == "" {
+		e = qerr.New(qerr.UnknownSource, "source is required when the workspace does not have exactly one connection")
+	}
 	list, err := s.store.ListConnections(ctx, ws)
 	if err != nil || len(list) == 0 {
 		return e.WithHint("No connections exist yet. Add one with `qh conn add`")

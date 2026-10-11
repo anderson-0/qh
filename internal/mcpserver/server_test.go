@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -96,5 +97,36 @@ func TestTools(t *testing.T) {
 	}
 	if out, isErr := call(t, s, "query", map[string]any{"source": "shop", "query": "SELECT id FROM orders", "max_rows": 2}); isErr || !strings.Contains(out, "-- 2 rows shown") {
 		t.Fatalf("max_rows = %q", out)
+	}
+}
+
+func TestInstructionsNameConnections(t *testing.T) {
+	s := connect(t)
+	in := s.InitializeResult().Instructions
+	if !strings.HasPrefix(in, instructions+" ") || !strings.HasSuffix(in, "Connection: shop (sqlite, ro). source may be omitted.") {
+		t.Fatalf("instructions = %q", in)
+	}
+	if out, isErr := call(t, s, "query", map[string]any{"query": "SELECT count(*) AS n FROM orders"}); isErr || !strings.HasPrefix(out, "n\n250\n") {
+		t.Fatalf("query without source = %q", out)
+	}
+	if out, isErr := call(t, s, "schema", map[string]any{"object": "orders"}); isErr || !strings.Contains(out, "→ users.id") {
+		t.Fatalf("schema without source = %q", out)
+	}
+}
+
+func TestConnectionsLine(t *testing.T) {
+	if got := connectionsLine(nil); got != "No connections exist yet." {
+		t.Errorf("none: %q", got)
+	}
+	var list []*core.ConnInfo
+	for i := range maxListed + 2 {
+		list = append(list, &core.ConnInfo{Name: fmt.Sprintf("db%d", i), Engine: "postgres", Mode: "rw"})
+	}
+	list[0].Description = "Billing"
+	if got := connectionsLine(list[:2]); got != "Connections (pass one as source): db0 (postgres, rw): Billing; db1 (postgres, rw)." {
+		t.Errorf("two: %q", got)
+	}
+	if got := connectionsLine(list); !strings.HasSuffix(got, "db19 (postgres, rw); and 2 more (sources lists all).") {
+		t.Errorf("capped: %q", got)
 	}
 }

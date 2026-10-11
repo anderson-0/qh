@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"sync"
@@ -269,5 +270,49 @@ func TestSessionStateDoesNotLeak(t *testing.T) {
 	}
 	if !got {
 		t.Fatal("advisory lock still held by the pooled session")
+	}
+}
+
+// A failed statement leaves its transaction aborted; the pipeline's ROLLBACK
+// and DISCARD ALL must leave the single pooled connection usable.
+func TestPipelineRecoversAfterErrors(t *testing.T) {
+	dsn := startPostgres(t, "postgres:17-alpine")
+	_, rw := specs(dsn)
+	rw.PoolSize = 1
+	ctx := context.Background()
+	c, err := Engine{}.Open(ctx, rw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	opts := engine.QueryOpts{MaxRows: 10, Timeout: 5 * time.Second}
+	short := engine.QueryOpts{MaxRows: 10, Timeout: 100 * time.Millisecond}
+	for _, bad := range []struct {
+		q    string
+		o    engine.QueryOpts
+		code qerr.Category
+	}{
+		{`SELECT nope FROM users`, opts, qerr.QueryError},
+		{`SELECT 1/0`, opts, qerr.QueryError},
+		{`SELECT pg_sleep(2)`, short, qerr.Timeout},
+		{`INSERT INTO users (id, email) VALUES (1, 'dup@example.com')`, opts, qerr.QueryError},
+		{`COPY users TO STDOUT`, opts, qerr.Invalid},
+	} {
+		_, err := c.Query(ctx, bad.q, bad.o)
+		var qe *qerr.Error
+		if !errors.As(err, &qe) || qe.Category != bad.code {
+			t.Fatalf("%s: got %v, want %s", bad.q, err, bad.code)
+		}
+		res, err := c.Query(ctx, `SELECT count(*) FROM users`, opts)
+		if err != nil {
+			t.Fatalf("after %s: %v", bad.q, err)
+		}
+		if got := res.Rows[0][0].Text; got != "3" {
+			t.Fatalf("after %s: count = %s", bad.q, got)
+		}
+	}
+	res, err := c.Query(ctx, `UPDATE users SET name = name WHERE id <= 2`, opts)
+	if err != nil || res.RowsAffected != 2 {
+		t.Fatalf("update: %+v, %v", res, err)
 	}
 }

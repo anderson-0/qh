@@ -379,3 +379,14 @@ func TestAssembleSortsIndexesAndForeignKeys(t *testing.T) {
 		t.Errorf("indexes %v foreign keys %v", ix, fk)
 	}
 }
+
+func TestAtLeast(t *testing.T) {
+	for v, want := range map[string]bool{
+		"11.4.2-MariaDB-ubu2404": true, "11.1.0-MariaDB": true, "11.0.6-MariaDB": false,
+		"10.11.9-MariaDB-log": false, "12.0.1-MariaDB": true, "8.4.3": false, "garbage": false,
+	} {
+		if got := atLeast(v, 11, 1); got != want {
+			t.Errorf("%s: %v", v, got)
+		}
+	}
+}

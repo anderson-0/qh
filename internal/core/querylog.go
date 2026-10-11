@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -62,13 +63,100 @@ func truncateUTF8(s string, n int) string {
 	return s[:n]
 }
 
-// logQuery records one query call. A failed write is dropped: the log must
-// never fail or slow a query beyond the insert itself.
+// logQueueSize bounds the entries waiting to be written. When it is full,
+// new entries are dropped rather than slowing queries.
+const logQueueSize = 1024
+
+// logWriter appends query-log entries in order, off the query path.
+type logWriter struct {
+	once sync.Once
+	ch   chan logItem
+	done chan struct{}
+}
+
+// logItem is an entry to append, or (e nil) a flush marker closed once every
+// earlier entry is written.
+type logItem struct {
+	e     *store.QueryLogEntry
+	flush chan struct{}
+}
+
+func (s *Service) logQueue() chan logItem {
+	w := &s.log
+	w.once.Do(func() {
+		w.ch, w.done = make(chan logItem, logQueueSize), make(chan struct{})
+		go func() {
+			defer close(w.done)
+			for it := range w.ch {
+				if it.e == nil {
+					close(it.flush)
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = s.store.AppendQueryLog(ctx, it.e)
+				cancel()
+				if n := s.logDropped.Swap(0); n > 0 && s.opts.Logger != nil {
+					s.opts.Logger.Warn("query log queue was full; entries were not recorded", "dropped", n)
+				}
+			}
+		}()
+	})
+	return w.ch
+}
+
+// flushLog waits until every entry logged so far is written.
+func (s *Service) flushLog() {
+	if s.opts.NoQueryLog {
+		return
+	}
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+	if s.logClosed {
+		return
+	}
+	f := make(chan struct{})
+	s.logQueue() <- logItem{flush: f}
+	<-f
+}
+
+// closeWait bounds how long Close waits for pending entries.
+const closeWait = 10 * time.Second
+
+// Close writes the pending query-log entries, waiting at most closeWait. The
+// Service must not be used afterwards.
+func (s *Service) Close() {
+	s.logMu.Lock()
+	if s.logClosed {
+		s.logMu.Unlock()
+		return
+	}
+	s.logClosed = true
+	ch := s.log.ch
+	if ch != nil {
+		close(ch) // no sender is active: senders hold logMu.RLock
+	}
+	s.logMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case <-s.log.done:
+	case <-time.After(closeWait):
+		if s.opts.Logger != nil {
+			s.opts.Logger.Warn("query log: gave up writing pending entries at shutdown")
+		}
+	}
+}
+
+// logQuery records one query call. The entry is written in the background;
+// a failed write, or an entry that finds the queue full, is dropped: the log
+// must never fail or slow a query.
 func (s *Service) logQuery(ctx context.Context, ws string, t *target, in QueryInput, res *engine.Result, err error, d time.Duration) {
 	if s.opts.NoQueryLog {
 		return
 	}
 	e := &store.QueryLogEntry{
+		At:          time.Now(), // when the call ended, not when the background writer runs
 		WorkspaceID: ws, ConnectionID: t.rec.ID, ConnectionName: t.rec.Name, KeyID: keyIDOf(ctx),
 		Tool: "query", Query: truncateUTF8(in.Query, maxLoggedQuery), DurationMS: d.Milliseconds(),
 	}
@@ -83,7 +171,16 @@ func (s *Service) logQuery(ctx context.Context, ws string, t *target, in QueryIn
 	default:
 		e.RowCount = int64(len(res.Rows))
 	}
-	_ = s.store.AppendQueryLog(context.WithoutCancel(ctx), e)
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+	if s.logClosed {
+		return
+	}
+	select {
+	case s.logQueue() <- logItem{e: e}:
+	default:
+		s.logDropped.Add(1)
+	}
 }
 
 // QueryLog returns the workspace's logged query calls, newest first.
@@ -94,6 +191,7 @@ func (s *Service) QueryLog(ctx context.Context, ws string, f QueryLogFilter) ([]
 	if f.Limit < 0 || f.Limit > MaxLogLimit {
 		return nil, qerr.New(qerr.Invalid, "limit must be between 1 and 1000")
 	}
+	s.flushLog()
 	rows, err := s.store.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: ws, ConnectionName: f.Connection, Since: f.Since, Limit: f.Limit})
 	if err != nil {
 		return nil, err

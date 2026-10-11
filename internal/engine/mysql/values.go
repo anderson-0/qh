@@ -140,3 +140,19 @@ func parseVersion(v string) (flavor, string) {
 	num, _, _ := strings.Cut(v, "-")
 	return f, name + " " + num
 }
+
+// atLeast reports whether the server version string v ("11.4.2-MariaDB-...")
+// is at least major.minor.
+func atLeast(v string, major, minor int) bool {
+	num, _, _ := strings.Cut(v, "-")
+	parts := strings.Split(num, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	maj, err1 := strconv.Atoi(parts[0])
+	mnr, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return maj > major || (maj == major && mnr >= minor)
+}

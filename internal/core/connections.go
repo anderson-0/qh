@@ -381,6 +381,7 @@ func (s *Service) DeleteConnection(ctx context.Context, ws, name string) error {
 	}
 	s.pools.Drop(rec.ID)
 	s.cache.Invalidate(rec.ID)
+	s.forget(ws, rec.ID)
 	return nil
 }
 

@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +107,55 @@ func TestQueryLogFailureDoesNotFailQuery(t *testing.T) {
 	svc := New(failingLog{h.st}, h.svc.keys, pool.New(OpenConn, pool.Options{}), catalog.New(time.Minute))
 	if out, err := svc.Query(context.Background(), ws, QueryInput{Source: "shop", Query: "SELECT count(*) AS n FROM orders"}); err != nil || !strings.HasPrefix(out, "n\n250\n") {
 		t.Fatalf("%q %v", out, err)
+	}
+}
+
+// blockingLog holds every log write until release is closed.
+type blockingLog struct {
+	*store.SQLite
+	release chan struct{}
+}
+
+func (b blockingLog) AppendQueryLog(ctx context.Context, e *store.QueryLogEntry) error {
+	<-b.release
+	return b.SQLite.AppendQueryLog(ctx, e)
+}
+
+func TestSlowQueryLogDoesNotDelayQueries(t *testing.T) {
+	h := newHarness(t)
+	h.addShop(t, engine.ModeRO)
+	bl := blockingLog{h.st, make(chan struct{})}
+	var logged bytes.Buffer
+	svc := New(bl, h.svc.keys, pool.New(OpenConn, pool.Options{}), catalog.New(time.Minute),
+		Options{Logger: slog.New(slog.NewTextHandler(&logged, nil))})
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() {
+		// More calls than the queue holds: the surplus entries are dropped.
+		for range logQueueSize + 10 {
+			if _, err := svc.Query(ctx, ws, QueryInput{Source: "shop", Query: "SELECT 1"}); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("queries waited for the query log")
+	}
+	close(bl.release)
+	svc.Close() // writes what was queued
+	got, err := h.st.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: ws, Limit: 2000})
+	if err != nil || len(got) < logQueueSize || len(got) > logQueueSize+1 {
+		t.Fatalf("logged %d entries, %v", len(got), err)
+	}
+	if !strings.Contains(logged.String(), "entries were not recorded") {
+		t.Fatalf("no warning about dropped entries: %q", logged.String())
 	}
 }
 

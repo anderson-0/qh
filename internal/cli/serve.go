@@ -75,7 +75,8 @@ func serveCmd(home *string, version string) *cobra.Command {
 				return err
 			}
 			server := listen != ""
-			opts := core.Options{NoQueryLog: lf.off}
+			logger := slog.New(slog.NewJSONHandler(cmd.ErrOrStderr(), nil))
+			opts := core.Options{NoQueryLog: lf.off, Logger: logger}
 			addr := localAddr
 			if server {
 				addr = listen
@@ -112,7 +113,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 			}
 			defer a.Close()
 			stderr := cmd.ErrOrStderr()
-			cfg := httpapi.Config{Service: a.svc, Store: a.st, Version: version, Logger: slog.New(slog.NewJSONHandler(stderr, nil))}
+			cfg := httpapi.Config{Service: a.svc, Store: a.st, Version: version, Logger: logger}
 			mode := "local"
 			if server {
 				mode = "server"

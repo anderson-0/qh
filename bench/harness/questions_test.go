@@ -8,7 +8,7 @@ import (
 
 func TestQuestionFiles(t *testing.T) {
 	kinds := map[string]bool{"lookup": true, "join": true, "enum": true, "aggregate": true, "large": true, "misspell": true}
-	for _, ds := range []string{"pagila", "sakila", "chinook"} {
+	for _, ds := range []string{"pagila", "sakila", "chinook", "lendco"} {
 		qs, err := LoadQuestions(ds)
 		if err != nil {
 			t.Fatal(err)
@@ -42,7 +42,7 @@ func TestReferenceQueries(t *testing.T) {
 	if testing.Short() {
 		t.Skip("needs the datasets (Docker)")
 	}
-	for _, name := range []string{"pagila", "sakila", "chinook"} {
+	for _, name := range []string{"pagila", "sakila", "chinook", "lendco"} {
 		t.Run(name, func(t *testing.T) {
 			ds, stop, err := StartDataset(context.Background(), name)
 			if err != nil {
@@ -67,5 +67,45 @@ func TestReferenceQueries(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// lendco is Pagila under other names, so each lendco question must have the
+// same answer as the Pagila question with the same number.
+func TestLendcoMatchesPagila(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs the datasets (Docker)")
+	}
+	ctx := context.Background()
+	truths := map[string][][][]any{}
+	for _, name := range []string{"pagila", "lendco"} {
+		ds, stop, err := StartDataset(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stop()
+		qs, err := LoadQuestions(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range qs {
+			rows, err := Truth(ctx, ds.DB, q.SQL)
+			if err != nil {
+				t.Fatalf("%s: %v", q.ID, err)
+			}
+			truths[name] = append(truths[name], rows)
+		}
+		if name == "lendco" {
+			var n int
+			if err := ds.DB.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'
+				AND table_name IN ('film', 'actor', 'customer', 'rental', 'payment', 'film_list')`).Scan(&n); err != nil || n != 0 {
+				t.Fatalf("Pagila names left in lendco: %d %v", n, err)
+			}
+		}
+	}
+	for i := range truths["pagila"] {
+		if !Equal(truths["pagila"][i], truths["lendco"][i], false) {
+			t.Errorf("question %02d: pagila %v, lendco %v", i+1, truths["pagila"][i], truths["lendco"][i])
+		}
 	}
 }

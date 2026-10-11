@@ -252,3 +252,21 @@ func TestDescriptionWhitespaceCollapsed(t *testing.T) {
 		t.Fatalf("sources = %q", out)
 	}
 }
+
+func TestEmptySourceNeedsExactlyOneConnection(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if _, err := h.svc.Query(ctx, ws, QueryInput{Query: "SELECT 1"}); !strings.HasPrefix(errText(err), "error[unknown_source]: source is required") {
+		t.Fatalf("no connections: %q", errText(err))
+	}
+	h.addShop(t, engine.ModeRO)
+	if out, err := h.svc.Query(ctx, ws, QueryInput{Query: "SELECT count(*) AS n FROM orders"}); err != nil || !strings.HasPrefix(out, "n\n250\n") {
+		t.Fatalf("one connection: %q %v", out, err)
+	}
+	if _, _, err := h.svc.CreateConnection(ctx, ws, ConnInput{Name: "crm", Engine: "sqlite", DSN: testutil.SQLiteFixture(t)}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Query(ctx, ws, QueryInput{Query: "SELECT 1"}); !strings.Contains(errText(err), "Available: crm, shop") {
+		t.Fatalf("two connections: %q", errText(err))
+	}
+}

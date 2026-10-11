@@ -1,6 +1,8 @@
 package format
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/anderson-0/qh/internal/engine"
@@ -53,9 +55,12 @@ func schemaCatalog() *engine.Catalog {
 func TestOverview(t *testing.T) {
 	got, n := Schema(schemaCatalog(), SchemaOpts{})
 	want := "analytics: 1 table\n" +
-		"  events ~10M\n" +
+		"  events ~10M: id PK, user_id→public.users.id\n" +
 		"public: 3 tables, 1 view\n" +
-		"  order_items ~4.8M · orders ~1.2M · paid_orders (view) · users ~90k\n"
+		"  order_items ~4.8M: order_id PK→orders.id, sku PK\n" +
+		"  orders ~1.2M: id PK, user_id→users.id, status [pending|paid|shipped], total\n" +
+		"  paid_orders (view): id\n" +
+		"  users ~90k: id PK, email, created_at\n"
 	if got != want || n != 5 {
 		t.Fatalf("n=%d got:\n%s\nwant:\n%s", n, got, want)
 	}
@@ -70,6 +75,20 @@ func TestOverviewCap(t *testing.T) {
 		"-- showing 3 of 5 objects; use pattern= to narrow\n"
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A schema whose column listing would pass the budget gets names only.
+func TestOverviewFallsBackToNames(t *testing.T) {
+	c := schemaCatalog()
+	var fields []engine.Field
+	for i := range RichOverviewBudget / 10 {
+		fields = append(fields, engine.Field{Name: fmt.Sprintf("column_%04d", i)})
+	}
+	c.Namespaces[1].Objects[3].Fields = fields
+	got, _ := Schema(c, SchemaOpts{})
+	if strings.Contains(got, "column_") || !strings.Contains(got, "order_items ~4.8M · orders ~1.2M") {
+		t.Fatalf("got:\n%s", got)
 	}
 }
 

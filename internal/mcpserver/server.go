@@ -110,8 +110,8 @@ func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "schema",
-		Description: "No arguments: list tables. pattern (* wildcard) or object: columns (PK, NN = not null), " +
-			"FKs (→ references, ← referenced by), enums, indexes.",
+		Description: "No arguments: tables with columns, PKs and FK targets (names only for large schemas). " +
+			"pattern (* wildcard) or object: types, NN (not null), FKs (→ references, ← referenced by), enums, indexes.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a SchemaArgs) (*mcp.CallToolResult, any, error) {
 		return text(svc.Schema(ctx, ws(ctx), core.SchemaInput{Source: a.Source, Pattern: a.Pattern, Object: a.Object}))

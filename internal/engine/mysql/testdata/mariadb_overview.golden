@@ -1,2 +1,6 @@
 qh: 4 tables, 1 view
-  AuditLog ~1 · order_items ~20 · orders ~250 · paid_orders (view) · users ~3
+  AuditLog ~1: id PK, EventName
+  order_items ~20: order_id PK→orders.id, sku PK, qty
+  orders ~250: id PK, user_id→users.id, status [pending|paid|shipped], total, note
+  paid_orders (view): id, user_id, total
+  users ~3: id PK, email, name, bio, avatar, created_at

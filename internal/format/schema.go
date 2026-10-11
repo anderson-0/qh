@@ -49,10 +49,20 @@ func Schema(c *engine.Catalog, o SchemaOpts) (string, int) {
 	return b.String(), len(objs)
 }
 
+// RichOverviewBudget is the largest overview, in bytes, that lists every
+// object's columns. A schema that fits is described in one call, so an agent
+// can write a join without a call per table; a larger one gets names only.
+const RichOverviewBudget = 8000
+
 func overview(c *engine.Catalog, max int) (string, int) {
 	total := c.Count()
 	if total == 0 {
 		return "-- no tables or views found\n", 0
+	}
+	if total <= max {
+		if s, ok := richOverview(c); ok {
+			return s, total
+		}
 	}
 	var b strings.Builder
 	shown := 0
@@ -76,6 +86,57 @@ func overview(c *engine.Catalog, max int) (string, int) {
 		fmt.Fprintf(&b, "-- showing %d of %d objects; use pattern= to narrow\n", shown, total)
 	}
 	return b.String(), total
+}
+
+// richOverview lists each object with its columns: PK, single-column FK
+// targets (→table, or →table.column when the names differ) and short enums.
+// ok is false when it would exceed RichOverviewBudget.
+func richOverview(c *engine.Catalog) (string, bool) {
+	var b strings.Builder
+	for _, ns := range c.Namespaces {
+		if len(ns.Objects) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "%s: %s\n", ns.Name, kindCounts(ns.Objects))
+		for _, o := range ns.Objects {
+			b.WriteString("  " + overviewEntry(o) + ": " + columnList(o) + "\n")
+			if b.Len() > RichOverviewBudget {
+				return "", false
+			}
+		}
+	}
+	return b.String(), true
+}
+
+func columnList(o *engine.Object) string {
+	pk := map[string]bool{}
+	for _, c := range o.PrimaryKey {
+		pk[c] = true
+	}
+	fks := map[string]engine.ForeignKey{}
+	for _, fk := range o.ForeignKeys {
+		if len(fk.Columns) == 1 && len(fk.RefColumns) == 1 {
+			fks[fk.Columns[0]] = fk
+		}
+	}
+	cols := make([]string, len(o.Fields))
+	for i, f := range o.Fields {
+		s := f.Name
+		if pk[f.Name] {
+			s += " PK"
+		}
+		if fk, ok := fks[f.Name]; ok {
+			s += "→" + target(o.Namespace, fk.RefNamespace, fk.RefObject)
+			if fk.RefColumns[0] != f.Name {
+				s += "." + fk.RefColumns[0]
+			}
+		}
+		if len(f.Enum) > 0 && len(f.Enum) <= 10 {
+			s += " [" + strings.Join(f.Enum, "|") + "]"
+		}
+		cols[i] = s
+	}
+	return strings.Join(cols, ", ")
 }
 
 var kindLabels = []struct {

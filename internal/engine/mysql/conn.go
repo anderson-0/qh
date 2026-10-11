@@ -58,6 +58,9 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 			cfg.TLSConfig = "false"
 		}
 	}
+	if spec.Password != "" {
+		cfg.Passwd = spec.Password
+	}
 	connector, err := gomysql.NewConnector(cfg)
 	if err != nil {
 		return nil, invalidDSN()

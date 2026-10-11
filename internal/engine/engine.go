@@ -38,6 +38,14 @@ type ConnSpec struct {
 	FileRoot string
 	// TLS, when set, replaces the connection string's TLS settings.
 	TLS *TLS
+	// Server is set in server mode: engines apply their server-mode limits
+	// (Postgres: the connection-string allow-list, and no password from the
+	// environment or files). Dial alone no longer implies it: a local SSH
+	// tunnel sets Dial too.
+	Server bool
+	// Password, when set, replaces the connection string's password (a
+	// resolved password_ref).
+	Password string
 }
 
 // QueryOpts controls one query.

@@ -259,12 +259,12 @@ func applyTLS(cc *pgconn.Config, t *engine.TLS) error {
 }
 
 // poolConfig builds the pool configuration for spec. In server mode
-// (spec.Dial set) the connection string may use only serverKeys, the
+// (spec.Server) the connection string may use only serverKeys, the
 // password comes only from it (never PGPASSWORD, PGPASSFILE, ~/.pgpass or a
 // service file), and no default certificate or pgpass file applies.
 func poolConfig(spec engine.ConnSpec) (*pgxpool.Config, error) {
 	dsn, hasPassword := spec.DSN, true
-	if spec.Dial != nil {
+	if spec.Server {
 		var err error
 		if hasPassword, err = checkServerDSN(dsn); err != nil {
 			return nil, err
@@ -275,7 +275,7 @@ func poolConfig(spec engine.ConnSpec) (*pgxpool.Config, error) {
 	if err != nil {
 		return nil, qerr.New(qerr.Invalid, "invalid postgres connection string")
 	}
-	if spec.Dial != nil {
+	if spec.Server {
 		cc := cfg.ConnConfig
 		if !hasPassword {
 			cc.Password = ""
@@ -284,6 +284,9 @@ func poolConfig(spec engine.ConnSpec) (*pgxpool.Config, error) {
 		for _, fb := range cc.Fallbacks {
 			fb.TLSConfig = withoutClientCert(fb.TLSConfig)
 		}
+	}
+	if spec.Password != "" {
+		cfg.ConnConfig.Password = spec.Password
 	}
 	if spec.TLS != nil {
 		if err := applyTLS(&cfg.ConnConfig.Config, spec.TLS); err != nil {

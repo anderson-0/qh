@@ -125,21 +125,14 @@ func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
 
 // connSpec builds the spec engines open for workspace ws, carrying the
 // server's options. Workspace names cannot contain path separators.
-func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int, tls *engine.TLS) engine.ConnSpec {
-	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial, TLS: tls, Server: s.opts.Dial != nil}
+func (s *Service) connSpec(ws, id string, version int64, in ConnInput) engine.ConnSpec {
+	spec := engine.ConnSpec{ID: id, Version: version, Engine: in.Engine, DSN: in.DSN, Mode: in.Mode, PoolSize: in.PoolSize,
+		Dial: s.opts.Dial, TLS: in.TLS, Server: s.opts.Dial != nil, SSH: in.SSH, DSNRef: in.DSNRef, PasswordRef: in.PasswordRef,
+		Resolve: s.refs.Resolve, CheckTarget: s.opts.CheckTarget}
 	if s.opts.SQLiteRoot != "" {
 		spec.FileRoot = filepath.Join(s.opts.SQLiteRoot, ws)
 	}
 	return spec
-}
-
-// OpenConn opens spec with its registered engine. It is the production pool.Opener.
-func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
-	e, err := engine.Get(spec.Engine)
-	if err != nil {
-		return nil, err
-	}
-	return e.Open(ctx, spec)
 }
 
 // target is a stored connection with its secret opened.
@@ -201,7 +194,7 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	}
 	t := &target{
 		rec: rec, eng: eng, info: info,
-		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),
+		spec: s.connSpec(ws, rec.ID, rec.Version, in),
 	}
 	// Every change to a connection bumps its version, so the unsealed
 	// settings are reused until then.
@@ -268,6 +261,7 @@ func (s *Service) Schema(ctx context.Context, ws string, in SchemaInput) (string
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
+		s.dropIfBroken(t, err)
 		return "", t.scrub(err)
 	}
 	out, n := format.Schema(cat, format.SchemaOpts{Pattern: in.Pattern, Object: in.Object})
@@ -329,6 +323,7 @@ func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engi
 		res, err = conn.Query(ctx, in.Query, opts)
 	}
 	if err != nil {
+		s.dropIfBroken(t, err) // reopen next time: re-resolves secrets and reconnects the tunnel
 		return nil, t.scrub(s.withSuggestions(ctx, conn, t, in.Query, err))
 	}
 	// Any statement that is not a plain read may change the schema (DDL, but
@@ -361,6 +356,7 @@ func (s *Service) Catalog(ctx context.Context, ws, name string) (*engine.Catalog
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
+		s.dropIfBroken(t, err)
 		return nil, t.scrub(err)
 	}
 	return cat, nil
@@ -381,6 +377,14 @@ func (s *Service) catalog(ctx context.Context, conn engine.Conn, t *target) (*en
 		return nil, err
 	}
 	return cat.Only(t.rec.AllowedNamespaces), nil
+}
+
+// dropIfBroken drops t's pool when err means its connection failed. The
+// pool closes once its in-flight calls (including this one) release it.
+func (s *Service) dropIfBroken(t *target, err error) {
+	if err != nil && qerr.From(err).Category == qerr.ConnectionFailed {
+		s.pools.Drop(t.rec.ID)
+	}
 }
 
 // withSuggestions adds did-you-mean hints to unknown-column and unknown-table errors.

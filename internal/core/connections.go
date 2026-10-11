@@ -317,18 +317,20 @@ func (s *Service) inspect(eng engine.Engine, in ConnInput) (engine.DSNInfo, erro
 	return info, nil
 }
 
-func (s *Service) testConn(ctx context.Context, ws string, eng engine.Engine, in ConnInput, info engine.DSNInfo) (*TestResult, error) {
+// testConn opens spec once (resolving its references and tunnel) and pings it.
+func (s *Service) testConn(ctx context.Context, spec engine.ConnSpec, info engine.DSNInfo) (*TestResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	spec.ID, spec.Version, spec.PoolSize = "test", 0, 1
 	start := time.Now()
-	conn, err := eng.Open(ctx, s.connSpec(ws, "test", 0, in.Engine, in.DSN, in.Mode, 1, in.TLS))
+	conn, err := OpenConn(ctx, spec)
 	if err != nil {
-		return nil, scrub(err, secretsOf(in.DSN, info)...)
+		return nil, scrub(err, secretsOf(spec.DSN, info)...)
 	}
 	defer conn.Close()
 	v, err := conn.Ping(ctx)
 	if err != nil {
-		return nil, scrub(err, secretsOf(in.DSN, info)...)
+		return nil, scrub(err, secretsOf(spec.DSN, info)...)
 	}
 	return &TestResult{ServerVersion: v, Connect: time.Since(start)}, nil
 }
@@ -364,7 +366,7 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 	}
 	var tr *TestResult
 	if test {
-		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
+		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -467,7 +469,7 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	}
 	var tr *TestResult
 	if test && (p.DSN != nil || p.DSNRef != nil || p.PasswordRef != nil || p.SSH != nil || p.ClearSSH || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
-		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
+		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -553,7 +555,7 @@ func (s *Service) TestConnection(ctx context.Context, ws, name string) (*TestRes
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, ws, t.eng, ConnInput{Engine: t.rec.Engine, DSN: t.spec.DSN, Mode: t.spec.Mode, TLS: t.spec.TLS}, t.info)
+	return s.testConn(ctx, t.spec, t.info)
 }
 
 // RefreshSchema rebuilds a connection's cached schema.
@@ -571,6 +573,7 @@ func (s *Service) RefreshSchema(ctx context.Context, ws, name string) (int, time
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
+		s.dropIfBroken(t, err)
 		return 0, 0, t.scrub(err)
 	}
 	return cat.Count(), time.Since(start), nil
@@ -597,5 +600,5 @@ func (s *Service) TestInput(ctx context.Context, ws string, in ConnInput) (*Test
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, ws, eng, in, info)
+	return s.testConn(ctx, s.connSpec(ws, "test", 0, in), info)
 }

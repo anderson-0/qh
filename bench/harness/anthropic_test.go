@@ -13,7 +13,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-// TestToolDefinitionBudget is spec §9.1: qh's three tool definitions cost at
+// TestToolDefinitionBudget is spec §9.1: qh's tool definitions cost at
 // most 800 tokens.
 func TestToolDefinitionBudget(t *testing.T) {
 	key := os.Getenv("ANTHROPIC_API_KEY")

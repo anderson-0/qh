@@ -129,6 +129,10 @@ func TestConnectionsLine(t *testing.T) {
 	if got := connectionsLine(list[:2]); got != "Connections (pass one as source): db0 (postgres, rw): Billing; db1 (postgres, rw)." {
 		t.Errorf("two: %q", got)
 	}
+	list[1].Description = strings.Repeat("x", 80)
+	if got := connectionsLine(list[:2]); !strings.Contains(got, "db1 (postgres, rw): "+strings.Repeat("x", maxDescription-1)+"…") {
+		t.Errorf("clipped: %q", got)
+	}
 	if got := connectionsLine(list); !strings.HasSuffix(got, "db19 (postgres, rw); and 2 more (schema lists all).") {
 		t.Errorf("capped: %q", got)
 	}
@@ -145,6 +149,13 @@ func TestClipDescription(t *testing.T) {
 	multi := strings.Repeat("é", 70)
 	if got := clipDescription(multi); !utf8.ValidString(got) || utf8.RuneCountInString(got) != maxDescription {
 		t.Errorf("multi-byte: %q", got)
+	}
+	exact := strings.Repeat("a", maxDescription)
+	if got := clipDescription(exact); got != exact {
+		t.Errorf("exactly %d runes: %q", maxDescription, got)
+	}
+	if got := clipDescription(exact + "a"); got != strings.Repeat("a", maxDescription-1)+"…" {
+		t.Errorf("%d runes: %q", maxDescription+1, got)
 	}
 	if got := clipDescription("short"); got != "short" {
 		t.Errorf("short: %q", got)

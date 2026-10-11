@@ -279,6 +279,26 @@ func TestBastionDialIsBounded(t *testing.T) {
 	}
 }
 
+// expiredCtx has passed its deadline but does not report it yet, as a
+// timer context does in the instant before its timer fires.
+type expiredCtx struct{ context.Context }
+
+func (expiredCtx) Deadline() (time.Time, bool) { return time.Now().Add(-time.Millisecond), true }
+
+// A dial or handshake that fails because the caller's deadline passed is
+// reported as the deadline, even before the context marks itself done
+// (socket deadlines and context timers fire independently).
+func TestPassedDeadlineReportedAsDeadline(t *testing.T) {
+	tun, _ := New(Config{Addr: "203.0.113.1:22", User: "u", Password: "pw",
+		DialBastion: func(ctx context.Context, n, a string) (net.Conn, error) {
+			return nil, errors.New("dial tcp 203.0.113.1:22: i/o timeout")
+		}})
+	defer tun.Close()
+	if err := tun.Connect(expiredCtx{context.Background()}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("%v", err)
+	}
+}
+
 func TestBadAddressKeepsSharedClient(t *testing.T) {
 	target := echo(t)
 	srv := sshtest.Start(t, sshtest.Options{User: "u", Password: "pw"})

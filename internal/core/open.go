@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"errors"
 
 	"github.com/anderson-0/qh/internal/engine"
+	"github.com/anderson-0/qh/internal/netguard"
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/tunnel"
 )
@@ -58,6 +60,10 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 	}
 	var tun *tunnel.Tunnel
 	if s := spec.SSH; s != nil {
+		if spec.Server && spec.CheckTarget == nil {
+			// Fail closed: the bastion would reach any address unchecked.
+			return fail(qerr.New(qerr.ConnectionFailed, "ssh: this server has no network policy for tunnel targets"))
+		}
 		cfg := tunnel.Config{Addr: s.Addr(), User: s.User, HostKey: s.HostKey,
 			PrivateKey: s.PrivateKey, Passphrase: s.Passphrase, Password: s.Password,
 			DialBastion: spec.Dial, CheckTarget: spec.CheckTarget}
@@ -74,11 +80,11 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 		}
 		secrets = append(secrets, cfg.Password, cfg.Passphrase)
 		if tun, err = tunnel.New(cfg); err != nil {
-			return fail(err)
+			return fail(tunnelErr(err, cfg.Addr))
 		}
 		if err := tun.Connect(ctx); err != nil {
 			tun.Close()
-			return fail(err)
+			return fail(tunnelErr(err, cfg.Addr))
 		}
 		spec.Dial = tun.Dial
 	}
@@ -93,6 +99,27 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 		return c, nil
 	}
 	return &tunneledConn{Conn: c, tun: tun}, nil
+}
+
+// tunnelErr classifies an error from building or connecting the tunnel to
+// the bastion at addr. The tunnel's own failures are already
+// connection_failed; a network-policy refusal and an ended context are
+// given that category here, naming the stage.
+func tunnelErr(err error, addr string) error {
+	var qe *qerr.Error
+	if errors.As(err, &qe) {
+		return err
+	}
+	var de *netguard.DeniedError
+	switch {
+	case errors.As(err, &de):
+		return qerr.Wrap(qerr.ConnectionFailed, "ssh: cannot reach the bastion "+addr+": "+de.Error(), err)
+	case errors.Is(err, context.DeadlineExceeded):
+		return qerr.Wrap(qerr.ConnectionFailed, "ssh: timed out reaching the bastion "+addr, err)
+	case errors.Is(err, context.Canceled):
+		return qerr.Wrap(qerr.ConnectionFailed, "ssh: cancelled while reaching the bastion "+addr, err)
+	}
+	return qerr.Wrap(qerr.ConnectionFailed, "ssh: "+err.Error(), err)
 }
 
 // tunneledConn closes its tunnel after the engine connection.

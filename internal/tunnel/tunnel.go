@@ -167,7 +167,7 @@ func (t *Tunnel) get(ctx context.Context) (*ssh.Client, error) {
 			t.client = c
 			go t.keepAlive(c)
 		} else {
-			at.err, at.retry = err, ctx.Err() != nil
+			at.err, at.retry = err, ended(ctx)
 		}
 		t.mu.Unlock()
 		close(at.done)
@@ -193,7 +193,7 @@ func (t *Tunnel) connect(ctx context.Context) (*ssh.Client, error) {
 	nc, err := t.cfg.DialBastion(dctx, "tcp", t.cfg.Addr)
 	dcancel()
 	if err != nil {
-		if ctx.Err() != nil {
+		if ended(ctx) {
 			return nil, t.ctxErr(ctx)
 		}
 		var de *netguard.DeniedError
@@ -223,7 +223,7 @@ func (t *Tunnel) connect(ctx context.Context) (*ssh.Client, error) {
 	<-exited
 	if err != nil {
 		nc.Close()
-		if ctx.Err() != nil {
+		if ended(ctx) {
 			return nil, t.ctxErr(ctx)
 		}
 		return nil, t.handshakeErr(err)
@@ -236,6 +236,17 @@ func (t *Tunnel) connect(ctx context.Context) (*ssh.Client, error) {
 	return ssh.NewClient(c, chans, reqs), nil
 }
 
+// ended reports whether ctx is done or past its deadline. Socket deadlines
+// and context timers fire independently, so an I/O timeout at the deadline
+// can be seen before ctx.Err is set.
+func ended(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	d, ok := ctx.Deadline()
+	return ok && !time.Now().Before(d)
+}
+
 // ctxErr reports why a connection attempt was cut short.
 func (t *Tunnel) ctxErr(ctx context.Context) error {
 	select {
@@ -243,7 +254,10 @@ func (t *Tunnel) ctxErr(ctx context.Context) error {
 		return t.failed("the tunnel is closed")
 	default:
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return context.DeadlineExceeded
 }
 
 func (t *Tunnel) handshakeErr(err error) error {

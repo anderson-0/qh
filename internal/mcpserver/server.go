@@ -1,4 +1,4 @@
-// Package mcpserver exposes the core service as three MCP tools.
+// Package mcpserver exposes the core service as two MCP tools.
 package mcpserver
 
 import (
@@ -93,7 +93,11 @@ type QueryArgs struct {
 	Explain bool   `json:"explain,omitempty" jsonschema:"plan only"`
 }
 
-// New returns an MCP server with the sources, schema and query tools.
+// severalHeader introduces the connection list that schema returns, with no
+// arguments, in a workspace that does not have exactly one connection.
+const severalHeader = "-- several connections; pass one as source\n"
+
+// New returns an MCP server with the schema and query tools.
 func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "qh", Version: version}, &mcp.ServerOptions{Instructions: instructions})
 	closed := false
@@ -101,20 +105,26 @@ func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 	s.AddReceivingMiddleware(withConnections(svc, ws))
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "sources",
-		Description: "List connections.",
-		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-		return text(svc.Sources(ctx, ws(ctx)))
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
 		Name: "schema",
 		Description: "No arguments: tables with columns, PKs and FK targets (names only for large schemas). " +
 			"pattern (* wildcard) or object: types, NN (not null), FKs (→ references, ← referenced by), enums, indexes.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a SchemaArgs) (*mcp.CallToolResult, any, error) {
-		return text(svc.Schema(ctx, ws(ctx), core.SchemaInput{Source: a.Source, Pattern: a.Pattern, Object: a.Object}))
+		w := ws(ctx)
+		if a.Source == "" && a.Pattern == "" && a.Object == "" {
+			list, err := svc.ListConnections(ctx, w)
+			if err != nil {
+				return text("", err)
+			}
+			if len(list) != 1 {
+				out, err := svc.Sources(ctx, w)
+				if err == nil && len(list) > 1 {
+					out = severalHeader + out
+				}
+				return text(out, err)
+			}
+		}
+		return text(svc.Schema(ctx, w, core.SchemaInput{Source: a.Source, Pattern: a.Pattern, Object: a.Object}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

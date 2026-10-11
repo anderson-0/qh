@@ -22,6 +22,11 @@ import (
 )
 
 func connect(t *testing.T) *mcp.ClientSession {
+	s, _ := connectSvc(t)
+	return s
+}
+
+func connectSvc(t *testing.T) (*mcp.ClientSession, *core.Service) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "qh.db"))
@@ -50,7 +55,7 @@ func connect(t *testing.T) *mcp.ClientSession {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { session.Close() })
-	return session
+	return session, svc
 }
 
 func call(t *testing.T, s *mcp.ClientSession, name string, args map[string]any) (string, bool) {
@@ -72,7 +77,7 @@ func TestToolList(t *testing.T) {
 	for _, tool := range res.Tools {
 		names = append(names, tool.Name)
 	}
-	if strings.Join(names, ",") != "query,schema,sources" && strings.Join(names, ",") != "sources,schema,query" {
+	if strings.Join(names, ",") != "query,schema" && strings.Join(names, ",") != "schema,query" {
 		t.Fatalf("tools = %v", names)
 	}
 	b, _ := json.Marshal(res.Tools)
@@ -83,9 +88,6 @@ func TestToolList(t *testing.T) {
 
 func TestTools(t *testing.T) {
 	s := connect(t)
-	if out, isErr := call(t, s, "sources", map[string]any{}); isErr || out != "shop sqlite ro\n" {
-		t.Fatalf("sources = %q", out)
-	}
 	if out, isErr := call(t, s, "query", map[string]any{"source": "shop", "query": "SELECT count(*) AS n FROM orders"}); isErr || !strings.HasPrefix(out, "n\n250\n-- 1 row · ") {
 		t.Fatalf("query = %q", out)
 	}
@@ -128,5 +130,40 @@ func TestConnectionsLine(t *testing.T) {
 	}
 	if got := connectionsLine(list); !strings.HasSuffix(got, "db19 (postgres, rw); and 2 more (sources lists all).") {
 		t.Errorf("capped: %q", got)
+	}
+}
+
+func TestSchemaWithoutArgumentsListsConnectionsWhenSeveral(t *testing.T) {
+	s, svc := connectSvc(t)
+	ctx := context.Background()
+	// One connection: the overview, as before.
+	if out, isErr := call(t, s, "schema", map[string]any{}); isErr || !strings.HasPrefix(out, "main: 3 tables, 1 view\n") {
+		t.Fatalf("one connection: %q", out)
+	}
+	// A second connection appears after the session started.
+	if _, _, err := svc.CreateConnection(ctx, store.DefaultWorkspace, core.ConnInput{
+		Name: "crm", Engine: "sqlite", DSN: testutil.SQLiteFixture(t), Description: "CRM",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if out, isErr := call(t, s, "schema", map[string]any{}); isErr || out != severalHeader+"crm sqlite ro — CRM\nshop sqlite ro\n" {
+		t.Fatalf("two connections: %q", out)
+	}
+	// A filter without a source is not silently dropped.
+	if out, isErr := call(t, s, "schema", map[string]any{"pattern": "*order*"}); !isErr || !strings.HasPrefix(out, "error[unknown_source]") {
+		t.Fatalf("pattern without source: %q (isError %v)", out, isErr)
+	}
+	if out, isErr := call(t, s, "schema", map[string]any{"source": "crm", "object": "orders"}); isErr || !strings.Contains(out, "→ users.id") {
+		t.Fatalf("explicit source: %q", out)
+	}
+}
+
+func TestSchemaWithoutArgumentsAndNoConnections(t *testing.T) {
+	s, svc := connectSvc(t)
+	if err := svc.DeleteConnection(context.Background(), store.DefaultWorkspace, "shop"); err != nil {
+		t.Fatal(err)
+	}
+	if out, isErr := call(t, s, "schema", map[string]any{}); isErr || !strings.HasPrefix(out, "-- no connections") {
+		t.Fatalf("no connections: %q (isError %v)", out, isErr)
 	}
 }

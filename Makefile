@@ -1,4 +1,4 @@
-.PHONY: build test test-short race lint
+.PHONY: build test test-short race lint bench
 
 build:
 	CGO_ENABLED=0 go build -trimpath -o bin/qh ./cmd/qh
@@ -14,3 +14,6 @@ race:
 
 lint:
 	go vet ./...
+
+bench:
+	cd bench && go run ./cmd/bench $(ARGS)

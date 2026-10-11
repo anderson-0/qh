@@ -1,0 +1,218 @@
+package harness
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// DefaultModel is the Claude model the benchmark drives unless -model says otherwise.
+const DefaultModel = "claude-sonnet-5-5"
+
+// ToolDef is a tool offered to the model.
+type ToolDef struct {
+	Name        string
+	Description string
+	Schema      map[string]any // JSON schema of the input
+}
+
+// ToolCall is a tool use requested by the model.
+type ToolCall struct {
+	ID    string
+	Name  string
+	Input json.RawMessage
+}
+
+// ToolResult answers one ToolCall.
+type ToolResult struct {
+	ID      string
+	Content string
+	IsError bool
+}
+
+// Usage is the token usage of one model reply (input includes cache reads and writes).
+type Usage struct{ Input, Output int64 }
+
+// Reply is one model turn.
+type Reply struct {
+	Calls      []ToolCall
+	Usage      Usage
+	StopReason string // the API's stop_reason: end_turn, max_tokens, refusal, tool_use, ...
+}
+
+// Model is one conversation with a model. Start opens it; Continue sends
+// the results of the previous reply's tool calls.
+type Model interface {
+	Start(ctx context.Context, system, user string, tools []ToolDef) (*Reply, error)
+	Continue(ctx context.Context, results []ToolResult) (*Reply, error)
+}
+
+// ModelFactory returns a fresh conversation.
+type ModelFactory func() Model
+
+const (
+	// OutputCap is the most tool output, in bytes, passed to the model.
+	OutputCap = 100_000
+	// TruncationNote ends a capped tool output.
+	TruncationNote = "\n[truncated by the benchmark harness]"
+)
+
+// SubmitTool is how the model returns its answer.
+var SubmitTool = ToolDef{
+	Name:        "submit_answer",
+	Description: "Submit the final answer. Call it exactly once, when you are done.",
+	Schema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"rows": map[string]any{
+				"type":        "array",
+				"description": "One array per result row, with the columns in the order the question asks for.",
+				"items":       map[string]any{"type": "array", "items": map[string]any{}},
+			},
+		},
+		"required": []any{"rows"},
+	},
+}
+
+// ToolDefs converts MCP tools into tool definitions for the model.
+func ToolDefs(tools []*mcp.Tool) []ToolDef {
+	out := make([]ToolDef, 0, len(tools))
+	for _, t := range tools {
+		schema := map[string]any{"type": "object"}
+		if b, err := json.Marshal(t.InputSchema); err == nil {
+			_ = json.Unmarshal(b, &schema)
+		}
+		out = append(out, ToolDef{Name: t.Name, Description: t.Description, Schema: schema})
+	}
+	return out
+}
+
+// Result is one run of one question against one server.
+type Result struct {
+	Dataset      string  `json:"dataset"`
+	Server       string  `json:"server"`
+	Question     string  `json:"question"`
+	Kind         string  `json:"kind"`
+	Run          int     `json:"run"`
+	Correct      bool    `json:"correct"`
+	Submitted    bool    `json:"submitted"`
+	Answer       [][]any `json:"answer,omitempty"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	ToolCalls    int     `json:"tool_calls"`
+	Turns        int     `json:"turns"`
+	Truncations  int     `json:"truncations"`
+	WallMS       int64   `json:"wall_ms"`
+	Error        string  `json:"error,omitempty"`
+	// StopReasons is the API stop_reason of every reply, in order.
+	StopReasons []string `json:"stop_reasons,omitempty"`
+	// Aborted marks a run that did not really happen (server start failure,
+	// transient model API error such as 429, 5xx or a network failure): it is
+	// excluded from every average. Other failures are ordinary failed runs.
+	Aborted bool `json:"aborted,omitempty"`
+}
+
+// capOutput cuts out to at most OutputCap bytes without splitting a UTF-8
+// character, and appends TruncationNote when it cut.
+func capOutput(out string) (string, bool) {
+	if len(out) <= OutputCap {
+		return out, false
+	}
+	cut := OutputCap
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	return out[:cut] + TruncationNote, true
+}
+
+// RunOpts bounds one run.
+type RunOpts struct {
+	MaxTurns    int   // model replies allowed
+	TokenBudget int64 // input plus output tokens allowed over the run; 0 means no ceiling
+}
+
+// Run asks one question. The model may call the server's tools until it
+// calls submit_answer, stops, reaches opts.MaxTurns replies or spends
+// opts.TokenBudget tokens.
+func Run(ctx context.Context, m Model, srv Server, ds string, q Question, truth [][]any, run int, opts RunOpts) (r Result) {
+	r = Result{Dataset: ds, Server: srv.Name(), Question: q.ID, Kind: q.Kind, Run: run}
+	start := time.Now()
+	defer func() { r.WallMS = time.Since(start).Milliseconds() }()
+	tools := append(ToolDefs(srv.Tools()), SubmitTool)
+	system := SystemPrompt
+	if in := srv.Instructions(); in != "" {
+		system += "\n\nServer instructions:\n" + in
+	}
+	reply, err := m.Start(ctx, system, PromptFor(q), tools)
+	for {
+		if err != nil {
+			r.Error, r.Aborted = "model: "+err.Error(), IsTransient(err)
+			return r
+		}
+		r.Turns++
+		r.InputTokens += reply.Usage.Input
+		r.OutputTokens += reply.Usage.Output
+		r.StopReasons = append(r.StopReasons, reply.StopReason)
+		// A reply that crosses the budget has already been paid for: an answer
+		// it submits is kept, but nothing else runs.
+		over := opts.TokenBudget > 0 && r.InputTokens+r.OutputTokens > opts.TokenBudget
+		if len(reply.Calls) == 0 && !over {
+			switch reply.StopReason {
+			case "max_tokens":
+				r.Error = "the model hit max_tokens without calling submit_answer"
+			case "refusal":
+				r.Error = "the model refused"
+			default:
+				r.Error = "the model stopped without calling submit_answer"
+			}
+			return r
+		}
+		var results []ToolResult
+		for _, c := range reply.Calls {
+			if c.Name == SubmitTool.Name {
+				var in struct{ Rows [][]any }
+				if err := json.Unmarshal(c.Input, &in); err != nil {
+					results = append(results, ToolResult{ID: c.ID, IsError: true, Content: "rows must be an array of arrays: " + err.Error()})
+					continue
+				}
+				if in.Rows == nil { // rows missing or null, e.g. input cut off at max_tokens
+					results = append(results, ToolResult{ID: c.ID, IsError: true, Content: "rows must be an array of arrays: rows is missing or null"})
+					continue
+				}
+				r.Submitted, r.Answer = true, in.Rows
+				r.Correct = Equal(truth, in.Rows, q.Ordered)
+				results = append(results, ToolResult{ID: c.ID, Content: "answer recorded"})
+				continue
+			}
+			if over {
+				continue
+			}
+			r.ToolCalls++
+			out, isErr := srv.Call(ctx, c.Name, c.Input)
+			if out == "" {
+				out = "(no output)" // an empty tool_result is ambiguous for the model
+			}
+			out, cut := capOutput(out)
+			if cut {
+				r.Truncations++
+			}
+			results = append(results, ToolResult{ID: c.ID, Content: out, IsError: isErr})
+		}
+		if r.Submitted {
+			return r
+		}
+		if over {
+			r.Error = fmt.Sprintf("token budget exceeded (%d tokens)", r.InputTokens+r.OutputTokens)
+			return r
+		}
+		if r.Turns >= opts.MaxTurns {
+			r.Error = fmt.Sprintf("turn limit (%d) reached without submit_answer", opts.MaxTurns)
+			return r
+		}
+		reply, err = m.Continue(ctx, results)
+	}
+}

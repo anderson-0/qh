@@ -89,21 +89,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 				if names := clearPGEnv(); len(names) > 0 {
 					fmt.Fprintf(cmd.ErrOrStderr(), "ignoring %s in server mode\n", strings.Join(names, ", "))
 				}
-				policy, err := netguard.New(allow, deny)
-				if err != nil {
-					return err
-				}
-				opts.Dial = policy.DialContext
-				opts.CheckTarget = policy.Allowed
-				for _, p := range allowRefs {
-					if err := secretref.CheckPattern(p); err != nil {
-						return err
-					}
-				}
-				opts.SecretRefs, opts.DenySSH = allowRefs, denySSH
-				if sqliteRoot == "" {
-					opts.SQLiteDisabled = true
-				} else if opts.SQLiteRoot, err = filepath.Abs(sqliteRoot); err != nil {
+				if opts, err = serverOptions(opts, allow, deny, allowRefs, denySSH, sqliteRoot); err != nil {
 					return err
 				}
 			} else if len(allow)+len(deny)+len(allowRefs) > 0 || sqliteRoot != "" || denySSH {
@@ -172,6 +158,30 @@ func serveCmd(home *string, version string) *cobra.Command {
 	fl.StringArrayVar(&allowRefs, "allow-secret-ref", nil, "server mode: allow secret references matching this pattern (repeatable; * is a wildcard), e.g. env:QH_TENANT_*")
 	fl.BoolVar(&denySSH, "deny-ssh", false, "server mode: refuse connections that use an SSH tunnel")
 	return cmd
+}
+
+// serverOptions adds the server-mode restrictions to opts: the address policy
+// (for dialling and for SSH bastions and tunnel targets), the allowed secret
+// references, the SSH switch and the SQLite root.
+func serverOptions(opts core.Options, allow, deny, allowRefs []string, denySSH bool, sqliteRoot string) (core.Options, error) {
+	policy, err := netguard.New(allow, deny)
+	if err != nil {
+		return opts, err
+	}
+	opts.Dial = policy.DialContext
+	opts.CheckTarget = policy.Allowed
+	for _, p := range allowRefs {
+		if err := secretref.CheckPattern(p); err != nil {
+			return opts, err
+		}
+	}
+	opts.SecretRefs, opts.DenySSH = allowRefs, denySSH
+	if sqliteRoot == "" {
+		opts.SQLiteDisabled = true
+	} else if opts.SQLiteRoot, err = filepath.Abs(sqliteRoot); err != nil {
+		return opts, err
+	}
+	return opts, nil
 }
 
 // clearPGEnv unsets every PG* environment variable and returns their names.

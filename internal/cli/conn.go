@@ -113,11 +113,11 @@ func (f *connFlags) ssh(cmd *cobra.Command) (*engine.SSH, error) {
 	s := &engine.SSH{User: f.sshUser, HostKey: f.sshHostKey, PrivateKeyRef: f.sshKeyRef,
 		PassphraseRef: f.sshPassphraseRef, PasswordRef: f.sshPasswordRef}
 	hp := f.sshHost
-	if u, rest, ok := strings.Cut(hp, "@"); ok {
+	if i := strings.LastIndex(hp, "@"); i >= 0 {
 		if s.User == "" {
-			s.User = u
+			s.User = hp[:i]
 		}
-		hp = rest
+		hp = hp[i+1:]
 	}
 	if h, p, err := net.SplitHostPort(hp); err == nil {
 		port, err := strconv.Atoi(p)
@@ -126,7 +126,7 @@ func (f *connFlags) ssh(cmd *cobra.Command) (*engine.SSH, error) {
 		}
 		s.Host, s.Port = h, port
 	} else {
-		s.Host = hp
+		s.Host = strings.TrimSuffix(strings.TrimPrefix(hp, "["), "]")
 	}
 	if f.sshKey != "" {
 		b, err := os.ReadFile(f.sshKey)

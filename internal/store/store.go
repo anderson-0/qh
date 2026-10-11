@@ -38,6 +38,8 @@ type Connection struct {
 	PoolSize          int
 	AllowedNamespaces []string
 	TLS               string // JSON summary of the TLS settings (engine.TLSInfo); "" when there are none
+	SSH               string // JSON summary of the SSH tunnel (engine.SSHInfo); "" when there is none
+	Refs              string // JSON {"dsn_ref","password_ref"}; "" when the connection uses none
 	Version           int64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time

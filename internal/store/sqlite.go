@@ -82,6 +82,10 @@ var migrations = [][]string{
 		`CREATE INDEX query_log_workspace ON query_log (workspace_id, id)`,
 		`CREATE INDEX query_log_at ON query_log (at)`,
 	},
+	{
+		`ALTER TABLE connections ADD COLUMN ssh TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE connections ADD COLUMN refs TEXT NOT NULL DEFAULT '{}'`,
+	},
 }
 
 // SQLite is a Store backed by a SQLite file.
@@ -181,10 +185,10 @@ func (s *SQLite) Close() error { return s.db.Close() }
 
 const connColumns = `id, workspace_id, name, engine, secret, secret_key_id, host, port, "database",
 	username, description, mode, max_rows, timeout_ms, pool_size, allowed_namespaces, version,
-	created_at, updated_at, tls`
+	created_at, updated_at, tls, ssh, refs`
 
-// tlsColumn stores an empty TLS summary as '{}', the column's default.
-func tlsColumn(s string) string {
+// jsonColumn stores an empty JSON summary (tls, ssh, refs) as '{}', the column's default.
+func jsonColumn(s string) string {
 	if s == "" {
 		return "{}"
 	}
@@ -208,10 +212,10 @@ func (s *SQLite) CreateConnection(ctx context.Context, c *Connection) error {
 	}
 	now := s.now()
 	_, err = s.db.ExecContext(ctx, `INSERT INTO connections (`+connColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
 		c.ID, c.WorkspaceID, c.Name, c.Engine, c.Secret, c.SecretKeyID, c.Host, c.Port, c.Database,
 		c.Username, c.Description, c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns),
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), tlsColumn(c.TLS))
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), jsonColumn(c.TLS), jsonColumn(c.SSH), jsonColumn(c.Refs))
 	if isUnique(err) {
 		return ErrExists
 	}
@@ -233,10 +237,10 @@ func (s *SQLite) UpdateConnection(ctx context.Context, c *Connection) error {
 	now := s.now()
 	res, err := s.db.ExecContext(ctx, `UPDATE connections SET engine = ?, secret = ?, secret_key_id = ?,
 		host = ?, port = ?, "database" = ?, username = ?, description = ?, mode = ?, max_rows = ?,
-		timeout_ms = ?, pool_size = ?, allowed_namespaces = ?, tls = ?, version = version + 1, updated_at = ?
+		timeout_ms = ?, pool_size = ?, allowed_namespaces = ?, tls = ?, ssh = ?, refs = ?, version = version + 1, updated_at = ?
 		WHERE workspace_id = ? AND name = ? AND id = ? AND version = ?`,
 		c.Engine, c.Secret, c.SecretKeyID, c.Host, c.Port, c.Database, c.Username, c.Description,
-		c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns), tlsColumn(c.TLS), now.Format(time.RFC3339Nano),
+		c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns), jsonColumn(c.TLS), jsonColumn(c.SSH), jsonColumn(c.Refs), now.Format(time.RFC3339Nano),
 		c.WorkspaceID, c.Name, c.ID, c.Version)
 	if err != nil {
 		return err
@@ -293,10 +297,10 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanConnection(r scanner) (*Connection, error) {
 	var c Connection
-	var ns, created, updated, tls string
+	var ns, created, updated, tls, ssh, refs string
 	err := r.Scan(&c.ID, &c.WorkspaceID, &c.Name, &c.Engine, &c.Secret, &c.SecretKeyID, &c.Host, &c.Port,
 		&c.Database, &c.Username, &c.Description, &c.Mode, &c.MaxRows, &c.TimeoutMS, &c.PoolSize, &ns,
-		&c.Version, &created, &updated, &tls)
+		&c.Version, &created, &updated, &tls, &ssh, &refs)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +312,12 @@ func scanConnection(r scanner) (*Connection, error) {
 	}
 	if tls != "{}" {
 		c.TLS = tls
+	}
+	if ssh != "{}" {
+		c.SSH = ssh
+	}
+	if refs != "{}" {
+		c.Refs = refs
 	}
 	if c.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
 		return nil, err

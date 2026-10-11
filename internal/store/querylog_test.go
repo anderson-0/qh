@@ -75,3 +75,32 @@ func TestConnectionTLSSummary(t *testing.T) {
 		t.Fatalf("cleared tls %q", again.TLS)
 	}
 }
+
+func TestConnectionSSHAndRefsSummaries(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTemp(t)
+	c := sample("ssh")
+	c.SSH = "{\"host\":\"b\"}"
+	c.Refs = "{\"dsn_ref\":\"env:X\"}"
+	if err := s.CreateConnection(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetConnection(ctx, DefaultWorkspace, "ssh")
+	if got.SSH != c.SSH || got.Refs != c.Refs {
+		t.Fatalf("ssh %q refs %q", got.SSH, got.Refs)
+	}
+	plain := sample("plain")
+	if err := s.CreateConnection(ctx, plain); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s.GetConnection(ctx, DefaultWorkspace, "plain"); p.SSH != "" || p.Refs != "" {
+		t.Fatalf("empty values came back as %q %q", p.SSH, p.Refs)
+	}
+	got.SSH, got.Refs = "", ""
+	if err := s.UpdateConnection(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := s.GetConnection(ctx, DefaultWorkspace, "ssh"); again.SSH != "" || again.Refs != "" {
+		t.Fatalf("cleared %q %q", again.SSH, again.Refs)
+	}
+}

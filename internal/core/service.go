@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/anderson-0/qh/internal/pool"
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secret"
+	"github.com/anderson-0/qh/internal/secretref"
 	"github.com/anderson-0/qh/internal/sqlx"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/suggest"
@@ -33,6 +35,7 @@ type Service struct {
 	pools *pool.Manager
 	cache *catalog.Cache
 	opts  Options
+	refs  *secretref.Set
 
 	// resolved caches targets by workspace and connection ID; an entry is
 	// valid while its record's version is current.
@@ -57,6 +60,14 @@ type Options struct {
 	NoQueryLog bool
 	// Logger, when set, receives warnings (query-log entries dropped).
 	Logger *slog.Logger
+	// SecretRefs are the --allow-secret-ref patterns; in server mode only
+	// matching references are accepted. Local mode accepts every reference.
+	SecretRefs []string
+	// DenySSH refuses connections that use an SSH tunnel.
+	DenySSH bool
+	// CheckTarget is the network policy's address check (server mode); SSH
+	// tunnel targets must pass it.
+	CheckTarget func(netip.Addr) bool
 }
 
 // New returns a Service. opts (at most one) configures server mode.
@@ -65,7 +76,29 @@ func New(st store.Store, keys *secret.Keyring, pools *pool.Manager, cache *catal
 	if len(opts) > 0 {
 		s.opts = opts[0]
 	}
+	s.refs = secretref.NewSet(s.opts.Dial != nil, s.opts.SecretRefs)
 	return s
+}
+
+// checkInput applies the server's limits on tunnels and secret references.
+func (s *Service) checkInput(in ConnInput) error {
+	refs := []string{in.DSNRef, in.PasswordRef}
+	if in.SSH != nil {
+		refs = append(refs, in.SSH.RefStrings()...)
+	}
+	for _, r := range refs {
+		if r == "" {
+			continue
+		}
+		if _, err := s.refs.Check(r); err != nil {
+			return err
+		}
+	}
+	if in.SSH != nil && s.opts.DenySSH {
+		return qerr.New(qerr.Forbidden, "SSH tunnels are disabled on this server").
+			WithHint("The operator turned them off with qh serve --deny-ssh")
+	}
+	return nil
 }
 
 // allowEngine refuses engines this server does not permit.
@@ -156,10 +189,16 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkDSN(eng, in.DSN); err != nil {
+	if err := s.checkInput(in); err != nil {
 		return nil, err
 	}
-	info, _ := eng.Inspect(in.DSN)
+	var info engine.DSNInfo
+	if in.DSNRef == "" { // a dsn_ref connection's string is only known when the pool opens
+		if err := s.checkDSN(eng, in.DSN); err != nil {
+			return nil, err
+		}
+		info, _ = eng.Inspect(in.DSN)
+	}
 	t := &target{
 		rec: rec, eng: eng, info: info,
 		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),

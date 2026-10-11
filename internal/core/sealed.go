@@ -11,25 +11,27 @@ import (
 // the raw connection string, which never starts with it.
 var envelopePrefix = []byte(`{"v":2,`)
 
-// envelope is the plaintext of a sealed secret: the connection string and
-// the TLS settings, whose private key is secret too.
+// envelope is the plaintext of a sealed secret: the connection string, the
+// TLS and SSH settings (whose keys and passwords are secret too) and the
+// secret references.
 type envelope struct {
-	V   int         `json:"v"`
-	DSN string      `json:"dsn"`
-	TLS *engine.TLS `json:"tls,omitempty"`
+	V           int         `json:"v"`
+	DSN         string      `json:"dsn"`
+	TLS         *engine.TLS `json:"tls,omitempty"`
+	SSH         *engine.SSH `json:"ssh,omitempty"`
+	DSNRef      string      `json:"dsn_ref,omitempty"`
+	PasswordRef string      `json:"password_ref,omitempty"`
 }
 
-func encodeSecret(dsn string, tls *engine.TLS) ([]byte, error) {
-	return json.Marshal(envelope{V: 2, DSN: dsn, TLS: tls})
+func encodeSecret(in ConnInput) ([]byte, error) {
+	return json.Marshal(envelope{V: 2, DSN: in.DSN, TLS: in.TLS, SSH: in.SSH, DSNRef: in.DSNRef, PasswordRef: in.PasswordRef})
 }
 
-func decodeSecret(pt []byte) (string, *engine.TLS, error) {
+func decodeSecret(pt []byte) (envelope, error) {
 	if !bytes.HasPrefix(pt, envelopePrefix) {
-		return string(pt), nil, nil
+		return envelope{DSN: string(pt)}, nil
 	}
 	var e envelope
-	if err := json.Unmarshal(pt, &e); err != nil {
-		return "", nil, err
-	}
-	return e.DSN, e.TLS, nil
+	err := json.Unmarshal(pt, &e)
+	return e, err
 }

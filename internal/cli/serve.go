@@ -19,6 +19,7 @@ import (
 	"github.com/anderson-0/qh/internal/httpapi"
 	"github.com/anderson-0/qh/internal/netguard"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/secretref"
 )
 
 const localAddr = "127.0.0.1:8765"
@@ -60,7 +61,8 @@ func pruneQueryLog(ctx context.Context, svc *core.Service, retention time.Durati
 
 func serveCmd(home *string, version string) *cobra.Command {
 	var listen, dataDir, sqliteRoot string
-	var allow, deny []string
+	var allow, deny, allowRefs []string
+	var denySSH bool
 	var lf queryLogFlags
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -92,13 +94,20 @@ func serveCmd(home *string, version string) *cobra.Command {
 					return err
 				}
 				opts.Dial = policy.DialContext
+				opts.CheckTarget = policy.Allowed
+				for _, p := range allowRefs {
+					if err := secretref.CheckPattern(p); err != nil {
+						return err
+					}
+				}
+				opts.SecretRefs, opts.DenySSH = allowRefs, denySSH
 				if sqliteRoot == "" {
 					opts.SQLiteDisabled = true
 				} else if opts.SQLiteRoot, err = filepath.Abs(sqliteRoot); err != nil {
 					return err
 				}
-			} else if len(allow)+len(deny) > 0 || sqliteRoot != "" {
-				return qerr.New(qerr.Invalid, "--allow-cidr, --deny-cidr and --sqlite-root apply to server mode only").WithHint("Add --http ADDR")
+			} else if len(allow)+len(deny)+len(allowRefs) > 0 || sqliteRoot != "" || denySSH {
+				return qerr.New(qerr.Invalid, "--allow-cidr, --deny-cidr, --sqlite-root, --allow-secret-ref and --deny-ssh apply to server mode only").WithHint("Add --http ADDR")
 			}
 			dir := dataDir
 			if dir == "" {
@@ -160,6 +169,8 @@ func serveCmd(home *string, version string) *cobra.Command {
 	fl.StringVar(&sqliteRoot, "sqlite-root", "", "server mode: allow SQLite files under DIR/<workspace>/ (SQLite is disabled otherwise)")
 	fl.StringSliceVar(&allow, "allow-cidr", nil, "server mode: allow database addresses in this range, even if denied by default (repeatable)")
 	fl.StringSliceVar(&deny, "deny-cidr", nil, "server mode: also refuse database addresses in this range (repeatable)")
+	fl.StringArrayVar(&allowRefs, "allow-secret-ref", nil, "server mode: allow secret references matching this pattern (repeatable; * is a wildcard), e.g. env:QH_TENANT_*")
+	fl.BoolVar(&denySSH, "deny-ssh", false, "server mode: refuse connections that use an SSH tunnel")
 	return cmd
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +38,13 @@ type connFlags struct {
 	tlsMode, tlsCA, tlsCert        string
 	tlsKey, tlsServerName          string
 	noTLS                          bool
+
+	dsnRef, passwordRef                  string
+	sshHost, sshUser, sshHostKey, sshKey string
+	sshKeyRef, sshPassphraseRef          string
+	sshPasswordRef                       string
+	sshPassphraseStdin, sshPasswordStdin bool
+	noSSH                                bool
 }
 
 func (f *connFlags) register(cmd *cobra.Command, create bool) {
@@ -51,6 +59,7 @@ func (f *connFlags) register(cmd *cobra.Command, create bool) {
 		fl.StringToStringVar(&f.params, "param", nil, "extra connection setting key=value (repeatable)")
 	} else {
 		fl.BoolVar(&f.noTLS, "no-tls", false, "remove the TLS settings")
+		fl.BoolVar(&f.noSSH, "no-ssh", false, "remove the SSH tunnel")
 	}
 	fl.StringVar(&f.dsn, "dsn", "", "connection string, or - to read it from stdin")
 	fl.StringVar(&f.mode, "mode", "ro", "ro (read-only) or rw (read-write)")
@@ -65,6 +74,79 @@ func (f *connFlags) register(cmd *cobra.Command, create bool) {
 	fl.StringVar(&f.tlsCert, "tls-cert", "", "file with a PEM client certificate")
 	fl.StringVar(&f.tlsKey, "tls-key", "", "file with the PEM private key for --tls-cert")
 	fl.StringVar(&f.tlsServerName, "tls-server-name", "", "name the server certificate must carry (verify-full)")
+	fl.StringVar(&f.dsnRef, "dsn-ref", "", "secret reference for the whole connection string (env:NAME, file:/path or aws-sm://id[#key])")
+	fl.StringVar(&f.passwordRef, "password-ref", "", "secret reference for the database password")
+	fl.StringVar(&f.sshHost, "ssh-host", "", "reach the database through this SSH bastion: [user@]host[:port]")
+	fl.StringVar(&f.sshUser, "ssh-user", "", "SSH user (or user@ in --ssh-host)")
+	fl.StringVar(&f.sshHostKey, "ssh-host-key", "", "the bastion's host-key fingerprint, SHA256:… (omit it once to be shown it)")
+	fl.StringVar(&f.sshKey, "ssh-key", "", "file with the SSH private key (read here and sent sealed)")
+	fl.StringVar(&f.sshKeyRef, "ssh-key-ref", "", "secret reference for the SSH private key")
+	fl.BoolVar(&f.sshPassphraseStdin, "ssh-passphrase-stdin", false, "read the SSH key passphrase from the first line of stdin")
+	fl.StringVar(&f.sshPassphraseRef, "ssh-passphrase-ref", "", "secret reference for the SSH key passphrase")
+	fl.BoolVar(&f.sshPasswordStdin, "ssh-password-stdin", false, "read the SSH password from the first line of stdin")
+	fl.StringVar(&f.sshPasswordRef, "ssh-password-ref", "", "secret reference for the SSH password")
+}
+
+// stdinReaders counts the flags that read stdin; at most one may.
+func (f *connFlags) stdinReaders() int {
+	n := 0
+	for _, b := range []bool{f.dsn == "-", f.passwordStdin, f.sshPassphraseStdin, f.sshPasswordStdin} {
+		if b {
+			n++
+		}
+	}
+	return n
+}
+
+// ssh returns the tunnel the flags describe, or nil when --ssh-host is absent.
+func (f *connFlags) ssh(cmd *cobra.Command) (*engine.SSH, error) {
+	fl := cmd.Flags()
+	if !fl.Changed("ssh-host") {
+		for _, n := range []string{"ssh-user", "ssh-host-key", "ssh-key", "ssh-key-ref", "ssh-passphrase-stdin",
+			"ssh-passphrase-ref", "ssh-password-stdin", "ssh-password-ref"} {
+			if fl.Changed(n) {
+				return nil, qerr.New(qerr.Invalid, "--"+n+" needs --ssh-host")
+			}
+		}
+		return nil, nil
+	}
+	s := &engine.SSH{User: f.sshUser, HostKey: f.sshHostKey, PrivateKeyRef: f.sshKeyRef,
+		PassphraseRef: f.sshPassphraseRef, PasswordRef: f.sshPasswordRef}
+	hp := f.sshHost
+	if u, rest, ok := strings.Cut(hp, "@"); ok {
+		if s.User == "" {
+			s.User = u
+		}
+		hp = rest
+	}
+	if h, p, err := net.SplitHostPort(hp); err == nil {
+		port, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, qerr.New(qerr.Invalid, "invalid --ssh-host port "+strconv.Quote(p))
+		}
+		s.Host, s.Port = h, port
+	} else {
+		s.Host = hp
+	}
+	if f.sshKey != "" {
+		b, err := os.ReadFile(f.sshKey)
+		if err != nil {
+			return nil, qerr.New(qerr.Invalid, "cannot read "+f.sshKey)
+		}
+		s.PrivateKey = string(b)
+	}
+	var err error
+	if f.sshPassphraseStdin {
+		if s.Passphrase, err = readLine(cmd); err != nil {
+			return nil, err
+		}
+	}
+	if f.sshPasswordStdin {
+		if s.Password, err = readLine(cmd); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // tls returns the TLS settings the flags describe, or nil when --tls-mode is absent.
@@ -122,17 +204,18 @@ func connAddCmd(with withBackend) *cobra.Command {
 			if f.engine == "" {
 				return qerr.New(qerr.Invalid, "--engine is required")
 			}
-			if f.dsn == "" && f.host == "" && f.database == "" {
+			if f.dsn == "" && f.host == "" && f.database == "" && f.dsnRef == "" {
 				return qerr.New(qerr.Invalid, "--dsn is required").
 					WithHint("Or give --host (--database for sqlite) with --port, --database, --user, --password-stdin and --param")
 			}
-			if f.dsn == "-" && f.passwordStdin {
-				return qerr.New(qerr.Invalid, "--dsn - and --password-stdin cannot both read stdin")
+			if f.stdinReaders() > 1 {
+				return qerr.New(qerr.Invalid, "only one flag can read stdin")
 			}
 			in := core.ConnInput{
 				Name: args[0], Engine: f.engine, Host: f.host, Port: f.port, Database: f.database, Username: f.user,
 				Params: f.params, Description: f.description, Mode: engine.Mode(f.mode), MaxRows: f.maxRows,
 				TimeoutMS: int(f.timeout.Milliseconds()), PoolSize: f.poolSize, AllowedNamespaces: f.namespaces,
+				DSNRef: f.dsnRef, PasswordRef: f.passwordRef,
 			}
 			var err error
 			if f.dsn != "" {
@@ -146,6 +229,9 @@ func connAddCmd(with withBackend) *cobra.Command {
 				}
 			}
 			if in.TLS, err = f.tls(cmd); err != nil {
+				return err
+			}
+			if in.SSH, err = f.ssh(cmd); err != nil {
 				return err
 			}
 			info, tr, err := b.CreateConnection(cmd.Context(), in, !f.skipTest)
@@ -198,6 +284,23 @@ func tlsSummary(t *engine.TLSInfo) string {
 	return t.Mode + " (" + strings.Join(parts, ", ") + ")"
 }
 
+func sshSummary(s *engine.SSHInfo) string {
+	if s == nil {
+		return "none"
+	}
+	out := fmt.Sprintf("%s@%s · host key %s · %s", s.User, net.JoinHostPort(s.Host, strconv.Itoa(s.Port)), s.HostKey, s.Auth)
+	if len(s.Refs) > 0 {
+		var refs []string
+		for _, k := range []string{"private_key", "passphrase", "password"} {
+			if r := s.Refs[k]; r != "" {
+				refs = append(refs, k+" from "+r)
+			}
+		}
+		out += " (" + strings.Join(refs, ", ") + ")"
+	}
+	return out
+}
+
 func connListCmd(with withBackend) *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls",
@@ -239,6 +342,11 @@ func connShowCmd(with withBackend) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "name: %s\nengine: %s\nmode: %s\ndsn: %s\ntls: %s\n", c.Name, c.Engine, c.Mode, c.DSN, tlsSummary(c.TLS))
+			pw := "(in the connection string)"
+			if c.PasswordRef != "" {
+				pw = "from " + c.PasswordRef
+			}
+			fmt.Fprintf(out, "password: %s\nssh: %s\n", pw, sshSummary(c.SSH))
 			fmt.Fprintf(out, "description: %s\nmax_rows: %d\ntimeout: %s\npool_size: %d\nnamespaces: %s\n",
 				c.Description, c.MaxRows, time.Duration(c.TimeoutMS)*time.Millisecond, c.PoolSize, ns)
 			fmt.Fprintf(out, "version: %d\ncreated: %s\nupdated: %s\n", c.Version,
@@ -257,6 +365,15 @@ func connEditCmd(with withBackend) *cobra.Command {
 		RunE: with(func(cmd *cobra.Command, b backend, args []string) error {
 			var p core.ConnPatch
 			fl := cmd.Flags()
+			if f.stdinReaders() > 1 {
+				return qerr.New(qerr.Invalid, "only one flag can read stdin")
+			}
+			if fl.Changed("dsn-ref") {
+				p.DSNRef = &f.dsnRef
+			}
+			if fl.Changed("password-ref") {
+				p.PasswordRef = &f.passwordRef
+			}
 			if fl.Changed("dsn") {
 				dsn, err := readDSN(cmd, f.dsn)
 				if err != nil {
@@ -287,6 +404,10 @@ func connEditCmd(with withBackend) *cobra.Command {
 			p.ClearTLS = f.noTLS
 			var err error
 			if p.TLS, err = f.tls(cmd); err != nil {
+				return err
+			}
+			p.ClearSSH = f.noSSH
+			if p.SSH, err = f.ssh(cmd); err != nil {
 				return err
 			}
 			info, _, err := b.UpdateConnection(cmd.Context(), args[0], p, !f.skipTest)

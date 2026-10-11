@@ -168,7 +168,7 @@ func TestConnEditSSHAndRefs(t *testing.T) {
 	if _, errOut, code := run(t, home, "", "conn", "edit", "pg", "--password-ref", "", "--skip-test"); code != 0 {
 		t.Fatalf("clear ref: %d %s", code, errOut)
 	}
-	if out := showOut(t, home, "pg"); !strings.Contains(out, "password: (in the connection string)") {
+	if out := showOut(t, home, "pg"); !strings.Contains(out, "password: none, or in the connection string") {
 		t.Fatalf("ref not cleared:\n%s", out)
 	}
 }

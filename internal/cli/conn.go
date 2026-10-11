@@ -342,11 +342,14 @@ func connShowCmd(with withBackend) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "name: %s\nengine: %s\nmode: %s\ndsn: %s\ntls: %s\n", c.Name, c.Engine, c.Mode, c.DSN, tlsSummary(c.TLS))
-			pw := "(in the connection string)"
+			// SQLite has no password; for network engines the password is
+			// either a reference or part of the connection string, if any.
 			if c.PasswordRef != "" {
-				pw = "from " + c.PasswordRef
+				fmt.Fprintf(out, "password: from %s\n", c.PasswordRef)
+			} else if c.Engine != "sqlite" {
+				fmt.Fprintln(out, "password: none, or in the connection string")
 			}
-			fmt.Fprintf(out, "password: %s\nssh: %s\n", pw, sshSummary(c.SSH))
+			fmt.Fprintf(out, "ssh: %s\n", sshSummary(c.SSH))
 			fmt.Fprintf(out, "description: %s\nmax_rows: %d\ntimeout: %s\npool_size: %d\nnamespaces: %s\n",
 				c.Description, c.MaxRows, time.Duration(c.TimeoutMS)*time.Millisecond, c.PoolSize, ns)
 			fmt.Fprintf(out, "version: %d\ncreated: %s\nupdated: %s\n", c.Version,

@@ -239,12 +239,3 @@ func (fileResolver) Resolve(_ context.Context, r Ref) (string, error) {
 	v := strings.TrimSuffix(string(b), "\n")
 	return strings.TrimSuffix(v, "\r"), nil
 }
-
-// newAWS is replaced in Task 3.
-func newAWS() Resolver { return awsStub{} }
-
-type awsStub struct{}
-
-func (awsStub) Resolve(_ context.Context, r Ref) (string, error) {
-	return "", failed(r.Raw, "AWS Secrets Manager is not available in this build")
-}

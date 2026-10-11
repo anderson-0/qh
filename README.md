@@ -129,7 +129,7 @@ qh conn add prod --engine postgres --dsn 'postgres://app@db.internal:5432/app' -
   --ssh-host jump@bastion.example.com --ssh-key ~/.ssh/id_ed25519
 ```
 
-The first run fails and shows the bastion's host-key fingerprint. Verify it (`ssh-keyscan bastion.example.com | ssh-keygen -lf -`) and add `--ssh-host-key SHA256:…`. qh refuses any other key. The key file is read by the CLI and stored sealed, like `--tls-key`. Use `--ssh-password-stdin` for password authentication.
+The first run fails and shows the bastion's host-key fingerprint. Verify it (`ssh-keyscan -t ed25519 bastion.example.com | ssh-keygen -lf -`) and add `--ssh-host-key SHA256:…`. qh prefers the bastion's Ed25519 host key, as OpenSSH does, and refuses any other key. The key file is read by the CLI and stored sealed, like `--tls-key`. Give the SSH user with `--ssh-user` or as `user@` in `--ssh-host`. For password authentication use `--ssh-password-stdin`; for an encrypted key use `--ssh-passphrase-stdin`.
 
 Instead of storing a password or connection string, a connection can reference one:
 
@@ -139,13 +139,14 @@ Instead of storing a password or connection string, a connection can reference o
 | `file:/path` | a file's contents (at most 64 KiB, trailing newline removed), e.g. a Docker or Kubernetes secret |
 | `aws-sm://<name or ARN>[#key]` | an AWS Secrets Manager secret, or one field of a JSON secret, read with the qh process's AWS credentials |
 
-Use them with `--dsn-ref`, `--password-ref`, `--ssh-key-ref`, `--ssh-passphrase-ref` or `--ssh-password-ref`. References are resolved when qh connects and never stored. After a rotation, the next call that fails to authenticate reconnects with the new value.
+Use them with `--dsn-ref`, `--password-ref`, `--ssh-key-ref`, `--ssh-passphrase-ref` or `--ssh-password-ref`. References are resolved when qh connects and never stored. After a rotation, an open connection keeps working until it fails to authenticate. That call returns `connection_failed`, and the next call reconnects with the new value.
 
 **Server mode.** A tenant must not be able to read the server's environment or cloud secrets, or tunnel into its network:
 
-- References are refused unless the operator allows them: `qh serve --http :8765 --allow-secret-ref 'env:QH_TENANT_*' --allow-secret-ref 'aws-sm://arn:aws:secretsmanager:us-east-1:123456789012:secret:qh/*'`.
+- References are refused unless the operator allows them: `qh serve --http :8765 --allow-secret-ref 'env:QH_SHARED_*' --allow-secret-ref 'aws-sm://arn:aws:secretsmanager:us-east-1:123456789012:secret:qh/*'`.
+- An allowed reference can be used by every tenant with a manage key on that server, and a tenant can read its value (for example by pointing a connection at a server it controls, which then receives the password). Allow only secrets you would hand to all tenants. Tenants who must not share secrets need separate servers.
 - For `file:` patterns, a mounted secret that is a symlink (as in Kubernetes secret volumes) must be allowed with a directory pattern such as `file:/var/run/secrets/db/*`, because the real path behind the symlink must also match.
-- Tunnels must pass `--allow-cidr`/`--deny-cidr` for both the bastion and the database behind it. A database on the bastion's own loopback is allowed.
+- Both the bastion and the database behind it are checked against the server's network policy (`--allow-cidr`/`--deny-cidr`). By default only loopback, unspecified and link-local addresses (including the cloud metadata addresses) are refused, so private ranges such as `10.0.0.0/8` stay reachable; add `--deny-cidr 10.0.0.0/8 …` to keep tenants out of them. A database on the bastion's own loopback is allowed.
 - `--deny-ssh` turns tunnels off.
 
 ## Query log

@@ -13,7 +13,7 @@ import (
 // TestReadOnlyTransactionLayer calls run directly, bypassing the engine's own
 // classification, to prove the database's read-only transaction holds too.
 func TestReadOnlyTransactionLayer(t *testing.T) {
-	for _, image := range []string{"mysql:8.4", "mariadb:10.11"} {
+	for _, image := range []string{"mysql:8.4", "mariadb:10.11", "mariadb:11.4"} {
 		t.Run(image, func(t *testing.T) { testReadOnlyTransactionLayer(t, image) })
 	}
 }
@@ -26,6 +26,9 @@ func testReadOnlyTransactionLayer(t *testing.T, image string) {
 	for _, q := range []string{
 		"INSERT INTO users (id, email) VALUES (98, 'layer@example.com')",
 		"CREATE TEMPORARY TABLE layer_tmp (x int)",
+		"CREATE TABLE layer_new (x int)",
+		"ALTER TABLE users ADD COLUMN layer_col int",
+		"DROP TABLE order_items",
 	} {
 		_, err := c.run(ctx, q, opts, sqlx.Write, true)
 		if e := qerr.From(err); err == nil || e.Category != qerr.ReadOnly {

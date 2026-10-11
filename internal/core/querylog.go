@@ -95,6 +95,9 @@ func (s *Service) logQueue() chan logItem {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				_ = s.store.AppendQueryLog(ctx, it.e)
 				cancel()
+				if n := s.logDropped.Swap(0); n > 0 && s.opts.Logger != nil {
+					s.opts.Logger.Warn("query log queue was full; entries were not recorded", "dropped", n)
+				}
 			}
 		}()
 	})
@@ -116,18 +119,32 @@ func (s *Service) flushLog() {
 	<-f
 }
 
-// Close writes the pending query-log entries. The Service must not be used
-// afterwards.
+// closeWait bounds how long Close waits for pending entries.
+const closeWait = 10 * time.Second
+
+// Close writes the pending query-log entries, waiting at most closeWait. The
+// Service must not be used afterwards.
 func (s *Service) Close() {
 	s.logMu.Lock()
-	defer s.logMu.Unlock()
 	if s.logClosed {
+		s.logMu.Unlock()
 		return
 	}
 	s.logClosed = true
-	if s.log.ch != nil {
-		close(s.log.ch)
-		<-s.log.done
+	ch := s.log.ch
+	if ch != nil {
+		close(ch) // no sender is active: senders hold logMu.RLock
+	}
+	s.logMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case <-s.log.done:
+	case <-time.After(closeWait):
+		if s.opts.Logger != nil {
+			s.opts.Logger.Warn("query log: gave up writing pending entries at shutdown")
+		}
 	}
 }
 
@@ -139,6 +156,7 @@ func (s *Service) logQuery(ctx context.Context, ws string, t *target, in QueryIn
 		return
 	}
 	e := &store.QueryLogEntry{
+		At:          time.Now(), // when the call ended, not when the background writer runs
 		WorkspaceID: ws, ConnectionID: t.rec.ID, ConnectionName: t.rec.Name, KeyID: keyIDOf(ctx),
 		Tool: "query", Query: truncateUTF8(in.Query, maxLoggedQuery), DurationMS: d.Milliseconds(),
 	}
@@ -161,6 +179,7 @@ func (s *Service) logQuery(ctx context.Context, ws string, t *target, in QueryIn
 	select {
 	case s.logQueue() <- logItem{e: e}:
 	default:
+		s.logDropped.Add(1)
 	}
 }
 

@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +125,9 @@ func TestSlowQueryLogDoesNotDelayQueries(t *testing.T) {
 	h := newHarness(t)
 	h.addShop(t, engine.ModeRO)
 	bl := blockingLog{h.st, make(chan struct{})}
-	svc := New(bl, h.svc.keys, pool.New(OpenConn, pool.Options{}), catalog.New(time.Minute))
+	var logged bytes.Buffer
+	svc := New(bl, h.svc.keys, pool.New(OpenConn, pool.Options{}), catalog.New(time.Minute),
+		Options{Logger: slog.New(slog.NewTextHandler(&logged, nil))})
 	ctx := context.Background()
 	done := make(chan error, 1)
 	go func() {
@@ -149,6 +153,9 @@ func TestSlowQueryLogDoesNotDelayQueries(t *testing.T) {
 	got, err := h.st.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: ws, Limit: 2000})
 	if err != nil || len(got) < logQueueSize || len(got) > logQueueSize+1 {
 		t.Fatalf("logged %d entries, %v", len(got), err)
+	}
+	if !strings.Contains(logged.String(), "entries were not recorded") {
+		t.Fatalf("no warning about dropped entries: %q", logged.String())
 	}
 }
 

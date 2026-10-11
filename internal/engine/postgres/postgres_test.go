@@ -1,8 +1,8 @@
 package postgres
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"sync"
@@ -296,6 +296,7 @@ func TestPipelineRecoversAfterErrors(t *testing.T) {
 		{`SELECT 1/0`, opts, qerr.QueryError},
 		{`SELECT pg_sleep(2)`, short, qerr.Timeout},
 		{`INSERT INTO users (id, email) VALUES (1, 'dup@example.com')`, opts, qerr.QueryError},
+		{`COPY users TO STDOUT`, opts, qerr.Invalid},
 	} {
 		_, err := c.Query(ctx, bad.q, bad.o)
 		var qe *qerr.Error

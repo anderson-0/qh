@@ -75,7 +75,7 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 		return nil, connectErr(err)
 	}
 	f, _ := parseVersion(v)
-	return &conn{db: db, readOnly: spec.Mode != engine.ModeRW, dbName: cfg.DBName, flavor: f}, nil
+	return &conn{db: db, readOnly: spec.Mode != engine.ModeRW, dbName: cfg.DBName, flavor: f, mariaDB111: atLeast(v, 11, 1)}, nil
 }
 
 type conn struct {
@@ -83,6 +83,9 @@ type conn struct {
 	readOnly bool
 	dbName   string
 	flavor   flavor
+	// mariaDB111: the server reports version 11.1 or later; it matters only
+	// for MariaDB (see readOnlyVar).
+	mariaDB111 bool
 }
 
 func (c *conn) Close() error { return c.db.Close() }
@@ -143,7 +146,7 @@ func (c *conn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engi
 		return nil, qerr.New(qerr.Invalid, "EXPLAIN of a statement that writes needs a read-write connection on MySQL/MariaDB").
 			WithHint("Use a read-write connection, or explain a SELECT")
 	default:
-		r, err = c.exec(ctx, stmt, qo, access, false, false)
+		r, err = c.exec(ctx, stmt, qo, access, false)
 	}
 	if err != nil {
 		return nil, err
@@ -168,10 +171,10 @@ func (c *conn) setupSQL(rows int, timeout time.Duration, readOnly bool) string {
 }
 
 // readOnlyVar is the session variable behind SET TRANSACTION READ ONLY.
-// MySQL removed tx_read_only in 8.0.3; MariaDB has it in every version
-// (transaction_read_only only from 11.1).
+// MySQL removed tx_read_only in 8.0.3. MariaDB added transaction_read_only in
+// 11.1 and deprecated tx_read_only there; older versions have only the latter.
 func (c *conn) readOnlyVar() string {
-	if c.flavor == flavorMariaDB {
+	if c.flavor == flavorMariaDB && !c.mariaDB111 {
 		return "tx_read_only"
 	}
 	return "transaction_read_only"
@@ -238,7 +241,7 @@ func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sql
 	if readOnly {
 		return c.read(ctx, q, o)
 	}
-	return c.exec(ctx, q, o, access, readOnly, true)
+	return c.exec(ctx, q, o, access, true)
 }
 
 func callLimits(o engine.QueryOpts) (time.Duration, int) {
@@ -306,7 +309,7 @@ func (c *conn) release(sc *sql.Conn) {
 
 // exec is run with a choice of how the transaction ends: commit false always
 // rolls back (used to explain a write without applying anything).
-func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly, commit bool) (*engine.Result, error) {
+func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, commit bool) (*engine.Result, error) {
 	start := time.Now()
 	timeout, limit := callLimits(o)
 	// The server-side timeout fires first; this is a backstop.
@@ -321,21 +324,17 @@ func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sq
 		discard(sc)
 		return nil, classify(ctx, err)
 	}
-	begin := "START TRANSACTION"
-	if readOnly {
-		begin = "START TRANSACTION READ ONLY"
-	}
-	if _, err := sc.ExecContext(ctx, begin); err != nil {
-		c.finish(sc, false, !readOnly)
+	if _, err := sc.ExecContext(ctx, "START TRANSACTION"); err != nil {
+		c.finish(sc, false, true)
 		return nil, classify(ctx, err)
 	}
 	// Statements on a read-write connection can leave session state that the
 	// reset cannot clear (CREATE TEMPORARY TABLE, HANDLER ... OPEN, CALL
 	// changing sql_mode, LOCK INSTANCE FOR BACKUP), even when they fail
 	// part-way. Never pool the connection after one.
-	dirty := !readOnly && access != sqlx.Read
+	dirty := access != sqlx.Read
 	fail := func(err error) (*engine.Result, error) {
-		c.finish(sc, false, !readOnly)
+		c.finish(sc, false, true)
 		if dirty {
 			discard(sc)
 		}
@@ -359,7 +358,7 @@ func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sq
 			return fail(err)
 		}
 	}
-	if err := c.finish(sc, commit, !readOnly); err != nil {
+	if err := c.finish(sc, commit, true); err != nil {
 		if dirty {
 			discard(sc)
 		}

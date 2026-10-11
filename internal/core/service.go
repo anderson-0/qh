@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anderson-0/qh/internal/catalog"
@@ -36,9 +38,10 @@ type Service struct {
 	// valid while its record's version is current.
 	resolved sync.Map
 
-	log       logWriter
-	logMu     sync.RWMutex // guards logClosed against sends on a closed queue
-	logClosed bool
+	log        logWriter
+	logDropped atomic.Int64 // entries dropped since the last warning
+	logMu      sync.RWMutex // guards logClosed against sends on a closed queue
+	logClosed  bool
 }
 
 // Options configures a Service for server mode. The zero value is local mode.
@@ -52,6 +55,8 @@ type Options struct {
 	SQLiteDisabled bool
 	// NoQueryLog turns the query log off.
 	NoQueryLog bool
+	// Logger, when set, receives warnings (query-log entries dropped).
+	Logger *slog.Logger
 }
 
 // New returns a Service. opts (at most one) configures server mode.
@@ -164,6 +169,9 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	s.resolved.Store(key, t)
 	return t, nil
 }
+
+// forget drops a connection's cached unsealed settings.
+func (s *Service) forget(ws, id string) { s.resolved.Delete(ws + "\x00" + id) }
 
 func (s *Service) unknownSource(ctx context.Context, ws, name string) error {
 	e := qerr.New(qerr.UnknownSource, fmt.Sprintf("no connection named %q", name))

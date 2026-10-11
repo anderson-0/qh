@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -28,7 +29,7 @@ type anthropicModel struct {
 
 // NewAnthropic returns a factory of conversations with model.
 func NewAnthropic(apiKey, model, effort string) ModelFactory {
-	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6), option.WithRequestTimeout(requestTimeout))
+	client := anthropic.NewClient(clientOptions(apiKey, 6)...)
 	return func() Model { return &anthropicModel{client: client, model: model, effort: effort} }
 }
 
@@ -145,7 +146,7 @@ func countParams(model string, defs []ToolDef, system string) anthropic.MessageC
 // instructions add to every request. The instructions go in the system prompt
 // of the measured call only, so they are part of the difference.
 func CountToolTokens(ctx context.Context, apiKey, model string, tools []ToolDef, instructions string) (int64, error) {
-	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(6), option.WithRequestTimeout(requestTimeout))
+	client := anthropic.NewClient(clientOptions(apiKey, 6)...)
 	count := func(defs []ToolDef, system string) (int64, error) {
 		res, err := client.Messages.CountTokens(ctx, countParams(model, defs, system))
 		if err != nil {
@@ -194,9 +195,20 @@ func Preflight(ctx context.Context, apiKey, model, effort string) error {
 	if _, err := CountToolTokens(ctx, apiKey, model, []ToolDef{{Name: "ping", Description: "Does nothing.", Schema: map[string]any{"type": "object", "properties": map[string]any{}}}}, ""); err != nil {
 		return fmt.Errorf("count_tokens: %w", err)
 	}
-	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(2), option.WithRequestTimeout(requestTimeout))
+	client := anthropic.NewClient(clientOptions(apiKey, 2)...)
 	if _, err := preflightModel(client, model, effort).send(ctx); err != nil {
 		return fmt.Errorf("messages: %w", err)
 	}
 	return nil
+}
+
+// clientOptions are the options of every Anthropic client the benchmark
+// creates. Keys not scoped to a workspace need the workspace named on each
+// request; ANTHROPIC_WORKSPACE_ID, when set, is sent as anthropic-workspace-id.
+func clientOptions(apiKey string, retries int) []option.RequestOption {
+	opts := []option.RequestOption{option.WithAPIKey(apiKey), option.WithMaxRetries(retries), option.WithRequestTimeout(requestTimeout)}
+	if ws := os.Getenv("ANTHROPIC_WORKSPACE_ID"); ws != "" {
+		opts = append(opts, option.WithHeader("anthropic-workspace-id", ws))
+	}
+	return opts
 }

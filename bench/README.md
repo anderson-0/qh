@@ -19,6 +19,7 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
 - Docker.
 - Node 22.5 or later, with `npx`, for dbhub.
 - `ANTHROPIC_API_KEY`, for agent runs and token counting.
+- `ANTHROPIC_WORKSPACE_ID`, only for an API key that is not scoped to a workspace: it is sent as the `anthropic-workspace-id` header.
 
 ## Running
 

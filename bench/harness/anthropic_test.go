@@ -3,11 +3,14 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // TestToolDefinitionBudget is spec §9.1: qh's three tool definitions cost at
@@ -160,5 +163,27 @@ func TestPreflightSendsTheRealRequestShape(t *testing.T) {
 		len(got.System) != 1 || got.System[0].Text == "" || len(got.Tools) != 1 || got.Tools[0].Name != noopTool.Name ||
 		len(got.Messages) != 1 || got.Messages[0].Content[0].Text != "Reply with OK" {
 		t.Fatalf("%s", b)
+	}
+}
+
+func TestClientOptionsSendWorkspaceHeader(t *testing.T) {
+	seen := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("anthropic-workspace-id")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"input_tokens": 1}`))
+	}))
+	defer srv.Close()
+	t.Setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+	client := anthropic.NewClient(append(clientOptions("k", 0), option.WithBaseURL(srv.URL))...)
+	_, err := client.Messages.CountTokens(context.Background(), anthropic.MessageCountTokensParams{
+		Model:    anthropic.Model(DefaultModel),
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := <-seen; got != "wrkspc_test" {
+		t.Fatalf("anthropic-workspace-id = %q", got)
 	}
 }

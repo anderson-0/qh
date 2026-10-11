@@ -170,6 +170,11 @@ func TestSessionStateDoesNotLeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
+	// The reset runs after the result returns; the next call on the single
+	// pooled connection waits for it.
+	if _, err := c.Query(ctx, "SELECT 1", opts); err != nil {
+		t.Fatal(err)
+	}
 	var free int
 	if err := other.QueryRowContext(ctx, "SELECT IS_FREE_LOCK('qh_leak')").Scan(&free); err != nil || free != 1 {
 		t.Fatalf("named lock leaked: free=%d err=%v", free, err)

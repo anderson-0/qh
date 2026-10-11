@@ -151,18 +151,39 @@ func (c *conn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engi
 	return planResult(r), nil
 }
 
-func (c *conn) setupSQL(rows int, timeout time.Duration) string {
+// setupSQL sets the per-call limits. A read-only call also makes the session
+// read-only and autocommit, so the statement runs as its own read-only
+// transaction without a START TRANSACTION/COMMIT round trip each.
+func (c *conn) setupSQL(rows int, timeout time.Duration, readOnly bool) string {
+	var s string
 	if c.flavor == flavorMariaDB {
-		return fmt.Sprintf("SET SESSION sql_select_limit = %d, max_statement_time = %.3f, time_zone = '+00:00'", rows, timeout.Seconds())
+		s = fmt.Sprintf("SET SESSION sql_select_limit = %d, max_statement_time = %.3f, time_zone = '+00:00'", rows, timeout.Seconds())
+	} else {
+		s = fmt.Sprintf("SET SESSION sql_select_limit = %d, max_execution_time = %d, time_zone = '+00:00'", rows, timeout.Milliseconds())
 	}
-	return fmt.Sprintf("SET SESSION sql_select_limit = %d, max_execution_time = %d, time_zone = '+00:00'", rows, timeout.Milliseconds())
+	if readOnly {
+		s += ", autocommit = 1, " + c.readOnlyVar() + " = 1"
+	}
+	return s
+}
+
+// readOnlyVar is the session variable behind SET TRANSACTION READ ONLY.
+// MySQL removed tx_read_only in 8.0.3; MariaDB has it in every version
+// (transaction_read_only only from 11.1).
+func (c *conn) readOnlyVar() string {
+	if c.flavor == flavorMariaDB {
+		return "tx_read_only"
+	}
+	return "transaction_read_only"
 }
 
 func (c *conn) resetSQL() string {
+	timeout := "max_execution_time"
 	if c.flavor == flavorMariaDB {
-		return "SET @qh_released = RELEASE_ALL_LOCKS(), SESSION sql_select_limit = DEFAULT, max_statement_time = DEFAULT"
+		timeout = "max_statement_time"
 	}
-	return "SET @qh_released = RELEASE_ALL_LOCKS(), SESSION sql_select_limit = DEFAULT, max_execution_time = DEFAULT"
+	return "SET @qh_released = RELEASE_ALL_LOCKS(), SESSION sql_select_limit = DEFAULT, " + timeout +
+		" = DEFAULT, autocommit = DEFAULT, " + c.readOnlyVar() + " = DEFAULT"
 }
 
 func (c *conn) acquire(ctx context.Context) (*sql.Conn, error) {
@@ -214,13 +235,13 @@ func (c *conn) finish(sc *sql.Conn, commit, rw bool) error {
 }
 
 func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly bool) (*engine.Result, error) {
+	if readOnly {
+		return c.read(ctx, q, o)
+	}
 	return c.exec(ctx, q, o, access, readOnly, true)
 }
 
-// exec is run with a choice of how the transaction ends: commit false always
-// rolls back (used to explain a write without applying anything).
-func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly, commit bool) (*engine.Result, error) {
-	start := time.Now()
+func callLimits(o engine.QueryOpts) (time.Duration, int) {
 	timeout := o.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -229,6 +250,65 @@ func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sq
 	if limit <= 0 {
 		limit = 100
 	}
+	return timeout, limit
+}
+
+// read runs a statement that only reads in two round trips: the session
+// setup (read-only, autocommit) and the statement. The reset runs after the
+// result is returned, and the connection goes back to the pool only once it
+// has succeeded.
+func (c *conn) read(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
+	start := time.Now()
+	timeout, limit := callLimits(o)
+	// The server-side timeout fires first; this is a backstop.
+	ctx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
+	defer cancel()
+	sc, err := c.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := sc.ExecContext(ctx, c.setupSQL(limit+1, timeout, true)); err != nil {
+		discard(sc)
+		sc.Close()
+		return nil, classify(ctx, err)
+	}
+	qctx, qcancel := context.WithCancel(ctx)
+	defer qcancel()
+	res, killed, err := collect(qctx, qcancel, sc, q, limit, true)
+	if killed {
+		// The driver closed the connection when the query was cancelled.
+		discard(sc)
+		sc.Close()
+		res.Duration = time.Since(start)
+		return res, nil
+	}
+	if err == nil && len(res.Columns) == 0 {
+		err = sc.QueryRowContext(ctx, "SELECT ROW_COUNT()").Scan(&res.RowsAffected)
+	}
+	go c.release(sc)
+	if err != nil {
+		return nil, classify(ctx, err)
+	}
+	res.Duration = time.Since(start)
+	return res, nil
+}
+
+// release resets sc's session and returns it to the pool, or discards it
+// when the reset fails.
+func (c *conn) release(sc *sql.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := sc.ExecContext(ctx, c.resetSQL()); err != nil {
+		discard(sc)
+	}
+	sc.Close()
+}
+
+// exec is run with a choice of how the transaction ends: commit false always
+// rolls back (used to explain a write without applying anything).
+func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly, commit bool) (*engine.Result, error) {
+	start := time.Now()
+	timeout, limit := callLimits(o)
 	// The server-side timeout fires first; this is a backstop.
 	ctx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
 	defer cancel()
@@ -237,7 +317,7 @@ func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sq
 		return nil, err
 	}
 	defer sc.Close()
-	if _, err := sc.ExecContext(ctx, c.setupSQL(limit+1, timeout)); err != nil {
+	if _, err := sc.ExecContext(ctx, c.setupSQL(limit+1, timeout, false)); err != nil {
 		discard(sc)
 		return nil, classify(ctx, err)
 	}

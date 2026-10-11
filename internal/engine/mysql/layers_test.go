@@ -13,7 +13,13 @@ import (
 // TestReadOnlyTransactionLayer calls run directly, bypassing the engine's own
 // classification, to prove the database's read-only transaction holds too.
 func TestReadOnlyTransactionLayer(t *testing.T) {
-	ro, _ := specs(startDB(t, "mysql:8.4"))
+	for _, image := range []string{"mysql:8.4", "mariadb:10.11"} {
+		t.Run(image, func(t *testing.T) { testReadOnlyTransactionLayer(t, image) })
+	}
+}
+
+func testReadOnlyTransactionLayer(t *testing.T, image string) {
+	ro, _ := specs(startDB(t, image))
 	c := openConn(t, ro).(*conn)
 	ctx := context.Background()
 	opts := engine.QueryOpts{MaxRows: 10, ReadOnly: true, Timeout: 5 * time.Second}

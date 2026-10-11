@@ -96,7 +96,9 @@ func mcpCmd(home *string, version string) *cobra.Command {
 				return err
 			}
 			srv := mcpserver.New(a.svc, func(context.Context) string { return ws }, version)
-			err = srv.Run(ctx, &mcp.StdioTransport{})
+			// The command's own streams, not os.Stdin/os.Stdout: main passes
+			// those, and tests pass pipes.
+			err = srv.Run(ctx, &mcp.IOTransport{Reader: readCloser(cmd.InOrStdin()), Writer: nopWriteCloser{cmd.OutOrStdout()}})
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
@@ -106,3 +108,17 @@ func mcpCmd(home *string, version string) *cobra.Command {
 	lf.register(cmd)
 	return cmd
 }
+
+// readCloser returns r as an io.ReadCloser, closing it only if it can be closed.
+func readCloser(r io.Reader) io.ReadCloser {
+	if rc, ok := r.(io.ReadCloser); ok {
+		return rc
+	}
+	return io.NopCloser(r)
+}
+
+// nopWriteCloser leaves the writer open when the MCP session closes it, so
+// stdout stays usable for the error the command may print.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }

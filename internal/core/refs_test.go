@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -100,6 +101,45 @@ func TestServerModeAllowList(t *testing.T) {
 		SSH: &engine.SSH{Host: "b", User: "u", HostKey: fp, PasswordRef: "env:HOME"}}, false)
 	if qerr.From(err).Category != qerr.Forbidden {
 		t.Fatalf("ssh ref checked before deny-ssh or not at all: %v", err)
+	}
+}
+
+// Update and the connection test are refusal points too (spec 5.2): a
+// reference outside the allow-list, or a tunnel under --deny-ssh, is refused
+// there as well as on create.
+func TestServerModeRefusalsOnUpdateAndTest(t *testing.T) {
+	svc := newServiceWith(t, openStore(t), Options{Dial: dialNowhere, CheckTarget: func(netip.Addr) bool { return true },
+		SecretRefs: []string{"env:QH_TENANT_*"}, DenySSH: true})
+	ctx := context.Background()
+	if _, _, err := svc.CreateConnection(ctx, ws, ConnInput{Name: "pg", Engine: "postgres", DSN: "postgres://u@10.0.0.1/app"}, false); err != nil {
+		t.Fatal(err)
+	}
+	notAllowed := "env:HOME"
+	_, _, err := svc.UpdateConnection(ctx, ws, "pg", ConnPatch{DSNRef: &notAllowed}, false)
+	if qerr.From(err).Category != qerr.Forbidden || !strings.Contains(err.Error(), "env:HOME is not allowed on this server") {
+		t.Errorf("update with an unlisted dsn_ref: %v", err)
+	}
+	_, _, err = svc.UpdateConnection(ctx, ws, "pg", ConnPatch{PasswordRef: &notAllowed}, false)
+	if qerr.From(err).Category != qerr.Forbidden {
+		t.Errorf("update with an unlisted password_ref: %v", err)
+	}
+	_, err = svc.TestInput(ctx, ws, ConnInput{Engine: "postgres", DSNRef: "env:HOME"})
+	if qerr.From(err).Category != qerr.Forbidden || !strings.Contains(err.Error(), "env:HOME is not allowed on this server") {
+		t.Errorf("test with an unlisted dsn_ref: %v", err)
+	}
+	tunnel := &engine.SSH{Host: "b", User: "u", HostKey: fp, Password: "p"}
+	_, _, err = svc.UpdateConnection(ctx, ws, "pg", ConnPatch{SSH: tunnel}, false)
+	if qerr.From(err).Category != qerr.Forbidden || !strings.Contains(err.Error(), "SSH tunnels are disabled on this server") {
+		t.Errorf("update adding ssh under deny-ssh: %v", err)
+	}
+	_, err = svc.TestInput(ctx, ws, ConnInput{Engine: "postgres", DSN: "postgres://u@10.0.0.1/app", SSH: tunnel})
+	if qerr.From(err).Category != qerr.Forbidden || !strings.Contains(err.Error(), "SSH tunnels are disabled on this server") {
+		t.Errorf("test with ssh under deny-ssh: %v", err)
+	}
+	// The refused updates changed nothing.
+	got, err := svc.GetConnection(ctx, ws, "pg")
+	if err != nil || got.DSNRef != "" || got.SSH != nil {
+		t.Errorf("a refused update was applied: %+v %v", got, err)
 	}
 }
 

@@ -174,3 +174,23 @@ func TestCreateConnectionInUnknownWorkspace(t *testing.T) {
 		t.Fatalf("got %q", errText(err))
 	}
 }
+
+// resolve caches a connection's unsealed settings; an edit must replace them.
+func TestQueryUsesEditedConnection(t *testing.T) {
+	h := newHarness(t)
+	h.addShop(t, engine.ModeRW)
+	ctx := context.Background()
+	if _, err := h.svc.Query(ctx, ws, QueryInput{Source: "shop", Query: "CREATE TABLE marker (x int)"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Query(ctx, ws, QueryInput{Source: "shop", Query: "SELECT x FROM marker"}); err != nil {
+		t.Fatal(err)
+	}
+	other := testutil.SQLiteFixture(t)
+	if _, _, err := h.svc.UpdateConnection(ctx, ws, "shop", ConnPatch{DSN: &other}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Query(ctx, ws, QueryInput{Source: "shop", Query: "SELECT x FROM marker"}); err == nil {
+		t.Fatal("query still ran on the old database")
+	}
+}

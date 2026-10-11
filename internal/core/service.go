@@ -10,6 +10,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anderson-0/qh/internal/catalog"
@@ -30,6 +31,14 @@ type Service struct {
 	pools *pool.Manager
 	cache *catalog.Cache
 	opts  Options
+
+	// resolved caches targets by workspace and connection ID; an entry is
+	// valid while its record's version is current.
+	resolved sync.Map
+
+	log       logWriter
+	logMu     sync.RWMutex // guards logClosed against sends on a closed queue
+	logClosed bool
 }
 
 // Options configures a Service for server mode. The zero value is local mode.
@@ -116,6 +125,12 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	if err := s.allowEngine(rec.Engine); err != nil {
 		return nil, err
 	}
+	key := ws + "\x00" + rec.ID
+	if p, ok := s.resolved.Load(key); ok && p.(*target).rec.Version == rec.Version {
+		t := *p.(*target)
+		t.rec = rec
+		return &t, nil
+	}
 	in, err := s.load(rec)
 	if err != nil {
 		return nil, err
@@ -128,10 +143,14 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 		return nil, err
 	}
 	info, _ := eng.Inspect(in.DSN)
-	return &target{
+	t := &target{
 		rec: rec, eng: eng, info: info,
 		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),
-	}, nil
+	}
+	// Every change to a connection bumps its version, so the unsealed
+	// settings are reused until then.
+	s.resolved.Store(key, t)
+	return t, nil
 }
 
 func (s *Service) unknownSource(ctx context.Context, ws, name string) error {

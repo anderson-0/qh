@@ -65,6 +65,7 @@ func openAppWith(home string, opts core.Options, oldKeys ...[]byte) (*app, error
 }
 
 func (a *app) Close() {
+	a.svc.Close()
 	a.pools.Close()
 	a.st.Close()
 }

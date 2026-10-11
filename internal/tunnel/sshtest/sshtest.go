@@ -61,7 +61,10 @@ func Key(t testing.TB, passphrase string) (string, ssh.PublicKey) {
 // Start listens on 127.0.0.1 and serves until the test ends.
 func Start(t testing.TB, o Options) *Server {
 	t.Helper()
-	_, hostPriv, _ := ed25519.GenerateKey(rand.Reader)
+	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	signer, err := ssh.NewSignerFromKey(hostPriv)
 	if err != nil {
 		t.Fatal(err)

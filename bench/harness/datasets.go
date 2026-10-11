@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -123,12 +124,40 @@ func StartDataset(ctx context.Context, name string) (*Dataset, func(), error) {
 		return StartSakila(ctx)
 	case "chinook":
 		return OpenChinook(ctx)
+	case "lendco":
+		return StartLendco(ctx)
 	}
-	return nil, nil, fmt.Errorf("unknown dataset %q (want pagila, sakila or chinook)", name)
+	return nil, nil, fmt.Errorf("unknown dataset %q (want pagila, sakila, chinook or lendco)", name)
 }
 
 // StartPagila loads Pagila into a Postgres 17 container.
 func StartPagila(ctx context.Context) (*Dataset, func(), error) {
+	return startPagila(ctx, "pagila", "Pagila: a DVD rental store (films, actors, customers, rentals, payments) on PostgreSQL")
+}
+
+//go:embed lendco.sql
+var lendcoSQL []byte
+
+// StartLendco loads Pagila and rebuilds it under unfamiliar names
+// (lendco.sql), so answers need schema discovery rather than memory.
+func StartLendco(ctx context.Context) (*Dataset, func(), error) {
+	dir, err := os.MkdirTemp("", "qh-bench-lendco-")
+	if err != nil {
+		return nil, nil, err
+	}
+	script := filepath.Join(dir, "lendco.sql")
+	if err := os.WriteFile(script, lendcoSQL, 0o644); err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, err
+	}
+	ds, stop, err := startPagila(ctx, "lendco", "Lendco: a media lending service (catalog, performers, members, loans, charges) on PostgreSQL", script)
+	os.RemoveAll(dir) // the container has its own copy
+	return ds, stop, err
+}
+
+// startPagila loads Pagila, then the extra scripts, into a Postgres 17
+// container.
+func startPagila(ctx context.Context, name, description string, extra ...string) (*Dataset, func(), error) {
 	schema, err := fetchSource(ctx, "pagila-schema")
 	if err != nil {
 		return nil, nil, err
@@ -139,7 +168,7 @@ func StartPagila(ctx context.Context) (*Dataset, func(), error) {
 	}
 	ctr, err := tcpostgres.Run(ctx, "postgres:17-alpine",
 		tcpostgres.WithDatabase("pagila"), tcpostgres.WithUsername("postgres"), tcpostgres.WithPassword("bench-pw"),
-		tcpostgres.WithOrderedInitScripts(schema, data), tcpostgres.BasicWaitStrategies())
+		tcpostgres.WithOrderedInitScripts(append([]string{schema, data}, extra...)...), tcpostgres.BasicWaitStrategies())
 	stop := func() { _ = testcontainers.TerminateContainer(ctr) }
 	if err != nil {
 		stop()
@@ -155,8 +184,7 @@ func StartPagila(ctx context.Context) (*Dataset, func(), error) {
 		stop()
 		return nil, nil, err
 	}
-	return &Dataset{Name: "pagila", Engine: "postgres", DSN: dsn, DB: db,
-			Description: "Pagila: a DVD rental store (films, actors, customers, rentals, payments) on PostgreSQL"},
+	return &Dataset{Name: name, Engine: "postgres", DSN: dsn, DB: db, Description: description},
 		func() { db.Close(); stop() }, nil
 }
 

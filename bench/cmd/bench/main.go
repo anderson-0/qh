@@ -21,7 +21,7 @@ func main() {
 	flag.StringVar(&cfg.Model, "model", harness.DefaultModel, "Claude model id")
 	flag.StringVar(&cfg.Effort, "effort", harness.DefaultEffort, "output_config effort sent with every request (low, medium, high, xhigh, max)")
 	flag.StringVar(&cfg.DBHubVersion, "dbhub-version", harness.DefaultDBHubVersion, "dbhub npm version")
-	flag.StringVar(&datasets, "datasets", "pagila,sakila,chinook", "datasets to run")
+	flag.StringVar(&datasets, "datasets", "pagila,sakila,chinook,lendco", "datasets to run")
 	flag.StringVar(&servers, "servers", "qh,dbhub", "servers to compare")
 	flag.IntVar(&cfg.Runs, "runs", 3, "runs per question")
 	flag.IntVar(&cfg.Limit, "limit", 0, "questions per dataset (0 = all)")
@@ -34,7 +34,7 @@ func main() {
 	flag.StringVar(&out, "out", "results", "results directory")
 	flag.Parse()
 	var err error
-	if cfg.Datasets, err = parseList("datasets", datasets, "pagila", "sakila", "chinook"); err != nil {
+	if cfg.Datasets, err = parseList("datasets", datasets, "pagila", "sakila", "chinook", "lendco"); err != nil {
 		usage(err)
 	}
 	if cfg.Servers, err = parseList("servers", servers, "qh", "dbhub"); err != nil {

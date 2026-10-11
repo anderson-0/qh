@@ -53,6 +53,7 @@ func TestDatasets(t *testing.T) {
 		"pagila":  {"SELECT count(*) FROM film", 1000},
 		"sakila":  {"SELECT count(*) FROM film", 1000},
 		"chinook": {"SELECT count(*) FROM Track", 3503},
+		"lendco":  {"SELECT count(*) FROM catalog_item", 1000},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ds, stop, err := StartDataset(context.Background(), name)

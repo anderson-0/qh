@@ -1,6 +1,8 @@
 # qh benchmark
 
-Compares qh with [bytebase/dbhub](https://github.com/bytebase/dbhub) on Pagila (Postgres), Sakila (MySQL) and Chinook (SQLite).
+Compares qh with [bytebase/dbhub](https://github.com/bytebase/dbhub) on Pagila (Postgres), Sakila (MySQL), Chinook (SQLite) and Lendco (Postgres).
+
+Models know the first three sample databases by heart, so they can answer without looking at the schema. Lendco is Pagila's data rebuilt under unfamiliar table and column names (`harness/lendco.sql`), so its questions measure schema discovery too. Its 30 questions mirror Pagila's, and a test checks that each has the same answer as its Pagila twin.
 
 Spec §9.2 defines the benchmark and §1 its success criteria.
 
@@ -25,7 +27,7 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
 
 ```bash
 make bench                                   # everything; writes bench/results/<timestamp>/report.md
-make bench ARGS="-limit 1 -runs 1"           # first: a cheap smoke run (6 conversations)
+make bench ARGS="-limit 1 -runs 1"           # first: a cheap smoke run (8 conversations)
 make bench ARGS="-limit 3 -runs 1"           # a larger sample
 make bench ARGS="-skip-agent -skip-tokens"   # micro-benchmarks only, no API key needed
 ```
@@ -34,7 +36,7 @@ Run the `-limit 1 -runs 1` smoke run before a full run: it checks your API key, 
 
 ## Cost and time
 
-A full run makes about 540 model conversations: 90 questions × 3 runs × 2 servers. Every request uses prompt caching, so a conversation re-reads its growing prefix at the cache-read price. Assuming a handful of turns per conversation, a few thousand tokens of tool output per turn and Sonnet 5.5 list prices, expect the order of magnitude:
+A full run makes about 720 model conversations: 120 questions × 3 runs × 2 servers. Every request uses prompt caching, so a conversation re-reads its growing prefix at the cache-read price. Assuming a handful of turns per conversation, a few thousand tokens of tool output per turn and Sonnet 5.5 list prices, expect the order of magnitude:
 
 - **Cost:** tens to low hundreds of dollars for the whole run. dbhub conversations cost more than qh ones, because its tool definitions and its uncapped row output are larger.
 - **Time:** 1.5 to 3 hours at `-parallel 4` (the default), plus a few minutes for the datasets and the micro-benchmarks.

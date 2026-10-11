@@ -1,16 +1,15 @@
 # qh
 
-A database server for AI agents, built to use as few tokens as possible. It exposes three MCP tools,
-whatever the number of connections:
+A database server for AI agents, built to use as few tokens as possible. It exposes two MCP tools,
+whatever the number of connections, and names the connections in its MCP instructions:
 
 | Tool | What it does |
 |---|---|
-| `sources` | Lists connections: name, engine, read-only or read-write, description |
-| `schema` | Overview with row estimates, or compact table definitions with keys, foreign keys in both directions, enum values and indexes |
+| `schema` | Overview of tables with their columns, keys and foreign keys, or full definitions with types, foreign keys in both directions, enum values and indexes. With no arguments in a workspace with several connections, lists the connections |
 | `query` | Runs one statement and returns TSV, 100 rows by default, with a footer that says when rows were cut |
 
-Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+ and SQLite. An HTTP server mode with a REST API, and a benchmark
-against dbhub are planned (see `docs/superpowers/plans/`).
+Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+ and SQLite.
+`qh serve` adds an HTTP server mode with a REST API, and `bench/` compares qh with dbhub (see `bench/README.md`).
 
 ## Install
 

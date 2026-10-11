@@ -150,9 +150,9 @@ func TestServeEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "sources", Arguments: map[string]any{}})
-	if err != nil || res.Content[0].(*mcp.TextContent).Text != "shop sqlite ro\n" {
-		t.Fatalf("mcp sources: %v %+v", err, res)
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "schema", Arguments: map[string]any{}})
+	if err != nil || res.IsError || !strings.HasPrefix(res.Content[0].(*mcp.TextContent).Text, "main: 3 tables, 1 view\n") {
+		t.Fatalf("mcp schema: %v %+v", err, res)
 	}
 	session.Close()
 

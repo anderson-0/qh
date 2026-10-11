@@ -1,4 +1,4 @@
-// Package mcpserver exposes the core service as three MCP tools.
+// Package mcpserver exposes the core service as two MCP tools.
 package mcpserver
 
 import (
@@ -17,18 +17,33 @@ import (
 //
 // Every word here and in the tool definitions is paid on every model turn,
 // so they stay terse.
-const instructions = "Query directly if you know the names; otherwise call schema first. Errors on unknown names suggest close matches."
+const instructions = "Query directly if you know the names; else call schema first."
 
 // maxListed caps the connections named in the instructions.
 const maxListed = 20
 
+// maxDescription caps each connection description in the instructions, in
+// characters; the full text stays in the schema connection list.
+const maxDescription = 60
+
+// clipDescription collapses whitespace and cuts s to maxDescription
+// characters, ending a cut one with "…".
+func clipDescription(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= maxDescription {
+		return s
+	}
+	return string(r[:maxDescription-1]) + "…"
+}
+
 // connectionsLine names the workspace's connections so an agent can query
-// without calling sources first.
+// without a schema call first.
 func connectionsLine(list []*core.ConnInfo) string {
 	describe := func(c *core.ConnInfo) string {
 		s := fmt.Sprintf("%s (%s, %s)", c.Name, c.Engine, c.Mode)
 		if c.Description != "" {
-			s += ": " + c.Description
+			s += ": " + clipDescription(c.Description)
 		}
 		return s
 	}
@@ -44,7 +59,7 @@ func connectionsLine(list []*core.ConnInfo) string {
 	}
 	line := "Connections (pass one as source): " + strings.Join(names, "; ")
 	if len(list) > maxListed {
-		line += fmt.Sprintf("; and %d more (sources lists all)", len(list)-maxListed)
+		line += fmt.Sprintf("; and %d more (schema lists all)", len(list)-maxListed)
 	}
 	return line + "."
 }
@@ -93,7 +108,11 @@ type QueryArgs struct {
 	Explain bool   `json:"explain,omitempty" jsonschema:"plan only"`
 }
 
-// New returns an MCP server with the sources, schema and query tools.
+// severalHeader introduces the connection list that schema returns, with no
+// arguments, in a workspace that does not have exactly one connection.
+const severalHeader = "-- several connections; pass one as source\n"
+
+// New returns an MCP server with the schema and query tools.
 func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "qh", Version: version}, &mcp.ServerOptions{Instructions: instructions})
 	closed := false
@@ -101,20 +120,26 @@ func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 	s.AddReceivingMiddleware(withConnections(svc, ws))
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "sources",
-		Description: "List connections.",
-		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-		return text(svc.Sources(ctx, ws(ctx)))
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
 		Name: "schema",
 		Description: "No arguments: tables with columns, PKs and FK targets (names only for large schemas). " +
 			"pattern (* wildcard) or object: types, NN (not null), FKs (→ references, ← referenced by), enums, indexes.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a SchemaArgs) (*mcp.CallToolResult, any, error) {
-		return text(svc.Schema(ctx, ws(ctx), core.SchemaInput{Source: a.Source, Pattern: a.Pattern, Object: a.Object}))
+		w := ws(ctx)
+		if a.Source == "" && a.Pattern == "" && a.Object == "" {
+			list, err := svc.ListConnections(ctx, w)
+			if err != nil {
+				return text("", err)
+			}
+			if len(list) != 1 {
+				out, err := svc.Sources(ctx, w)
+				if err == nil && len(list) > 1 {
+					out = severalHeader + out
+				}
+				return text(out, err)
+			}
+		}
+		return text(svc.Schema(ctx, w, core.SchemaInput{Source: a.Source, Pattern: a.Pattern, Object: a.Object}))
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

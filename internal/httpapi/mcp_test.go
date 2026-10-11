@@ -46,13 +46,13 @@ func TestMCPOverHTTPIsWorkspaceScoped(t *testing.T) {
 	if r := e.do(t, "POST", "/api/v1/connections", mine, map[string]any{"name": "shop", "engine": "sqlite", "dsn": testutil.SQLiteFixture(t)}); r.status != 201 {
 		t.Fatalf("create: %d %s", r.status, r.body)
 	}
-	if out, isErr := mcpCall(t, e, mine, "sources", map[string]any{}); isErr || out != "shop sqlite ro\n" {
-		t.Fatalf("sources: %q", out)
+	if out, isErr := mcpCall(t, e, mine, "schema", map[string]any{}); isErr || !strings.HasPrefix(out, "main: 3 tables, 1 view\n") {
+		t.Fatalf("schema: %q", out)
 	}
 	if out, isErr := mcpCall(t, e, mine, "query", map[string]any{"source": "shop", "query": "SELECT count(*) AS n FROM orders"}); isErr || !strings.HasPrefix(out, "n\n250\n") {
 		t.Fatalf("query: %q", out)
 	}
-	if out, _ := mcpCall(t, e, theirs, "sources", map[string]any{}); !strings.HasPrefix(out, "-- no connections") {
+	if out, _ := mcpCall(t, e, theirs, "schema", map[string]any{}); !strings.HasPrefix(out, "-- no connections") {
 		t.Fatalf("other workspace sees: %q", out)
 	}
 	if out, isErr := mcpCall(t, e, theirs, "query", map[string]any{"source": "shop", "query": "SELECT 1"}); !isErr || !strings.HasPrefix(out, "error[unknown_source]") {

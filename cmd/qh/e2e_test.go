@@ -56,8 +56,8 @@ func TestStdioEndToEnd(t *testing.T) {
 	}
 	// A connection added while the server runs is visible on the next call.
 	qh("conn", "add", "shop2", "--engine", "sqlite", "--dsn", db)
-	if out := text("sources", map[string]any{}); !strings.Contains(out, "shop2 sqlite ro") {
-		t.Fatalf("sources: %q", out)
+	if out := text("schema", map[string]any{}); !strings.Contains(out, "shop2 sqlite ro") {
+		t.Fatalf("schema lists connections: %q", out)
 	}
 
 	// Closing the client must shut the server down cleanly.

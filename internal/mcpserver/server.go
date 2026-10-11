@@ -17,7 +17,7 @@ import (
 //
 // Every word here and in the tool definitions is paid on every model turn,
 // so they stay terse.
-const instructions = "Query directly if you know the names; else call schema first."
+const instructions = "Query directly if you know the names; else call schema first. Errors on unknown names suggest close matches."
 
 // maxListed caps the connections named in the instructions.
 const maxListed = 20

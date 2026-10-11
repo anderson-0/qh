@@ -59,9 +59,18 @@ type attempt struct {
 	retry bool  // the connector's own context ended, so others should try again
 }
 
-type hostKeyError struct{ got string }
+type hostKeyError struct{ typ, got string }
 
-func (e *hostKeyError) Error() string { return "host key " + e.got }
+func (e *hostKeyError) Error() string { return "host key " + e.typ + " " + e.got }
+
+// hostKeyAlgorithms is OpenSSH's preference order. x/crypto's default puts
+// ECDSA and RSA before Ed25519, so a bastion holding several host keys would
+// present a key other than the Ed25519 one a user normally pins.
+var hostKeyAlgorithms = []string{
+	ssh.KeyAlgoED25519,
+	ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256,
+}
 
 const handshakeTimeout = 15 * time.Second
 
@@ -106,9 +115,10 @@ func New(cfg Config) (*Tunnel, error) {
 	t := &Tunnel{cfg: cfg, stop: make(chan struct{})}
 	t.ccfg = &ssh.ClientConfig{
 		User: cfg.User, Auth: []ssh.AuthMethod{auth}, Timeout: handshakeTimeout,
+		HostKeyAlgorithms: hostKeyAlgorithms,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			if got := ssh.FingerprintSHA256(key); got != cfg.HostKey {
-				return &hostKeyError{got: got}
+				return &hostKeyError{typ: key.Type(), got: got}
 			}
 			return nil
 		},
@@ -265,10 +275,10 @@ func (t *Tunnel) handshakeErr(err error) error {
 	switch {
 	case errors.As(err, &hk) && t.cfg.HostKey == "":
 		host, port, _ := net.SplitHostPort(t.cfg.Addr)
-		return t.failed(fmt.Sprintf("unknown host key for %s: it presented %s", t.cfg.Addr, hk.got)).
-			WithHint(fmt.Sprintf("Verify it (ssh-keyscan -p %s %s | ssh-keygen -lf -), then set it with --ssh-host-key %s", port, host, hk.got))
+		return t.failed(fmt.Sprintf("unknown host key for %s: it presented its %s key %s", t.cfg.Addr, hk.typ, hk.got)).
+			WithHint(fmt.Sprintf("Verify it (ssh-keyscan -t ed25519 -p %s %s | ssh-keygen -lf -), then set it with --ssh-host-key %s", port, host, hk.got))
 	case errors.As(err, &hk):
-		return t.failed(fmt.Sprintf("host key mismatch for %s (got %s, expected %s)", t.cfg.Addr, hk.got, t.cfg.HostKey)).
+		return t.failed(fmt.Sprintf("host key mismatch for %s (got %s %s, expected %s)", t.cfg.Addr, hk.typ, hk.got, t.cfg.HostKey)).
 			WithHint("If the bastion's key really changed, verify the new one and edit the connection")
 	case strings.Contains(err.Error(), "unable to authenticate"):
 		return t.failed(fmt.Sprintf("authentication failed for %s@%s", t.cfg.User, t.cfg.Addr))

@@ -3,7 +3,9 @@
 package sshtest
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/pem"
 	"io"
@@ -22,16 +24,22 @@ type Options struct {
 	Password      string
 	AuthorizedKey ssh.PublicKey
 	Forward       func(target string) (net.Conn, error)
+	// ExtraHostKey also gives the server an ECDSA host key, like a stock
+	// OpenSSH bastion that holds several key types.
+	ExtraHostKey bool
 }
 
 // Server is a running test SSH server.
 type Server struct {
 	Addr        string
-	Fingerprint string
-	mu          sync.Mutex
-	targets     []string
-	conns       map[*ssh.ServerConn]bool
-	accepted    int
+	Fingerprint string // of the Ed25519 host key
+	// FingerprintECDSA is the ECDSA host key's fingerprint; empty unless
+	// Options.ExtraHostKey is set.
+	FingerprintECDSA string
+	mu               sync.Mutex
+	targets          []string
+	conns            map[*ssh.ServerConn]bool
+	accepted         int
 }
 
 // Key returns a new ed25519 private key as PEM (encrypted when passphrase is
@@ -87,6 +95,19 @@ func Start(t testing.TB, o Options) *Server {
 		}
 	}
 	cfg.AddHostKey(signer)
+	var fpECDSA string
+	if o.ExtraHostKey {
+		ek, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		es, err := ssh.NewSignerFromKey(ek)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.AddHostKey(es)
+		fpECDSA = ssh.FingerprintSHA256(es.PublicKey())
+	}
 	forward := o.Forward
 	if forward == nil {
 		forward = func(target string) (net.Conn, error) { return net.Dial("tcp", target) }
@@ -95,7 +116,7 @@ func Start(t testing.TB, o Options) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{Addr: ln.Addr().String(), Fingerprint: ssh.FingerprintSHA256(signer.PublicKey()), conns: map[*ssh.ServerConn]bool{}}
+	s := &Server{Addr: ln.Addr().String(), Fingerprint: ssh.FingerprintSHA256(signer.PublicKey()), FingerprintECDSA: fpECDSA, conns: map[*ssh.ServerConn]bool{}}
 	t.Cleanup(func() { ln.Close(); s.DropClients() })
 	go func() {
 		for {

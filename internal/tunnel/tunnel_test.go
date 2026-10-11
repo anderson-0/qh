@@ -87,10 +87,10 @@ func TestHostKeyAndAuthFailures(t *testing.T) {
 	ctx := context.Background()
 	other := "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
 	for want, cfg := range map[string]Config{
-		"ssh: host key mismatch for " + srv.Addr + " (got " + srv.Fingerprint + ", expected " + other + ")": {Addr: srv.Addr, User: "u", Password: "pw", HostKey: other},
-		"ssh: unknown host key for " + srv.Addr + ": it presented " + srv.Fingerprint:                       {Addr: srv.Addr, User: "u", Password: "pw"},
-		"ssh: authentication failed for u@" + srv.Addr:                                                      {Addr: srv.Addr, User: "u", Password: "wrong", HostKey: srv.Fingerprint},
-		"ssh: cannot reach the bastion 127.0.0.1:1":                                                         {Addr: "127.0.0.1:1", User: "u", Password: "pw", HostKey: srv.Fingerprint},
+		"ssh: host key mismatch for " + srv.Addr + " (got ssh-ed25519 " + srv.Fingerprint + ", expected " + other + ")": {Addr: srv.Addr, User: "u", Password: "pw", HostKey: other},
+		"ssh: unknown host key for " + srv.Addr + ": it presented its ssh-ed25519 key " + srv.Fingerprint:               {Addr: srv.Addr, User: "u", Password: "pw"},
+		"ssh: authentication failed for u@" + srv.Addr:                                                                  {Addr: srv.Addr, User: "u", Password: "wrong", HostKey: srv.Fingerprint},
+		"ssh: cannot reach the bastion 127.0.0.1:1":                                                                     {Addr: "127.0.0.1:1", User: "u", Password: "pw", HostKey: srv.Fingerprint},
 	} {
 		tun, err := New(cfg)
 		if err != nil {
@@ -114,6 +114,31 @@ func TestHostKeyAndAuthFailures(t *testing.T) {
 	tun.Close()
 	if err == nil || !strings.Contains(err.Error(), "--ssh-host-key "+srv.Fingerprint) {
 		t.Errorf("unknown key hint: %v", err)
+	}
+}
+
+// A stock OpenSSH bastion holds Ed25519, ECDSA and RSA host keys. Pinning the
+// Ed25519 fingerprint (what ssh-keyscan -t ed25519 prints) must work.
+func TestPinEd25519OnMultiKeyBastion(t *testing.T) {
+	srv := sshtest.Start(t, sshtest.Options{User: "u", Password: "pw", ExtraHostKey: true})
+	if srv.FingerprintECDSA == "" || srv.FingerprintECDSA == srv.Fingerprint {
+		t.Fatalf("want two distinct host keys: %q %q", srv.Fingerprint, srv.FingerprintECDSA)
+	}
+	tun, err := New(Config{Addr: srv.Addr, User: "u", Password: "pw", HostKey: srv.Fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tun.Close()
+	if err := tun.Connect(context.Background()); err != nil {
+		t.Fatalf("pinning the ed25519 fingerprint: %v", err)
+	}
+	// Pinning the ECDSA fingerprint is not possible: the Ed25519 key is
+	// negotiated first, and the error names the type that was presented.
+	tun2, _ := New(Config{Addr: srv.Addr, User: "u", Password: "pw", HostKey: srv.FingerprintECDSA})
+	defer tun2.Close()
+	err = tun2.Connect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "got ssh-ed25519 "+srv.Fingerprint) {
+		t.Fatalf("want a mismatch naming ssh-ed25519: %v", err)
 	}
 }
 

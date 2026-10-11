@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -97,8 +98,10 @@ func (a *awsResolver) Resolve(ctx context.Context, r Ref) (string, error) {
 	if r.Key == "" {
 		return *out.SecretString, nil
 	}
+	dec := json.NewDecoder(strings.NewReader(*out.SecretString))
+	dec.UseNumber()
 	var fields map[string]any
-	if json.Unmarshal([]byte(*out.SecretString), &fields) != nil {
+	if dec.Decode(&fields) != nil || dec.Decode(new(any)) != io.EOF {
 		return "", failed(r.Raw, "the secret is not JSON, so #"+r.Key+" cannot be read")
 	}
 	v, ok := fields[r.Key]
@@ -108,7 +111,9 @@ func (a *awsResolver) Resolve(ctx context.Context, r Ref) (string, error) {
 	switch v := v.(type) {
 	case string:
 		return v, nil
-	case float64, bool:
+	case json.Number:
+		return v.String(), nil
+	case bool:
 		return fmt.Sprint(v), nil
 	}
 	return "", failed(r.Raw, "field "+r.Key+" is not a string, number or boolean")

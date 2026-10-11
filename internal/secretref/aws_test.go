@@ -31,14 +31,16 @@ func (f *fakeSM) GetSecretValue(_ context.Context, in *secretsmanager.GetSecretV
 
 func TestAWSResolver(t *testing.T) {
 	fake := &fakeSM{secrets: map[string]*string{
-		"plain":  aws.String("pw-value"),
-		"json":   aws.String(`{"password":"json-pw","port":5432}`),
-		"binary": nil,
+		"plain":    aws.String("pw-value"),
+		"json":     aws.String(`{"password":"json-pw","port":5432}`),
+		"nums":     aws.String(`{"id":12345678,"big":9007199254740993,"dec":1.50,"flag":true}`),
+		"binary":   nil,
+		"trailing": aws.String(`{"password":"x"} junk`),
 		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:x": aws.String("by-arn"),
 	}}
-	var regions []string
+	regions := map[string]bool{}
 	r := &awsResolver{newClient: func(_ context.Context, region string) (smAPI, error) {
-		regions = append(regions, region)
+		regions[region] = true
 		return fake, nil
 	}}
 	s := NewSet(false, nil).With("aws-sm", r)
@@ -47,20 +49,25 @@ func TestAWSResolver(t *testing.T) {
 		"aws-sm://plain":         "pw-value",
 		"aws-sm://json#password": "json-pw",
 		"aws-sm://json#port":     "5432",
+		"aws-sm://nums#id":       "12345678",
+		"aws-sm://nums#big":      "9007199254740993",
+		"aws-sm://nums#dec":      "1.50",
+		"aws-sm://nums#flag":     "true",
 		"aws-sm://arn:aws:secretsmanager:eu-west-1:123456789012:secret:x": "by-arn",
 	} {
 		if v, err := s.Resolve(ctx, ref); err != nil || v != want {
 			t.Errorf("%s: %q %v", ref, v, err)
 		}
 	}
-	if !strings.Contains(strings.Join(regions, ","), "eu-west-1") {
-		t.Errorf("ARN region not used: %v", regions)
+	if len(regions) != 2 || !regions[""] || !regions["eu-west-1"] {
+		t.Errorf("clients created for regions %v, want exactly \"\" and \"eu-west-1\"", regions)
 	}
 	for ref, msg := range map[string]string{
-		"aws-sm://missing":     "not found",
-		"aws-sm://json#nokey":  "no such key",
-		"aws-sm://plain#field": "not JSON",
-		"aws-sm://binary":      "binary",
+		"aws-sm://missing":           "not found",
+		"aws-sm://json#nokey":        "no such key",
+		"aws-sm://plain#field":       "not JSON",
+		"aws-sm://binary":            "binary",
+		"aws-sm://trailing#password": "not JSON",
 	} {
 		_, err := s.Resolve(ctx, ref)
 		if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), msg) {

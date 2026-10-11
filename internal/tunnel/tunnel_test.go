@@ -259,6 +259,26 @@ func TestBastionDialUsesPolicy(t *testing.T) {
 	}
 }
 
+// An injected bastion dialer (server mode: netguard, which has no timeout of
+// its own) is still bounded by the handshake limit.
+func TestBastionDialIsBounded(t *testing.T) {
+	var left time.Duration
+	tun, _ := New(Config{Addr: "203.0.113.1:22", User: "u", Password: "pw",
+		DialBastion: func(ctx context.Context, n, a string) (net.Conn, error) {
+			d, ok := ctx.Deadline()
+			if !ok {
+				return nil, errors.New("no deadline")
+			}
+			left = time.Until(d)
+			return nil, errors.New("refused")
+		}})
+	defer tun.Close()
+	err := tun.Connect(context.Background())
+	if err == nil || left <= 0 || left > handshakeTimeout {
+		t.Fatalf("left=%v err=%v", left, err)
+	}
+}
+
 func TestBadAddressKeepsSharedClient(t *testing.T) {
 	target := echo(t)
 	srv := sshtest.Start(t, sshtest.Options{User: "u", Password: "pw"})

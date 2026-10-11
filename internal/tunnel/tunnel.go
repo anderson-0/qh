@@ -187,7 +187,11 @@ func (t *Tunnel) connect(ctx context.Context) (*ssh.Client, error) {
 		case <-ctx.Done():
 		}
 	}()
-	nc, err := t.cfg.DialBastion(ctx, "tcp", t.cfg.Addr)
+	// Bound the dial whatever DialBastion is: server mode injects the
+	// netguard dialer, which has no timeout of its own.
+	dctx, dcancel := context.WithTimeout(ctx, handshakeTimeout)
+	nc, err := t.cfg.DialBastion(dctx, "tcp", t.cfg.Addr)
+	dcancel()
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, t.ctxErr(ctx)

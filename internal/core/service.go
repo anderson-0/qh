@@ -114,7 +114,19 @@ type target struct {
 
 func (t *target) scrub(err error) error { return scrub(err, secretsOf(t.spec.DSN, t.info)...) }
 
+// resolve finds connection name in ws. An empty name means the workspace's
+// only connection.
 func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error) {
+	if name == "" {
+		list, err := s.store.ListConnections(ctx, ws)
+		if err != nil {
+			return nil, err
+		}
+		if len(list) != 1 {
+			return nil, s.unknownSource(ctx, ws, name)
+		}
+		name = list[0].Name
+	}
 	rec, err := s.store.GetConnection(ctx, ws, name)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, s.unknownSource(ctx, ws, name)
@@ -155,6 +167,9 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 
 func (s *Service) unknownSource(ctx context.Context, ws, name string) error {
 	e := qerr.New(qerr.UnknownSource, fmt.Sprintf("no connection named %q", name))
+	if name == "" {
+		e = qerr.New(qerr.UnknownSource, "source is required when the workspace does not have exactly one connection")
+	}
 	list, err := s.store.ListConnections(ctx, ws)
 	if err != nil || len(list) == 0 {
 		return e.WithHint("No connections exist yet. Add one with `qh conn add`")

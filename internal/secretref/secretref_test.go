@@ -119,3 +119,44 @@ func TestCheckPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestRelativeFilePatternRefused(t *testing.T) {
+	if err := CheckPattern("file:data/*"); err == nil || !strings.Contains(err.Error(), `invalid --allow-secret-ref pattern "file:data/*"`) {
+		t.Fatalf("relative pattern accepted: %v", err)
+	}
+	if err := CheckPattern("file:/run/secrets/*"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Works on any OS: the data symlink stands in for macOS /var.
+func TestSymlinkedRootAllowList(t *testing.T) {
+	tmp := t.TempDir()
+	real := filepath.Join(tmp, "real")
+	os.Mkdir(real, 0o700)
+	os.WriteFile(filepath.Join(real, "pw"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(tmp, "top"), []byte("y"), 0o600)
+	if err := os.Symlink(real, filepath.Join(tmp, "data")); err != nil {
+		t.Skip("symlinks unsupported:", err)
+	}
+
+	s := NewSet(true, []string{"file:" + filepath.Join(tmp, "data") + "/*"})
+	if _, err := s.Check("file:" + filepath.Join(tmp, "data", "pw")); err != nil {
+		t.Errorf("pw refused: %v", err)
+	}
+	if _, err := s.Check("file:" + filepath.Join(tmp, "data") + "/../top"); cat(err) != qerr.Forbidden {
+		t.Errorf("escape accepted: %v", err)
+	}
+}
+
+func TestCanonicalFileKeepsRelativePattern(t *testing.T) {
+	tmp := t.TempDir()
+	os.Mkdir(filepath.Join(tmp, "real"), 0o700)
+	if err := os.Symlink(filepath.Join(tmp, "real"), filepath.Join(tmp, "data")); err != nil {
+		t.Skip("symlinks unsupported:", err)
+	}
+	t.Chdir(tmp)
+	if got := canonicalFile("file:data/*"); got != "file:data/*" {
+		t.Fatalf("relative pattern resolved against the working directory: %q", got)
+	}
+}

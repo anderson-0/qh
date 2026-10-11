@@ -98,6 +98,9 @@ func canonicalFile(p string) string {
 		return p
 	}
 	rest := p[len("file:"):]
+	if !filepath.IsAbs(rest) {
+		return p
+	}
 	i := strings.IndexByte(rest, '*')
 	if i < 0 {
 		i = len(rest)
@@ -122,6 +125,10 @@ func (s *Set) With(scheme string, r Resolver) *Set {
 
 // CheckPattern validates an --allow-secret-ref pattern.
 func CheckPattern(p string) error {
+	if strings.HasPrefix(p, "file:") && !filepath.IsAbs(p[len("file:"):]) {
+		return qerr.New(qerr.Invalid, fmt.Sprintf("invalid --allow-secret-ref pattern %q", p)).
+			WithHint("file: patterns need an absolute path, e.g. file:/run/secrets/*")
+	}
 	for _, prefix := range []string{"env:", "file:", awsPrefix} {
 		if strings.HasPrefix(p, prefix) && len(p) > len(prefix) {
 			return nil

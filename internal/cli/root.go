@@ -158,6 +158,7 @@ func newRoot(version string) *cobra.Command {
 		serveCmd(&home, version),
 		workspaceCmd(with),
 		keyCmd(with),
+		storeCmd(&home),
 		masterkeyCmd(&home),
 	)
 	return root

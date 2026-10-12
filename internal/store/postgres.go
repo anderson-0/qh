@@ -126,16 +126,15 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 }
 
 // pingUntil pings db until it answers, the deadline passes or ctx ends. Each
-// attempt is bounded by the deadline, since the default dialer has none. An
-// error from the server itself (a wrong password, a missing database) is
-// returned at once: retrying cannot fix it.
+// attempt is bounded by the deadline, since the default dialer has none. A
+// permanent error (a wrong password, a missing database) is returned at once;
+// a server that is starting up or full is retried.
 func pingUntil(ctx context.Context, db *sql.DB, deadline time.Time) error {
 	for {
 		pctx, cancel := context.WithDeadline(ctx, deadline)
 		err := db.PingContext(pctx)
 		cancel()
-		var pe *pgconn.PgError
-		if err == nil || errors.As(err, &pe) || ctx.Err() != nil {
+		if err == nil || permanent(err) || ctx.Err() != nil {
 			return err
 		}
 		wait := time.Until(deadline)
@@ -148,6 +147,22 @@ func pingUntil(ctx context.Context, db *sql.DB, deadline time.Time) error {
 		case <-time.After(min(wait, 500*time.Millisecond)):
 		}
 	}
+}
+
+// transientPG lists the SQLSTATEs a server sends while it cannot take
+// connections for now: starting up, out of connection slots, shutting down.
+var transientPG = map[string]bool{
+	"57P03": true, // cannot_connect_now
+	"53300": true, // too_many_connections
+	"57P01": true, // admin_shutdown
+	"57P02": true, // crash_shutdown
+}
+
+// permanent reports whether err came from the server and retrying cannot fix
+// it (a wrong password, a missing database). Network errors are not permanent.
+func permanent(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && !transientPG[pe.Code]
 }
 
 // redactErr returns err's text with the password replaced.

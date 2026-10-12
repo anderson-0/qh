@@ -93,6 +93,36 @@ Without `--http`, `qh serve` runs in local mode on `127.0.0.1:8765` with no keys
 Local mode is unauthenticated: every process on the machine can use it, with all your connections. It only
 accepts requests addressed to localhost and refuses cross-origin browser requests.
 
+## Running several instances
+
+By default `qh serve` keeps its store in a SQLite file in `--data-dir`. To run several instances behind a load balancer, point them all at one Postgres database:
+
+```bash
+export QH_STORE_DSN='postgres://qh@db.internal:5432/qh?sslmode=verify-full'
+export QH_STORE_PASSWORD_FILE=/run/secrets/qh-store-password   # or put the password in the URL
+export QH_MASTER_KEY=…                                          # the same key on every instance
+qh serve --http :8765 --allow-cidr 10.0.0.0/8
+```
+
+- **Store contents.** qh creates its tables in a `qh` schema on first start. Instances starting together apply each migration once and create one admin key; only the instance that created it prints it (set `QH_BOOTSTRAP_ADMIN_KEY` the same on every instance to choose the key yourself).
+- **Changes are shared.** A connection, key or workspace changed through any instance applies to all of them on the next call. A key revoked on one is refused by all at once. A schema change made through one instance (a write or DDL statement sent to `query`, a connection change, `refresh`, or deleting a workspace) drops the cached schema everywhere. DDL run directly against the database still waits for the cache to expire.
+- **No stickiness needed.** MCP over HTTP is stateless, so the load balancer needs no stickiness.
+- **Limits are per instance.** That covers the per-key concurrency limit, each connection's `pool_size` (so a database sees up to instances × `pool_size` connections), and the total connection cap. Size them for the instance count.
+- **Query-log times come from each instance's clock.** Keep clocks in sync.
+- **The store's URL must contain everything.** Server mode clears `PG*` variables at startup.
+
+**Moving an existing install:** stop it, then copy its store into an empty database. Keep the same master key. The copy reads the store selected by `--store` or `QH_STORE_DSN`, so leave `QH_STORE_DSN` unset for this command and give the new database with `--to`:
+
+```bash
+qh store copy --home /var/lib/qh --to 'postgres://qh@db.internal:5432/qh?sslmode=verify-full' --with-query-log
+```
+
+**Rotating the master key without downtime:**
+
+1. Restart every instance with `QH_MASTER_KEY=<new>` and `QH_MASTER_KEY_OLD=<old>`. Each can open connections sealed with either key.
+2. From any host, with `QH_MASTER_KEY=<new>`, run `qh masterkey rotate --store "$QH_STORE_DSN" --old-key-file old.key`, where `old.key` holds the old key. (Instances running with both keys may stay up; the single-instance advice to stop `qh serve` first does not apply.)
+3. Restart every instance without `QH_MASTER_KEY_OLD`.
+
 ## Connection details and TLS
 
 Instead of a connection string you can give the parts, which qh assembles and escapes:

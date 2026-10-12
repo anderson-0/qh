@@ -109,9 +109,11 @@ qh serve --http :8765 --allow-cidr 10.0.0.0/8
 - **No stickiness needed.** MCP over HTTP is stateless, so the load balancer needs no stickiness.
 - **Limits are per instance.** That covers the per-key concurrency limit, each connection's `pool_size` (so a database sees up to instances × `pool_size` connections), and the total connection cap. Size them for the instance count.
 - **Query-log times come from each instance's clock.** Keep clocks in sync.
-- **The store's URL must contain everything.** Server mode clears `PG*` variables at startup.
+- **The store's URL must contain everything except the password.** Server mode clears `PG*` variables at startup, so host, port, database, user and TLS settings all go in the URL; the password may come from `QH_STORE_PASSWORD_FILE` instead.
+- **The master key comes from `QH_MASTER_KEY` only.** With a shared store, qh never reads or creates `master.key` in the data directory: a key file on one host could seal data under a key the other instances lack. Every command that opens the store (`serve`, `mcp`, `conn`, `query`, `masterkey rotate`, and the rest) fails without `QH_MASTER_KEY` when `--store` or `QH_STORE_DSN` is set.
+- **Connections per process.** Every qh process (each `qh serve`, and each `qh mcp` too) holds up to 10 pooled store connections plus 1 for listening to changes. Size the database's `max_connections` for the number of processes × 11, and mind this when many `qh mcp` processes share the store.
 
-**Moving an existing install:** stop it, then copy its store into an empty database. Keep the same master key. The copy reads the store selected by `--store` or `QH_STORE_DSN`, so leave `QH_STORE_DSN` unset for this command and give the new database with `--to`:
+**Moving an existing install:** stop it, then copy its store into an empty database. Keep the same master key (the copy moves sealed data as it is, so it does not need the key itself). The target's password goes in the `--to` URL or in `QH_STORE_PASSWORD_FILE`. The copy reads the store selected by `--store` or `QH_STORE_DSN`, so leave `QH_STORE_DSN` unset for this command and give the new database with `--to`:
 
 ```bash
 qh store copy --home /var/lib/qh --to 'postgres://qh@db.internal:5432/qh?sslmode=verify-full' --with-query-log
@@ -119,9 +121,11 @@ qh store copy --home /var/lib/qh --to 'postgres://qh@db.internal:5432/qh?sslmode
 
 **Rotating the master key without downtime:**
 
-1. Restart every instance with `QH_MASTER_KEY=<new>` and `QH_MASTER_KEY_OLD=<old>`. Each can open connections sealed with either key.
-2. From any host, with `QH_MASTER_KEY=<new>`, run `qh masterkey rotate --store "$QH_STORE_DSN" --old-key-file old.key`, where `old.key` holds the old key. (Instances running with both keys may stay up; the single-instance advice to stop `qh serve` first does not apply.)
+1. Restart every instance with `QH_MASTER_KEY=<new>` and `QH_MASTER_KEY_OLD=<old>`. Each can open connections sealed with either key. Wait until every instance has restarted before changing any connection (`conn add`, `conn edit`, and the like), because a connection sealed under the new key cannot be opened by an instance that still runs with the old key only.
+2. From any host, with `QH_MASTER_KEY=<new>` and the store password (in the URL or `QH_STORE_PASSWORD_FILE`), run `qh masterkey rotate --store "$QH_STORE_DSN" --old-key-file old.key`, where `old.key` holds the old key. (Instances running with both keys may stay up; the single-instance advice to stop `qh serve` first does not apply.)
 3. Restart every instance without `QH_MASTER_KEY_OLD`.
+
+Commands run from an admin host between these steps read `QH_MASTER_KEY_OLD` too, so they can open connections sealed with either key.
 
 ## Connection details and TLS
 
@@ -189,7 +193,7 @@ qh logs every `query` call: connection, API key, statement (up to 8 KiB), rows, 
 
 ## Rotating the master key
 
-Stop `qh serve` first.
+With the default SQLite store, stop `qh serve` first. With a shared Postgres store, do not stop the instances: follow the steps under [Running several instances](#running-several-instances) instead.
 
 ```bash
 printf '%s\n' "$OLD_QH_MASTER_KEY" > old.key     # the previous key

@@ -113,20 +113,9 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	db := stdlib.OpenDB(*cfg)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(10)
-	deadline := time.Now().Add(pgOpenRetry)
-	for {
-		err = db.PingContext(ctx)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			db.Close()
-			return nil, fmt.Errorf("store: cannot reach the postgres store at %s:%d: %s", cfg.Host, cfg.Port, redactErr(err, cfg.Password))
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(500 * time.Millisecond):
-		}
+	if err := pingUntil(ctx, db, time.Now().Add(pgOpenRetry)); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: cannot reach the postgres store at %s:%d: %s", cfg.Host, cfg.Port, redactErr(err, cfg.Password))
 	}
 	p := &Postgres{db: db, cfg: cfg, now: func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }}
 	if err := p.migrate(ctx); err != nil {
@@ -134,6 +123,31 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		return nil, fmt.Errorf("store: migrate: %s", redactErr(err, cfg.Password))
 	}
 	return p, nil
+}
+
+// pingUntil pings db until it answers, the deadline passes or ctx ends. Each
+// attempt is bounded by the deadline, since the default dialer has none. An
+// error from the server itself (a wrong password, a missing database) is
+// returned at once: retrying cannot fix it.
+func pingUntil(ctx context.Context, db *sql.DB, deadline time.Time) error {
+	for {
+		pctx, cancel := context.WithDeadline(ctx, deadline)
+		err := db.PingContext(pctx)
+		cancel()
+		var pe *pgconn.PgError
+		if err == nil || errors.As(err, &pe) || ctx.Err() != nil {
+			return err
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(min(wait, 500*time.Millisecond)):
+		}
+	}
 }
 
 // redactErr returns err's text with the password replaced.

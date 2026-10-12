@@ -217,3 +217,30 @@ func TestPostgresPasswordFile(t *testing.T) {
 }
 
 func writeFile(path, s string) error { return os.WriteFile(path, []byte(s), 0o600) }
+
+func TestPostgresOpenBoundsEachAttempt(t *testing.T) {
+	store.SetPGOpenRetry(t, 2*time.Second)
+	start := time.Now()
+	_, err := store.OpenPostgres(context.Background(), "postgres://qh:unroutable-pw@10.255.255.1:5432/qh?sslmode=disable")
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("open took %v", elapsed)
+	}
+	if err == nil || strings.Contains(err.Error(), "unroutable-pw") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestPostgresOpenFailsFastOnWrongPassword(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	store.SetPGOpenRetry(t, 30*time.Second)
+	u, _ := url.Parse(dsn)
+	u.User = url.UserPassword(u.User.Username(), "wrong-pw-456")
+	start := time.Now()
+	_, err := store.OpenPostgres(context.Background(), u.String())
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("open took %v, want a fast failure", elapsed)
+	}
+	if err == nil || strings.Contains(err.Error(), "wrong-pw-456") {
+		t.Fatalf("%v", err)
+	}
+}

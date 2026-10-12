@@ -335,3 +335,18 @@ func TestExplainOfWrite(t *testing.T) {
 		t.Fatalf("per-call read-only explain on rw conn: %v", err)
 	}
 }
+
+func TestPasswordOverride(t *testing.T) {
+	dsn := startDB(t, "mysql:8.4")
+	// The DSN is the driver's user:password@tcp(host:port)/db form.
+	wrong := strings.Replace(dsn, "qh:secret-pw-123@", "qh:wrong@", 1)
+	if wrong == dsn {
+		t.Fatalf("unexpected dsn format")
+	}
+	ro, _ := specs(wrong)
+	ro.Password = "secret-pw-123"
+	c := openConn(t, ro)
+	if r, err := c.Query(context.Background(), "SELECT 1", engine.QueryOpts{MaxRows: 1, ReadOnly: true, Timeout: 5 * time.Second}); err != nil || r.Rows[0][0].Text != "1" {
+		t.Fatalf("%+v %v", r, err)
+	}
+}

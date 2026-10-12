@@ -44,7 +44,7 @@ func TestServeFlagValidation(t *testing.T) {
 	if _, errOut, code := run(t, home, "", "serve", "--http", "127.0.0.1:0"); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: server mode needs QH_MASTER_KEY") {
 		t.Fatalf("missing master key: %d %q", code, errOut)
 	}
-	if _, errOut, code := run(t, home, "", "serve", "--sqlite-root", home); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: --allow-cidr, --deny-cidr and --sqlite-root apply to server mode only") {
+	if _, errOut, code := run(t, home, "", "serve", "--sqlite-root", home); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: --allow-cidr, --deny-cidr, --sqlite-root, --allow-secret-ref and --deny-ssh apply to server mode only") {
 		t.Fatalf("server-only flags in local mode: %d %q", code, errOut)
 	}
 }

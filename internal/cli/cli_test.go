@@ -43,6 +43,8 @@ func TestConnLifecycle(t *testing.T) {
 	}
 	if out, _, _ = run(t, home, "", "conn", "show", "shop"); !strings.Contains(out, "mode: rw\n") || !strings.Contains(out, "version: 2\n") {
 		t.Fatalf("show: %q", out)
+	} else if strings.Contains(out, "password:") {
+		t.Fatalf("show prints a password line for SQLite: %q", out)
 	}
 	if out, _, _ = run(t, home, "", "conn", "test", "shop"); !strings.HasPrefix(out, "ok · SQLite ") {
 		t.Fatalf("test: %q", out)

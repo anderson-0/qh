@@ -110,7 +110,7 @@ func TestServerDSNRejectsFileKeys(t *testing.T) {
 		} {
 			check := Engine{}.CheckServerDSN(dsn)
 			dialed := false
-			_, open := Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1,
+			_, open := Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, Server: true,
 				Dial: func(context.Context, string, string) (net.Conn, error) {
 					dialed = true
 					return nil, net.ErrClosed
@@ -162,7 +162,7 @@ func TestServerDSNAcceptsAllowedKeys(t *testing.T) {
 func TestServerIgnoresEnvironmentPassword(t *testing.T) {
 	t.Setenv("PGPASSWORD", "operator-secret")
 	addr, logins := fakeServer(t)
-	spec := engine.ConnSpec{ID: "x", DSN: "postgres://victim@tenant.example.com/app?sslmode=disable", Mode: engine.ModeRO, PoolSize: 1, Dial: dialTo(addr)}
+	spec := engine.ConnSpec{ID: "x", DSN: "postgres://victim@tenant.example.com/app?sslmode=disable", Mode: engine.ModeRO, PoolSize: 1, Server: true, Dial: dialTo(addr)}
 	if l := firstLogin(t, spec, logins); l.user != "victim" || l.password != "" {
 		t.Fatalf("login %+v", l)
 	}
@@ -186,7 +186,7 @@ func TestServerIgnoresPgpass(t *testing.T) {
 		t.Fatalf("local login %+v", l)
 	}
 	server := local
-	server.Dial = dialTo(addr)
+	server.Server, server.Dial = true, dialTo(addr)
 	if l := firstLogin(t, server, logins); l.password != "" {
 		t.Fatalf("server login %+v", l)
 	}
@@ -206,7 +206,7 @@ func TestServerUsesTenantPassword(t *testing.T) {
 		"postgres://victim:tenant-pw@tenant.example.com/app?sslmode=disable",
 		"host=tenant.example.com user=victim password=tenant-pw dbname=app sslmode=disable",
 	} {
-		spec := engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, Dial: dialTo(addr)}
+		spec := engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, Server: true, Dial: dialTo(addr)}
 		if l := firstLogin(t, spec, logins); l.user != "victim" || l.password != "tenant-pw" {
 			t.Fatalf("%q: login %+v", dsn, l)
 		}
@@ -258,7 +258,7 @@ func TestServerIgnoresDefaultClientCertificate(t *testing.T) {
 		if err != nil || local.ConnConfig.TLSConfig == nil || len(local.ConnConfig.TLSConfig.Certificates) != 1 {
 			t.Fatalf("%q: the fixture certificate is not picked up in local mode: %v", dsn, err)
 		}
-		server, err := poolConfig(engine.ConnSpec{DSN: dsn, PoolSize: 1, Dial: dialTo("127.0.0.1:1")})
+		server, err := poolConfig(engine.ConnSpec{DSN: dsn, PoolSize: 1, Server: true, Dial: dialTo("127.0.0.1:1")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -303,7 +303,7 @@ func TestServerPgpassSwallowVariants(t *testing.T) {
 	}
 	dsns = append(dsns, "postgres://victim@"+net.JoinHostPort(host, port)+"/app?sslmode=disable&password=&application_name=")
 	for _, dsn := range dsns {
-		spec := engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, Dial: dialTo(addr)}
+		spec := engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, Server: true, Dial: dialTo(addr)}
 		_, err := Engine{}.Open(context.Background(), spec)
 		if err == nil {
 			t.Errorf("%q: open succeeded against the fake server", dsn)
@@ -325,5 +325,31 @@ func TestServerPgpassSwallowVariants(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("%q: no login and not refused: %v", dsn, err)
 		}
+	}
+}
+
+// A custom dialer without Server is a local SSH tunnel: the server-mode
+// allow-list must not apply.
+func TestLocalDialIsNotServerMode(t *testing.T) {
+	dsn := "postgres://u:p@db.example.com/app?passfile=/nonexistent&sslmode=disable"
+	if _, err := poolConfig(engine.ConnSpec{DSN: dsn, PoolSize: 1, Dial: dialTo("127.0.0.1:1")}); err != nil {
+		t.Fatalf("local dial refused: %v", err)
+	}
+	if _, err := poolConfig(engine.ConnSpec{DSN: dsn, PoolSize: 1, Dial: dialTo("127.0.0.1:1"), Server: true}); err == nil {
+		t.Fatal("server mode accepted passfile")
+	}
+}
+
+func TestPasswordOverride(t *testing.T) {
+	cfg, err := poolConfig(engine.ConnSpec{DSN: "postgres://u:wrong@db.example.com/app", PoolSize: 1, Password: "right"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConnConfig.Password != "right" {
+		t.Fatalf("password = %q", cfg.ConnConfig.Password)
+	}
+	cfg, err = poolConfig(engine.ConnSpec{DSN: "postgres://u@db.example.com/app", PoolSize: 1, Password: "right", Server: true, Dial: dialTo("127.0.0.1:1")})
+	if err != nil || cfg.ConnConfig.Password != "right" {
+		t.Fatalf("server mode: %v %q", err, cfg.ConnConfig.Password)
 	}
 }

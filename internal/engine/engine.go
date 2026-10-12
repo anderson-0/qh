@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -38,6 +39,23 @@ type ConnSpec struct {
 	FileRoot string
 	// TLS, when set, replaces the connection string's TLS settings.
 	TLS *TLS
+	// Server is set in server mode: engines apply their server-mode limits
+	// (Postgres: the connection-string allow-list, and no password from the
+	// environment or files). Dial alone no longer implies it: a local SSH
+	// tunnel sets Dial too.
+	Server bool
+	// Password, when set, replaces the connection string's password (a
+	// resolved password_ref).
+	Password string
+	// SSH, DSNRef and PasswordRef are resolved by core.OpenConn (the pool
+	// opener) into Dial, DSN and Password; engines never read them.
+	SSH         *SSH
+	DSNRef      string
+	PasswordRef string
+	// Resolve resolves a secret reference, applying the server allow-list.
+	Resolve func(ctx context.Context, ref string) (string, error)
+	// CheckTarget is the network policy's address check in server mode.
+	CheckTarget func(netip.Addr) bool
 }
 
 // QueryOpts controls one query.

@@ -173,3 +173,43 @@ func TestNoRedirects(t *testing.T) {
 		t.Fatalf("the key reached the redirect target: %q", got)
 	}
 }
+
+// Remote mode must carry secret references and SSH tunnels to the server; dropping
+// them would store a tunnelled connection as a direct one.
+func TestClientCarriesSSHAndRefs(t *testing.T) {
+	ctx := context.Background()
+	url, admin := server(t)
+	c, _ := New(url, admin, "default")
+	fp := "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+	in := core.ConnInput{Name: "pg", Engine: "postgres", DSNRef: "env:QH_PG_DSN", PasswordRef: "env:QH_PG_PW",
+		SSH: &engine.SSH{Host: "bastion", User: "jump", HostKey: fp, Password: "ssh-secret"}}
+	if _, _, err := c.CreateConnection(ctx, in, false); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := c.GetConnection(ctx, "pg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SSH == nil || got.SSH.HostKey != fp || got.SSH.Host != "bastion" || got.SSH.Auth != "password" ||
+		got.DSNRef != "env:QH_PG_DSN" || got.PasswordRef != "env:QH_PG_PW" {
+		t.Fatalf("round trip lost fields: %+v ssh=%+v", got, got.SSH)
+	}
+
+	newRef := "env:QH_PG_PW2"
+	got, _, err = c.UpdateConnection(ctx, "pg", core.ConnPatch{PasswordRef: &newRef}, false)
+	if err != nil || got.PasswordRef != newRef || got.SSH == nil {
+		t.Fatalf("password_ref change: %+v %v", got, err)
+	}
+	got, _, err = c.UpdateConnection(ctx, "pg", core.ConnPatch{ClearSSH: true}, false)
+	if err != nil || got.SSH != nil {
+		t.Fatalf("clear ssh: %+v %v", got, err)
+	}
+	got, _, err = c.UpdateConnection(ctx, "pg", core.ConnPatch{SSH: &engine.SSH{Host: "b2", User: "jump", HostKey: fp, Password: "x"}}, false)
+	if err != nil || got.SSH == nil || got.SSH.Host != "b2" {
+		t.Fatalf("replace ssh: %+v %v", got, err)
+	}
+	if _, _, err := c.UpdateConnection(ctx, "pg", core.ConnPatch{ClearSSH: true, SSH: &engine.SSH{Host: "b"}}, false); err == nil ||
+		!strings.Contains(err.Error(), "give ssh or clear it, not both") {
+		t.Fatalf("both: %v", err)
+	}
+}

@@ -42,7 +42,7 @@ func TestConnFieldAndTLSFlags(t *testing.T) {
 		t.Fatalf("tls flag without mode: %d %q", code, errOut)
 	}
 	if _, errOut, code := run(t, home, "x\n", "conn", "add", "b", "--engine", "postgres", "--dsn", "-", "--password-stdin"); code != 1 ||
-		!strings.HasPrefix(errOut, "error[invalid]: --dsn - and --password-stdin cannot both read stdin") {
+		!strings.HasPrefix(errOut, "error[invalid]: only one flag can read stdin") {
 		t.Fatalf("two stdin readers: %d %q", code, errOut)
 	}
 	if _, errOut, code := run(t, home, "", "conn", "add", "c", "--engine", "postgres", "--dsn", "postgres://h/db", "--host", "h"); code != 1 ||

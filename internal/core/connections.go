@@ -11,6 +11,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/secretref"
 	"github.com/anderson-0/qh/internal/store"
 )
 
@@ -39,6 +40,9 @@ type ConnInput struct {
 	Password          string
 	Params            map[string]string
 	TLS               *engine.TLS
+	DSNRef            string      // secret reference for the whole connection string (instead of DSN)
+	PasswordRef       string      // secret reference for the database password
+	SSH               *engine.SSH // tunnel through a bastion
 	Description       string
 	Mode              engine.Mode
 	MaxRows           int
@@ -58,6 +62,10 @@ type ConnPatch struct {
 	AllowedNamespaces *[]string
 	TLS               *engine.TLS // replaces the TLS settings
 	ClearTLS          bool        // removes the TLS settings
+	DSNRef            *string     // replaces the connection string with a reference (clears DSN)
+	PasswordRef       *string     // "" removes the password reference
+	SSH               *engine.SSH // replaces the tunnel
+	ClearSSH          bool        // removes the tunnel
 }
 
 // ConnInfo is what may be shown about a connection. DSN is redacted.
@@ -72,6 +80,9 @@ type ConnInfo struct {
 	User              string
 	DSN               string
 	TLS               *engine.TLSInfo
+	SSH               *engine.SSHInfo
+	DSNRef            string
+	PasswordRef       string
 	MaxRows           int
 	TimeoutMS         int
 	PoolSize          int
@@ -112,6 +123,31 @@ func normalize(in ConnInput) (ConnInput, error) {
 		return in, err
 	}
 	in.Host, in.Port, in.Database, in.Username, in.Password, in.Params = "", 0, "", "", "", nil
+	in.DSNRef, in.PasswordRef = strings.TrimSpace(in.DSNRef), strings.TrimSpace(in.PasswordRef)
+	for _, r := range []string{in.DSNRef, in.PasswordRef} {
+		if r != "" {
+			if _, err := secretref.Parse(r); err != nil {
+				return in, err
+			}
+		}
+	}
+	if in.PasswordRef != "" && in.Engine == "sqlite" {
+		return in, qerr.New(qerr.Invalid, "password_ref applies only to network databases")
+	}
+	if in.SSH != nil {
+		if in.Engine == "sqlite" {
+			return in, qerr.New(qerr.Invalid, "ssh applies only to network databases")
+		}
+		s := *in.SSH
+		s.Host, s.User = strings.TrimSpace(s.Host), strings.TrimSpace(s.User)
+		if s.Port == 0 {
+			s.Port = 22
+		}
+		if err := s.Validate(); err != nil {
+			return in, err
+		}
+		in.SSH = &s
+	}
 	if in.TLS != nil {
 		if in.Engine == "sqlite" {
 			return in, qerr.New(qerr.Invalid, "tls applies only to network databases")
@@ -149,6 +185,12 @@ func normalize(in ConnInput) (ConnInput, error) {
 // connString returns in.DSN, or builds a connection string from the
 // separate fields. Giving both is an error.
 func connString(eng engine.Engine, in ConnInput) (string, error) {
+	if ref := strings.TrimSpace(in.DSNRef); ref != "" {
+		if strings.TrimSpace(in.DSN) != "" || in.Host != "" || in.Port != 0 || in.Database != "" || in.Username != "" || in.Password != "" || len(in.Params) > 0 {
+			return "", qerr.New(qerr.Invalid, "give dsn_ref or dsn (or host, port, database, username, password and params), not both")
+		}
+		return "", nil
+	}
 	dsn := strings.TrimSpace(in.DSN)
 	fields := in.Host != "" || in.Port != 0 || in.Database != "" || in.Username != "" || in.Password != "" || len(in.Params) > 0
 	if !fields {
@@ -175,20 +217,21 @@ func (s *Service) load(rec *store.Connection) (ConnInput, error) {
 	if err != nil {
 		return ConnInput{}, fmt.Errorf("connection %q: %w", rec.Name, err)
 	}
-	dsn, tls, err := decodeSecret(pt)
+	e, err := decodeSecret(pt)
 	if err != nil {
 		return ConnInput{}, fmt.Errorf("connection %q: cannot read its sealed settings: %w", rec.Name, err)
 	}
 	return ConnInput{
-		Name: rec.Name, Engine: rec.Engine, DSN: dsn, TLS: tls, Description: rec.Description,
+		Name: rec.Name, Engine: rec.Engine, DSN: e.DSN, TLS: e.TLS, SSH: e.SSH, DSNRef: e.DSNRef, PasswordRef: e.PasswordRef, Description: rec.Description,
 		Mode: engine.Mode(rec.Mode), MaxRows: rec.MaxRows, TimeoutMS: rec.TimeoutMS, PoolSize: rec.PoolSize,
 		AllowedNamespaces: rec.AllowedNamespaces,
 	}, nil
 }
 
-// fill seals in.DSN and in.TLS into rec and copies the other fields.
+// fill seals in's connection string, TLS and SSH settings and references into
+// rec, writes their plain summaries and copies the other fields.
 func (s *Service) fill(rec *store.Connection, in ConnInput, info engine.DSNInfo) error {
-	pt, err := encodeSecret(in.DSN, in.TLS)
+	pt, err := encodeSecret(in)
 	if err != nil {
 		return err
 	}
@@ -209,6 +252,21 @@ func (s *Service) fill(rec *store.Connection, in ConnInput, info engine.DSNInfo)
 		}
 		rec.TLS = string(b)
 	}
+	rec.SSH, rec.Refs = "", ""
+	if in.SSH != nil {
+		b, err := json.Marshal(in.SSH.Info())
+		if err != nil {
+			return err
+		}
+		rec.SSH = string(b)
+	}
+	if in.DSNRef != "" || in.PasswordRef != "" {
+		b, err := json.Marshal(map[string]string{"dsn_ref": in.DSNRef, "password_ref": in.PasswordRef})
+		if err != nil {
+			return err
+		}
+		rec.Refs = string(b)
+	}
 	return nil
 }
 
@@ -224,26 +282,65 @@ func tlsInfo(s string) *engine.TLSInfo {
 	return &t
 }
 
-func (s *Service) testConn(ctx context.Context, ws string, eng engine.Engine, in ConnInput, info engine.DSNInfo) (*TestResult, error) {
+func sshInfo(s string) *engine.SSHInfo {
+	if s == "" {
+		return nil
+	}
+	var i engine.SSHInfo
+	if json.Unmarshal([]byte(s), &i) != nil {
+		return nil
+	}
+	return &i
+}
+
+func refsOf(s string) (dsnRef, passwordRef string) {
+	var m map[string]string
+	if s != "" && json.Unmarshal([]byte(s), &m) == nil {
+		return m["dsn_ref"], m["password_ref"]
+	}
+	return "", ""
+}
+
+// inspect checks and parses in's connection string; a dsn_ref connection's
+// string is only known when the pool opens.
+func (s *Service) inspect(eng engine.Engine, in ConnInput) (engine.DSNInfo, error) {
+	if in.DSNRef != "" {
+		return engine.DSNInfo{Redacted: "(from " + in.DSNRef + ")"}, nil
+	}
+	if err := s.checkDSN(eng, in.DSN); err != nil {
+		return engine.DSNInfo{}, err
+	}
+	info, err := eng.Inspect(in.DSN)
+	if err != nil {
+		return info, scrub(err, in.DSN)
+	}
+	return info, nil
+}
+
+// testConn opens spec once (resolving its references and tunnel) and pings it.
+func (s *Service) testConn(ctx context.Context, spec engine.ConnSpec, info engine.DSNInfo) (*TestResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	spec.ID, spec.Version, spec.PoolSize = "test", 0, 1
 	start := time.Now()
-	conn, err := eng.Open(ctx, s.connSpec(ws, "test", 0, in.Engine, in.DSN, in.Mode, 1, in.TLS))
+	conn, err := OpenConn(ctx, spec)
 	if err != nil {
-		return nil, scrub(err, secretsOf(in.DSN, info)...)
+		return nil, scrub(err, secretsOf(spec.DSN, info)...)
 	}
 	defer conn.Close()
 	v, err := conn.Ping(ctx)
 	if err != nil {
-		return nil, scrub(err, secretsOf(in.DSN, info)...)
+		return nil, scrub(err, secretsOf(spec.DSN, info)...)
 	}
 	return &TestResult{ServerVersion: v, Connect: time.Since(start)}, nil
 }
 
 func toInfo(rec *store.Connection, info engine.DSNInfo) *ConnInfo {
+	dsnRef, passwordRef := refsOf(rec.Refs)
 	return &ConnInfo{
 		Name: rec.Name, Engine: rec.Engine, Description: rec.Description, Mode: engine.Mode(rec.Mode),
 		Host: rec.Host, Port: rec.Port, Database: rec.Database, User: rec.Username, DSN: info.Redacted, TLS: tlsInfo(rec.TLS),
+		SSH: sshInfo(rec.SSH), DSNRef: dsnRef, PasswordRef: passwordRef,
 		MaxRows: rec.MaxRows, TimeoutMS: rec.TimeoutMS, PoolSize: rec.PoolSize,
 		AllowedNamespaces: rec.AllowedNamespaces, Version: rec.Version,
 		CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
@@ -259,19 +356,23 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 	if err := s.allowEngine(in.Engine); err != nil {
 		return nil, nil, err
 	}
-	eng, _ := engine.Get(in.Engine)
-	if err := s.checkDSN(eng, in.DSN); err != nil {
+	if err := s.checkInput(in); err != nil {
 		return nil, nil, err
 	}
-	info, err := eng.Inspect(in.DSN)
+	eng, _ := engine.Get(in.Engine)
+	info, err := s.inspect(eng, in)
 	if err != nil {
-		return nil, nil, scrub(err, in.DSN)
+		return nil, nil, err
 	}
 	var tr *TestResult
 	if test {
-		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
+		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
 			return nil, nil, err
 		}
+	}
+	if in.SSH != nil && in.SSH.HostKey == "" {
+		return nil, nil, qerr.New(qerr.Invalid, "ssh.host_key is required").
+			WithHint("Run without --skip-test to see the bastion's fingerprint, verify it, then pass --ssh-host-key")
 	}
 	rec := &store.Connection{ID: store.NewID(), WorkspaceID: ws, Name: in.Name}
 	if err := s.fill(rec, in, info); err != nil {
@@ -304,8 +405,26 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	if err != nil {
 		return nil, nil, err
 	}
+	if p.DSN != nil && p.DSNRef != nil {
+		return nil, nil, qerr.New(qerr.Invalid, "give dsn or dsn_ref, not both")
+	}
 	if p.DSN != nil {
-		in.DSN = *p.DSN
+		in.DSN, in.DSNRef = *p.DSN, ""
+	}
+	if p.DSNRef != nil {
+		in.DSN, in.DSNRef = "", *p.DSNRef
+	}
+	if p.PasswordRef != nil {
+		in.PasswordRef = *p.PasswordRef
+	}
+	if p.ClearSSH && p.SSH != nil {
+		return nil, nil, qerr.New(qerr.Invalid, "give ssh or clear it, not both")
+	}
+	if p.ClearSSH {
+		in.SSH = nil
+	}
+	if p.SSH != nil {
+		in.SSH = p.SSH
 	}
 	if p.Description != nil {
 		in.Description = *p.Description
@@ -340,19 +459,23 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	if err := s.allowEngine(in.Engine); err != nil {
 		return nil, nil, err
 	}
-	eng, _ := engine.Get(in.Engine)
-	if err := s.checkDSN(eng, in.DSN); err != nil {
+	if err := s.checkInput(in); err != nil {
 		return nil, nil, err
 	}
-	info, err := eng.Inspect(in.DSN)
+	eng, _ := engine.Get(in.Engine)
+	info, err := s.inspect(eng, in)
 	if err != nil {
-		return nil, nil, scrub(err, in.DSN)
+		return nil, nil, err
 	}
 	var tr *TestResult
-	if test && (p.DSN != nil || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
-		if tr, err = s.testConn(ctx, ws, eng, in, info); err != nil {
+	if test && (p.DSN != nil || p.DSNRef != nil || p.PasswordRef != nil || p.SSH != nil || p.ClearSSH || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
+		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
 			return nil, nil, err
 		}
+	}
+	if in.SSH != nil && in.SSH.HostKey == "" {
+		return nil, nil, qerr.New(qerr.Invalid, "ssh.host_key is required").
+			WithHint("Run without --skip-test to see the bastion's fingerprint, verify it, then pass --ssh-host-key")
 	}
 	if err := s.fill(rec, in, info); err != nil {
 		return nil, nil, err
@@ -389,10 +512,9 @@ func (s *Service) info(rec *store.Connection) *ConnInfo {
 	var di engine.DSNInfo
 	if in, err := s.load(rec); err == nil {
 		if eng, err := engine.Get(rec.Engine); err == nil {
-			if s.checkDSN(eng, in.DSN) != nil {
+			var err error
+			if di, err = s.inspect(eng, in); err != nil && s.checkDSN(eng, in.DSN) != nil {
 				di.Redacted = "<connection string refused by this server>"
-			} else {
-				di, _ = eng.Inspect(in.DSN)
 			}
 		}
 	}
@@ -433,7 +555,7 @@ func (s *Service) TestConnection(ctx context.Context, ws, name string) (*TestRes
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, ws, t.eng, ConnInput{Engine: t.rec.Engine, DSN: t.spec.DSN, Mode: t.spec.Mode, TLS: t.spec.TLS}, t.info)
+	return s.testConn(ctx, t.spec, t.info)
 }
 
 // RefreshSchema rebuilds a connection's cached schema.
@@ -451,6 +573,7 @@ func (s *Service) RefreshSchema(ctx context.Context, ws, name string) (int, time
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
+		s.dropIfBroken(t, err)
 		return 0, 0, t.scrub(err)
 	}
 	return cat.Count(), time.Since(start), nil
@@ -469,13 +592,13 @@ func (s *Service) TestInput(ctx context.Context, ws string, in ConnInput) (*Test
 	if err := s.allowEngine(in.Engine); err != nil {
 		return nil, err
 	}
-	eng, _ := engine.Get(in.Engine)
-	if err := s.checkDSN(eng, in.DSN); err != nil {
+	if err := s.checkInput(in); err != nil {
 		return nil, err
 	}
-	info, err := eng.Inspect(in.DSN)
+	eng, _ := engine.Get(in.Engine)
+	info, err := s.inspect(eng, in)
 	if err != nil {
-		return nil, scrub(err, in.DSN)
+		return nil, err
 	}
-	return s.testConn(ctx, ws, eng, in, info)
+	return s.testConn(ctx, s.connSpec(ws, "test", 0, in), info)
 }

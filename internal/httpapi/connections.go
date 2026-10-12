@@ -23,6 +23,9 @@ type connectionJSON struct {
 	Username          string          `json:"username,omitempty"`
 	DSN               string          `json:"dsn"`
 	TLS               *engine.TLSInfo `json:"tls,omitempty"`
+	SSH               *engine.SSHInfo `json:"ssh,omitempty"`
+	DSNRef            string          `json:"dsn_ref,omitempty"`
+	PasswordRef       string          `json:"password_ref,omitempty"`
 	MaxRows           int             `json:"max_rows"`
 	TimeoutMS         int             `json:"timeout_ms"`
 	PoolSize          int             `json:"pool_size"`
@@ -37,6 +40,7 @@ type connectionJSON struct {
 func toConnection(c *core.ConnInfo, tr *core.TestResult) connectionJSON {
 	out := connectionJSON{Name: c.Name, Engine: c.Engine, Description: c.Description, Mode: string(c.Mode),
 		Host: c.Host, Port: c.Port, Database: c.Database, Username: c.User, DSN: c.DSN, TLS: c.TLS,
+		SSH: c.SSH, DSNRef: c.DSNRef, PasswordRef: c.PasswordRef,
 		MaxRows: c.MaxRows, TimeoutMS: c.TimeoutMS, PoolSize: c.PoolSize, AllowedNamespaces: c.AllowedNamespaces,
 		Version: c.Version, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
 	if tr != nil {
@@ -57,6 +61,9 @@ type connectionInput struct {
 	Password          string            `json:"password,omitempty"`
 	Params            map[string]string `json:"params,omitempty"`
 	TLS               *engine.TLS       `json:"tls,omitempty"`
+	DSNRef            string            `json:"dsn_ref,omitempty"`
+	PasswordRef       string            `json:"password_ref,omitempty"`
+	SSH               *engine.SSH       `json:"ssh,omitempty"`
 	Description       string            `json:"description,omitempty"`
 	Mode              string            `json:"mode,omitempty"`
 	MaxRows           int               `json:"max_rows,omitempty"`
@@ -69,7 +76,7 @@ func (in connectionInput) core() core.ConnInput {
 	return core.ConnInput{Name: in.Name, Engine: in.Engine, DSN: in.DSN, Host: in.Host, Port: in.Port, Database: in.Database,
 		Username: in.Username, Password: in.Password, Params: in.Params, TLS: in.TLS, Description: in.Description,
 		Mode: engine.Mode(in.Mode), MaxRows: in.MaxRows, TimeoutMS: in.TimeoutMS, PoolSize: in.PoolSize,
-		AllowedNamespaces: in.AllowedNamespaces}
+		AllowedNamespaces: in.AllowedNamespaces, DSNRef: in.DSNRef, PasswordRef: in.PasswordRef, SSH: in.SSH}
 }
 
 type connectionPatch struct {
@@ -81,11 +88,14 @@ type connectionPatch struct {
 	PoolSize          *int            `json:"pool_size"`
 	AllowedNamespaces *[]string       `json:"allowed_namespaces"`
 	TLS               json.RawMessage `json:"tls"` // absent: unchanged; null: removed; object: replaced
+	DSNRef            *string         `json:"dsn_ref"`
+	PasswordRef       *string         `json:"password_ref"`
+	SSH               json.RawMessage `json:"ssh"` // absent: unchanged; null: removed; object: replaced
 }
 
 func (p connectionPatch) core() (core.ConnPatch, error) {
 	out := core.ConnPatch{DSN: p.DSN, Description: p.Description, MaxRows: p.MaxRows, TimeoutMS: p.TimeoutMS,
-		PoolSize: p.PoolSize, AllowedNamespaces: p.AllowedNamespaces}
+		PoolSize: p.PoolSize, AllowedNamespaces: p.AllowedNamespaces, DSNRef: p.DSNRef, PasswordRef: p.PasswordRef}
 	if p.Mode != nil {
 		m := engine.Mode(*p.Mode)
 		out.Mode = &m
@@ -102,6 +112,19 @@ func (p connectionPatch) core() (core.ConnPatch, error) {
 			return out, qerr.New(qerr.Invalid, "invalid JSON body: tls: "+err.Error())
 		}
 		out.TLS = &t
+	}
+	switch raw := bytes.TrimSpace(p.SSH); {
+	case len(raw) == 0:
+	case string(raw) == "null":
+		out.ClearSSH = true
+	default:
+		var s engine.SSH
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&s); err != nil {
+			return out, qerr.New(qerr.Invalid, "invalid JSON body: ssh: "+err.Error())
+		}
+		out.SSH = &s
 	}
 	return out, nil
 }

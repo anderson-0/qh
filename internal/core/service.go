@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/anderson-0/qh/internal/pool"
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secret"
+	"github.com/anderson-0/qh/internal/secretref"
 	"github.com/anderson-0/qh/internal/sqlx"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/suggest"
@@ -33,6 +35,7 @@ type Service struct {
 	pools *pool.Manager
 	cache *catalog.Cache
 	opts  Options
+	refs  *secretref.Set
 
 	// resolved caches targets by workspace and connection ID; an entry is
 	// valid while its record's version is current.
@@ -57,6 +60,14 @@ type Options struct {
 	NoQueryLog bool
 	// Logger, when set, receives warnings (query-log entries dropped).
 	Logger *slog.Logger
+	// SecretRefs are the --allow-secret-ref patterns; in server mode only
+	// matching references are accepted. Local mode accepts every reference.
+	SecretRefs []string
+	// DenySSH refuses connections that use an SSH tunnel.
+	DenySSH bool
+	// CheckTarget is the network policy's address check (server mode); SSH
+	// tunnel targets must pass it.
+	CheckTarget func(netip.Addr) bool
 }
 
 // New returns a Service. opts (at most one) configures server mode.
@@ -65,7 +76,29 @@ func New(st store.Store, keys *secret.Keyring, pools *pool.Manager, cache *catal
 	if len(opts) > 0 {
 		s.opts = opts[0]
 	}
+	s.refs = secretref.NewSet(s.opts.Dial != nil, s.opts.SecretRefs)
 	return s
+}
+
+// checkInput applies the server's limits on tunnels and secret references.
+func (s *Service) checkInput(in ConnInput) error {
+	refs := []string{in.DSNRef, in.PasswordRef}
+	if in.SSH != nil {
+		refs = append(refs, in.SSH.RefStrings()...)
+	}
+	for _, r := range refs {
+		if r == "" {
+			continue
+		}
+		if _, err := s.refs.Check(r); err != nil {
+			return err
+		}
+	}
+	if in.SSH != nil && s.opts.DenySSH {
+		return qerr.New(qerr.Forbidden, "SSH tunnels are disabled on this server").
+			WithHint("The operator turned them off with qh serve --deny-ssh")
+	}
+	return nil
 }
 
 // allowEngine refuses engines this server does not permit.
@@ -92,21 +125,14 @@ func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
 
 // connSpec builds the spec engines open for workspace ws, carrying the
 // server's options. Workspace names cannot contain path separators.
-func (s *Service) connSpec(ws, id string, version int64, eng, dsn string, mode engine.Mode, poolSize int, tls *engine.TLS) engine.ConnSpec {
-	spec := engine.ConnSpec{ID: id, Version: version, Engine: eng, DSN: dsn, Mode: mode, PoolSize: poolSize, Dial: s.opts.Dial, TLS: tls}
+func (s *Service) connSpec(ws, id string, version int64, in ConnInput) engine.ConnSpec {
+	spec := engine.ConnSpec{ID: id, Version: version, Engine: in.Engine, DSN: in.DSN, Mode: in.Mode, PoolSize: in.PoolSize,
+		Dial: s.opts.Dial, TLS: in.TLS, Server: s.opts.Dial != nil, SSH: in.SSH, DSNRef: in.DSNRef, PasswordRef: in.PasswordRef,
+		Resolve: s.refs.Resolve, CheckTarget: s.opts.CheckTarget}
 	if s.opts.SQLiteRoot != "" {
 		spec.FileRoot = filepath.Join(s.opts.SQLiteRoot, ws)
 	}
 	return spec
-}
-
-// OpenConn opens spec with its registered engine. It is the production pool.Opener.
-func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
-	e, err := engine.Get(spec.Engine)
-	if err != nil {
-		return nil, err
-	}
-	return e.Open(ctx, spec)
 }
 
 // target is a stored connection with its secret opened.
@@ -156,13 +182,19 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkDSN(eng, in.DSN); err != nil {
+	if err := s.checkInput(in); err != nil {
 		return nil, err
 	}
-	info, _ := eng.Inspect(in.DSN)
+	var info engine.DSNInfo
+	if in.DSNRef == "" { // a dsn_ref connection's string is only known when the pool opens
+		if err := s.checkDSN(eng, in.DSN); err != nil {
+			return nil, err
+		}
+		info, _ = eng.Inspect(in.DSN)
+	}
 	t := &target{
 		rec: rec, eng: eng, info: info,
-		spec: s.connSpec(ws, rec.ID, rec.Version, rec.Engine, in.DSN, in.Mode, rec.PoolSize, in.TLS),
+		spec: s.connSpec(ws, rec.ID, rec.Version, in),
 	}
 	// Every change to a connection bumps its version, so the unsealed
 	// settings are reused until then.
@@ -229,6 +261,7 @@ func (s *Service) Schema(ctx context.Context, ws string, in SchemaInput) (string
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
+		s.dropIfBroken(t, err)
 		return "", t.scrub(err)
 	}
 	out, n := format.Schema(cat, format.SchemaOpts{Pattern: in.Pattern, Object: in.Object})
@@ -290,6 +323,7 @@ func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engi
 		res, err = conn.Query(ctx, in.Query, opts)
 	}
 	if err != nil {
+		s.dropIfBroken(t, err) // reopen next time: re-resolves secrets and reconnects the tunnel
 		return nil, t.scrub(s.withSuggestions(ctx, conn, t, in.Query, err))
 	}
 	// Any statement that is not a plain read may change the schema (DDL, but
@@ -322,6 +356,7 @@ func (s *Service) Catalog(ctx context.Context, ws, name string) (*engine.Catalog
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
+		s.dropIfBroken(t, err)
 		return nil, t.scrub(err)
 	}
 	return cat, nil
@@ -342,6 +377,14 @@ func (s *Service) catalog(ctx context.Context, conn engine.Conn, t *target) (*en
 		return nil, err
 	}
 	return cat.Only(t.rec.AllowedNamespaces), nil
+}
+
+// dropIfBroken drops t's pool when err means its connection failed. The
+// pool closes once its in-flight calls (including this one) release it.
+func (s *Service) dropIfBroken(t *target, err error) {
+	if err != nil && qerr.From(err).Category == qerr.ConnectionFailed {
+		s.pools.Drop(t.rec.ID)
+	}
 }
 
 // withSuggestions adds did-you-mean hints to unknown-column and unknown-table errors.

@@ -129,6 +129,9 @@ type connectionJSON struct {
 	Username          string          `json:"username"`
 	DSN               string          `json:"dsn"`
 	TLS               *engine.TLSInfo `json:"tls"`
+	SSH               *engine.SSHInfo `json:"ssh"`
+	DSNRef            string          `json:"dsn_ref"`
+	PasswordRef       string          `json:"password_ref"`
 	MaxRows           int             `json:"max_rows"`
 	TimeoutMS         int             `json:"timeout_ms"`
 	PoolSize          int             `json:"pool_size"`
@@ -143,6 +146,7 @@ type connectionJSON struct {
 func (j connectionJSON) info() (*core.ConnInfo, *core.TestResult) {
 	ci := &core.ConnInfo{Name: j.Name, Engine: j.Engine, Description: j.Description, Mode: engine.Mode(j.Mode),
 		Host: j.Host, Port: j.Port, Database: j.Database, User: j.Username, DSN: j.DSN, TLS: j.TLS,
+		SSH: j.SSH, DSNRef: j.DSNRef, PasswordRef: j.PasswordRef,
 		MaxRows: j.MaxRows, TimeoutMS: j.TimeoutMS, PoolSize: j.PoolSize, AllowedNamespaces: j.AllowedNamespaces,
 		Version: j.Version, CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt}
 	if j.ConnectMS == nil {
@@ -199,6 +203,9 @@ func (c *Client) CreateConnection(ctx context.Context, in core.ConnInput, test b
 	set("password", in.Password, in.Password != "")
 	set("params", in.Params, len(in.Params) > 0)
 	set("tls", in.TLS, in.TLS != nil)
+	set("dsn_ref", in.DSNRef, in.DSNRef != "")
+	set("password_ref", in.PasswordRef, in.PasswordRef != "")
+	set("ssh", in.SSH, in.SSH != nil)
 	set("description", in.Description, in.Description != "")
 	set("mode", string(in.Mode), in.Mode != "")
 	set("max_rows", in.MaxRows, in.MaxRows != 0)
@@ -243,6 +250,20 @@ func (c *Client) UpdateConnection(ctx context.Context, name string, p core.ConnP
 		body["tls"] = nil
 	case p.TLS != nil:
 		body["tls"] = p.TLS
+	}
+	if p.DSNRef != nil {
+		body["dsn_ref"] = *p.DSNRef
+	}
+	if p.PasswordRef != nil {
+		body["password_ref"] = *p.PasswordRef
+	}
+	switch {
+	case p.ClearSSH && p.SSH != nil:
+		return nil, nil, qerr.New(qerr.Invalid, "give ssh or clear it, not both")
+	case p.ClearSSH:
+		body["ssh"] = nil
+	case p.SSH != nil:
+		body["ssh"] = p.SSH
 	}
 	var j connectionJSON
 	if err := c.call(ctx, "PATCH", conn(name)+skip(test), body, &j); err != nil {

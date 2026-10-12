@@ -22,6 +22,9 @@ var pgOpenRetry = 30 * time.Second
 // migrateLock is the advisory-lock key that serialises schema migrations.
 const migrateLock = 7_212_011_970
 
+// bootstrapLock is the advisory-lock key that serialises first-key creation.
+const bootstrapLock = 7_212_011_971
+
 // pgMigrations[i] moves the qh schema from version i to i+1.
 var pgMigrations = [][]string{
 	{
@@ -415,6 +418,67 @@ func (p *Postgres) CreateKey(ctx context.Context, k *APIKey) error {
 	}
 	k.CreatedAt = now
 	return nil
+}
+
+func (p *Postgres) CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(bootstrapLock)); err != nil {
+		return false, err
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM qh.api_keys`).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	now := p.now()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO qh.api_keys (`+keyColumns+`) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9)`,
+		k.ID, nullString(k.WorkspaceID), k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now, nullTime(k.ExpiresAt), nullString(k.CreatedBy)); err != nil {
+		if isPGUnique(err) {
+			return false, ErrExists
+		}
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	k.CreatedAt = now
+	return true, nil
+}
+
+func (p *Postgres) ImportConnection(ctx context.Context, c *Connection) error {
+	ns, err := json.Marshal(nonNil(c.AllowedNamespaces))
+	if err != nil {
+		return err
+	}
+	row := *c
+	row.CreatedAt, row.UpdatedAt = c.CreatedAt.UTC().Truncate(time.Microsecond), c.UpdatedAt.UTC().Truncate(time.Microsecond)
+	_, err = p.db.ExecContext(ctx, pgInsertConnection, connArgs(&row, ns)...)
+	switch {
+	case isPGUnique(err):
+		return ErrExists
+	case isPGForeignKey(err):
+		return ErrNotFound
+	}
+	return err
+}
+
+func (p *Postgres) ImportKey(ctx context.Context, k *APIKey) error {
+	_, err := p.db.ExecContext(ctx, `INSERT INTO qh.api_keys (`+keyColumns+`) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		k.ID, nullString(k.WorkspaceID), k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name,
+		k.CreatedAt.UTC().Truncate(time.Microsecond), nullTime(k.ExpiresAt), nullTime(k.LastUsedAt), nullString(k.CreatedBy))
+	switch {
+	case isPGUnique(err):
+		return ErrExists
+	case isPGForeignKey(err):
+		return ErrNotFound
+	}
+	return err
 }
 
 func scanPGKey(r scanner) (*APIKey, error) {

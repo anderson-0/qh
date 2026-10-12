@@ -99,6 +99,13 @@ type Store interface {
 	ListWorkspaces(ctx context.Context) ([]*Workspace, error)
 	DeleteWorkspace(ctx context.Context, id string) error
 	CreateKey(ctx context.Context, k *APIKey) error
+	// CreateKeyIfNone creates k only when the store holds no API keys, atomically
+	// across processes, and reports whether it did.
+	CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error)
+	// ImportConnection and ImportKey insert a row exactly as given, timestamps
+	// and version included (qh store copy).
+	ImportConnection(ctx context.Context, c *Connection) error
+	ImportKey(ctx context.Context, k *APIKey) error
 	GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error)
 	ListKeys(ctx context.Context, workspaceID string) ([]*APIKey, error)
 	ListAllKeys(ctx context.Context) ([]*APIKey, error)

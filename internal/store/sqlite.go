@@ -552,6 +552,88 @@ func (s *SQLite) CreateKey(ctx context.Context, k *APIKey) error {
 	return nil
 }
 
+func (s *SQLite) CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return false, err
+	}
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM api_keys`).Scan(&n); err != nil {
+		conn.ExecContext(context.Background(), "ROLLBACK")
+		return false, err
+	}
+	if n > 0 {
+		_, err := conn.ExecContext(ctx, "ROLLBACK")
+		return false, err
+	}
+	now := s.now()
+	var ws, by any
+	if k.WorkspaceID != "" {
+		ws = k.WorkspaceID
+	}
+	if k.CreatedBy != "" {
+		by = k.CreatedBy
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO api_keys (`+keyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+		k.ID, ws, k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now.Format(time.RFC3339Nano), formatTime(k.ExpiresAt), by); err != nil {
+		conn.ExecContext(context.Background(), "ROLLBACK")
+		if isUnique(err) {
+			return false, ErrExists
+		}
+		return false, err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		conn.ExecContext(context.Background(), "ROLLBACK")
+		return false, err
+	}
+	k.CreatedAt = now
+	return true, nil
+}
+
+func (s *SQLite) ImportConnection(ctx context.Context, c *Connection) error {
+	ns, err := json.Marshal(nonNil(c.AllowedNamespaces))
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO connections (`+connColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.WorkspaceID, c.Name, c.Engine, c.Secret, c.SecretKeyID, c.Host, c.Port, c.Database,
+		c.Username, c.Description, c.Mode, c.MaxRows, c.TimeoutMS, c.PoolSize, string(ns), c.Version,
+		c.CreatedAt.UTC().Format(time.RFC3339Nano), c.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		jsonColumn(c.TLS), jsonColumn(c.SSH), jsonColumn(c.Refs))
+	switch {
+	case isUnique(err):
+		return ErrExists
+	case isForeignKey(err):
+		return ErrNotFound
+	}
+	return err
+}
+
+func (s *SQLite) ImportKey(ctx context.Context, k *APIKey) error {
+	var ws, by any
+	if k.WorkspaceID != "" {
+		ws = k.WorkspaceID
+	}
+	if k.CreatedBy != "" {
+		by = k.CreatedBy
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_keys (`+keyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		k.ID, ws, k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, k.CreatedAt.UTC().Format(time.RFC3339Nano),
+		formatTime(k.ExpiresAt), formatTime(k.LastUsedAt), by)
+	switch {
+	case isUnique(err):
+		return ErrExists
+	case isForeignKey(err):
+		return ErrNotFound
+	}
+	return err
+}
+
 func scanKey(r scanner) (*APIKey, error) {
 	var k APIKey
 	var ws, expires, used, by sql.NullString

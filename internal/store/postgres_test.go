@@ -244,3 +244,32 @@ func TestPostgresOpenFailsFastOnWrongPassword(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestPostgresCreateKeyIfNoneRace(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	var wg sync.WaitGroup
+	var created atomic.Int64
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := store.OpenPostgres(context.Background(), dsn)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer s.Close()
+			ok, err := s.CreateKeyIfNone(context.Background(), &store.APIKey{ID: store.NewID(), Prefix: fmt.Sprintf("qh_race%04d", i), Hash: []byte{1}, Scopes: []string{"admin"}})
+			if err != nil {
+				t.Error(err)
+			}
+			if ok {
+				created.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if created.Load() != 1 {
+		t.Fatalf("created %d keys", created.Load())
+	}
+}

@@ -193,6 +193,19 @@ func TestBootstrap(t *testing.T) {
 	}
 }
 
+func TestBootstrapTwiceWithFixedKeyDoesNotFail(t *testing.T) {
+	st := newStore(t)
+	fixed := "qh_" + strings.Repeat("a", 8) + "_" + strings.Repeat("b", 40)
+	_, created, err := Bootstrap(context.Background(), st, fixed)
+	if err != nil || !created {
+		t.Fatalf("first: %v %v", created, err)
+	}
+	_, created, err = Bootstrap(context.Background(), st, fixed)
+	if err != nil || created {
+		t.Fatalf("second: %v %v", created, err)
+	}
+}
+
 func TestParseExpiry(t *testing.T) {
 	cases := map[string]time.Duration{"": 0, "90d": 90 * 24 * time.Hour, "720h": 720 * time.Hour, "30m": 30 * time.Minute}
 	for in, want := range cases {

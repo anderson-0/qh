@@ -26,6 +26,8 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 		"ConnectionTLSSummary":                     testConnectionTLSSummary,
 		"ConnectionSSHAndRefsSummaries":            testConnectionSSHAndRefsSummaries,
 		"ResealConnections":                        testResealConnections,
+		"CreateKeyIfNone":                          testCreateKeyIfNone,
+		"Import":                                   testImport,
 	} {
 		t.Run(name, func(t *testing.T) { fn(t, open(t)) })
 	}
@@ -379,5 +381,54 @@ func testResealConnections(t *testing.T, s store.Store) {
 	}
 	if got, _ := s.GetConnection(ctx, store.DefaultWorkspace, "a"); string(got.Secret) != "new-a" {
 		t.Fatalf("failed reseal changed a: %q", got.Secret)
+	}
+}
+
+func testCreateKeyIfNone(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	k := &store.APIKey{ID: store.NewID(), Prefix: "qh_aaaaaaaa", Hash: []byte{1}, Scopes: []string{"admin"}, Name: "bootstrap"}
+	created, err := s.CreateKeyIfNone(ctx, k)
+	if err != nil || !created || k.CreatedAt.IsZero() {
+		t.Fatalf("first: %v %v %v", created, err, k.CreatedAt)
+	}
+	k2 := &store.APIKey{ID: store.NewID(), Prefix: "qh_bbbbbbbb", Hash: []byte{2}, Scopes: []string{"admin"}}
+	if created, err := s.CreateKeyIfNone(ctx, k2); err != nil || created {
+		t.Fatalf("second: %v %v", created, err)
+	}
+	if n, _ := s.CountKeys(ctx); n != 1 {
+		t.Fatalf("keys = %d", n)
+	}
+}
+
+func testImport(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	created := time.Date(2025, 1, 2, 3, 4, 5, 123000000, time.UTC)
+	updated := created.Add(time.Hour)
+	c := sample("imported")
+	c.Version, c.CreatedAt, c.UpdatedAt = 7, created, updated
+	if err := s.ImportConnection(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetConnection(ctx, store.DefaultWorkspace, "imported")
+	if err != nil || got.Version != 7 || !got.CreatedAt.Equal(created) || !got.UpdatedAt.Equal(updated) || string(got.Secret) != string(c.Secret) || got.SecretKeyID != c.SecretKeyID {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if err := s.ImportConnection(ctx, c); err != store.ErrExists {
+		t.Fatalf("duplicate: %v", err)
+	}
+	bad := sample("orphan")
+	bad.WorkspaceID = "nope"
+	if err := s.ImportConnection(ctx, bad); err != store.ErrNotFound {
+		t.Fatalf("missing workspace: %v", err)
+	}
+	used := created.Add(2 * time.Hour)
+	k := &store.APIKey{ID: store.NewID(), Prefix: "qh_cccccccc", Hash: []byte{3}, Scopes: []string{"query"},
+		WorkspaceID: store.DefaultWorkspace, Name: "copied", CreatedAt: created, LastUsedAt: &used}
+	if err := s.ImportKey(ctx, k); err != nil {
+		t.Fatal(err)
+	}
+	gk, err := s.GetKeyByPrefix(ctx, "qh_cccccccc")
+	if err != nil || !gk.CreatedAt.Equal(created) || gk.LastUsedAt == nil || !gk.LastUsedAt.Equal(used) {
+		t.Fatalf("%+v %v", gk, err)
 	}
 }

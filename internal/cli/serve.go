@@ -120,11 +120,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 					return err
 				}
 			}
-			old, err := oldMasterKeys(os.Getenv("QH_MASTER_KEY_OLD"))
-			if err != nil {
-				return err
-			}
-			a, err := openAppWith(cmd.Context(), dir, opts, old...)
+			a, err := openAppWith(cmd.Context(), dir, opts)
 			if err != nil {
 				return err
 			}

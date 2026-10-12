@@ -69,14 +69,35 @@ func openApp(ctx context.Context, home string) (*app, error) {
 	return openAppWith(ctx, home, core.Options{})
 }
 
+// errSharedStoreNeedsKey is returned when a shared store is selected but
+// QH_MASTER_KEY is unset. A shared store holds sealed data for every instance,
+// so its key must be the one all of them use. A master.key file in the data
+// directory is a per-host key (possibly created by an earlier local run), so
+// it is never used or created with a shared store.
+func errSharedStoreNeedsKey() error {
+	return qerr.New(qerr.Invalid, "a shared store needs QH_MASTER_KEY (the key every instance uses)").
+		WithHint("Set QH_MASTER_KEY to the base64 key all instances share; master.key in the data directory is not used with --store or QH_STORE_DSN")
+}
+
+// openAppWith opens the store and the service. The previous master keys are
+// oldKeys plus those in QH_MASTER_KEY_OLD (comma-separated), so data sealed
+// before a rotation stays readable by every command.
 func openAppWith(ctx context.Context, home string, opts core.Options, oldKeys ...[]byte) (*app, error) {
+	envKey := os.Getenv("QH_MASTER_KEY")
+	if storeDSN() != "" && envKey == "" {
+		return nil, errSharedStoreNeedsKey()
+	}
+	fromEnv, err := oldMasterKeys(os.Getenv("QH_MASTER_KEY_OLD"))
+	if err != nil {
+		return nil, err
+	}
+	oldKeys = append(append([][]byte(nil), oldKeys...), fromEnv...)
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
 	var key []byte
-	var err error
-	if v := os.Getenv("QH_MASTER_KEY"); v != "" {
-		key, err = secret.ParseKey(v)
+	if envKey != "" {
+		key, err = secret.ParseKey(envKey)
 	} else {
 		key, err = secret.LoadOrCreateKeyFile(filepath.Join(home, "master.key"))
 	}

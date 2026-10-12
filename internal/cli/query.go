@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -84,11 +83,7 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			old, err := oldMasterKeys(os.Getenv("QH_MASTER_KEY_OLD"))
-			if err != nil {
-				return err
-			}
-			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off}, old...)
+			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off})
 			if err != nil {
 				return err
 			}

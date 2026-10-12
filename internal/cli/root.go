@@ -68,7 +68,7 @@ func requireWorkspace(ctx context.Context, a *app, ws string) error {
 // and a server to talk to.
 func errStoreWithServer() error {
 	return qerr.New(qerr.Invalid, "--store and --server cannot be used together").
-		WithHint("--server talks to a qh server; --store opens a store directly")
+		WithHint("--server/QH_SERVER talks to a qh server; --store/QH_STORE_DSN opens a store directly")
 }
 
 // refuseRemote stops a local-only command from ignoring --server.

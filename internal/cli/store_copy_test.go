@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -101,6 +103,19 @@ func assertStoresMatch(t *testing.T, home, dsn string) {
 func TestStoreCopyErrors(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("QH_MASTER_KEY", testMasterKey(t))
+	t.Setenv("QH_STORE_DSN", "")
+	// A home without a SQLite store is refused, and nothing is created there.
+	empty := t.TempDir()
+	_, errOut, code := run(t, empty, "", "store", "copy", "--to", "postgres://x@127.0.0.1:1/qh")
+	if code == 0 || !strings.Contains(errOut, "no qh store at "+filepath.Join(empty, "qh.db")) {
+		t.Fatalf("no store: %d %q", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(empty, "qh.db")); err == nil {
+		t.Fatal("store copy created a SQLite store")
+	}
+	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 0 { // creates the local store
+		t.Fatal(errOut)
+	}
 	for _, c := range []struct {
 		args []string
 		want string

@@ -34,6 +34,9 @@ func storeCmd(home *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := requireLocalStore(dir); err != nil {
+				return err
+			}
 			ctx := cmd.Context()
 			src, err := store.Open(ctx, storeDSN(), dir)
 			if err != nil {

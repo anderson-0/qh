@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -78,12 +79,14 @@ func TestStoreFlagSelectsPostgres(t *testing.T) {
 }
 
 func TestStoreFlagErrors(t *testing.T) {
+	t.Setenv("QH_MASTER_KEY", testMasterKey(t))
 	_, errOut, code := run(t, t.TempDir(), "", "--store", "mysql://x", "conn", "ls")
 	if code == 0 || !strings.Contains(errOut, "postgres://") {
 		t.Fatalf("%d %q", code, errOut)
 	}
 	_, errOut, code = run(t, t.TempDir(), "", "--store", "postgres://x@127.0.0.1:1/qh", "--server", "http://127.0.0.1:1", "conn", "ls")
-	if code == 0 || !strings.Contains(errOut, "--store and --server cannot be used together") {
+	if code == 0 || !strings.Contains(errOut, "--store and --server cannot be used together") ||
+		!strings.Contains(errOut, "QH_SERVER") || !strings.Contains(errOut, "QH_STORE_DSN") {
 		t.Fatalf("%d %q", code, errOut)
 	}
 }
@@ -118,5 +121,68 @@ func TestOldMasterKeys(t *testing.T) {
 	}
 	if keys, err := oldMasterKeys(""); err != nil || len(keys) != 0 {
 		t.Fatalf("empty: %v %v", keys, err)
+	}
+}
+
+// A shared store never takes its master key from (or creates) master.key: a
+// per-host key file would seal fleet data under a key no other instance has.
+func TestSharedStoreNeedsMasterKey(t *testing.T) {
+	t.Setenv("QH_MASTER_KEY", "")
+	t.Setenv("QH_STORE_DSN", "")
+	unreachable := "postgres://qh@127.0.0.1:1/qh" // the key check must come first
+	old := filepath.Join(t.TempDir(), "old.key")
+	if err := os.WriteFile(old, []byte(testMasterKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"--store", unreachable, "conn", "ls"},
+		{"--store", unreachable, "mcp"},
+		{"--store", unreachable, "serve"},
+		{"--store", unreachable, "masterkey", "rotate", "--old-key-file", old},
+		{"--store", unreachable, "masterkey", "rotate", "--generate", "--old-key-file", old},
+	} {
+		home := t.TempDir()
+		_, errOut, code := run(t, home, "", args...)
+		if code != 1 || !strings.HasPrefix(errOut, "error[invalid]: a shared store needs QH_MASTER_KEY") ||
+			!strings.Contains(errOut, "master.key") {
+			t.Fatalf("%v: %d %q", args, code, errOut)
+		}
+		if _, err := os.Stat(filepath.Join(home, "master.key")); err == nil {
+			t.Fatalf("%v created master.key", args)
+		}
+	}
+	// An existing master.key is not used either.
+	home := t.TempDir()
+	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 0 { // creates master.key locally
+		t.Fatal(errOut)
+	}
+	t.Setenv("QH_STORE_DSN", unreachable)
+	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 1 || !strings.HasPrefix(errOut, "error[invalid]: a shared store needs QH_MASTER_KEY") {
+		t.Fatalf("existing master.key: %d %q", code, errOut)
+	}
+}
+
+// Local commands read QH_MASTER_KEY_OLD like serve and mcp, so an admin host
+// works between the steps of a master-key rotation.
+func TestLocalCommandsReadOldMasterKey(t *testing.T) {
+	t.Setenv("QH_STORE_DSN", "")
+	oldKey, newKey := testMasterKey(t), testMasterKey(t)
+	home, db := t.TempDir(), testutil.SQLiteFixture(t)
+	t.Setenv("QH_MASTER_KEY", oldKey)
+	t.Setenv("QH_MASTER_KEY_OLD", "")
+	if _, errOut, code := run(t, home, "", "conn", "add", "shop", "--engine", "sqlite", "--dsn", db); code != 0 {
+		t.Fatal(errOut)
+	}
+	t.Setenv("QH_MASTER_KEY", newKey)
+	if _, errOut, code := run(t, home, "", "query", "shop", "SELECT 1"); code == 0 {
+		t.Fatalf("opened a connection sealed with an unknown key: %q", errOut)
+	}
+	t.Setenv("QH_MASTER_KEY_OLD", oldKey)
+	if out, errOut, code := run(t, home, "", "query", "shop", "SELECT 1"); code != 0 {
+		t.Fatalf("old key ignored: %q %q", out, errOut)
+	}
+	t.Setenv("QH_MASTER_KEY_OLD", "not-base64")
+	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 1 || !strings.Contains(errOut, "QH_MASTER_KEY_OLD must hold") {
+		t.Fatalf("bad old key: %d %q", code, errOut)
 	}
 }

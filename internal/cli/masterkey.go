@@ -44,10 +44,12 @@ func masterkeyCmd(home *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			dbPath := filepath.Join(dir, "qh.db")
-			if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
-				return qerr.New(qerr.Invalid, "no qh store at "+dbPath).
-					WithHint("Pass --home DIR, where DIR is the server's --data-dir")
+			if storeDSN() == "" { // with a store DSN, openAppWith fails if the store is unreachable
+				dbPath := filepath.Join(dir, "qh.db")
+				if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
+					return qerr.New(qerr.Invalid, "no qh store at "+dbPath).
+						WithHint("Pass --home DIR, where DIR is the server's --data-dir")
+				}
 			}
 			keyPath := filepath.Join(dir, "master.key")
 			created := false

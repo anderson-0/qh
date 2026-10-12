@@ -19,6 +19,7 @@ import (
 	"github.com/anderson-0/qh/internal/httpapi"
 	"github.com/anderson-0/qh/internal/netguard"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/secret"
 	"github.com/anderson-0/qh/internal/secretref"
 )
 
@@ -57,6 +58,23 @@ func pruneQueryLog(ctx context.Context, svc *core.Service, retention time.Durati
 			}
 		}
 	}()
+}
+
+// oldMasterKeys parses QH_MASTER_KEY_OLD: comma-separated base64 keys that
+// can still open data sealed before a rotation.
+func oldMasterKeys(v string) ([][]byte, error) {
+	var out [][]byte
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		k, err := secret.ParseKey(s)
+		if err != nil {
+			return nil, qerr.New(qerr.Invalid, "QH_MASTER_KEY_OLD must hold comma-separated base64 32-byte keys")
+		}
+		out = append(out, k)
+	}
+	return out, nil
 }
 
 func serveCmd(home *string, version string) *cobra.Command {
@@ -102,11 +120,19 @@ func serveCmd(home *string, version string) *cobra.Command {
 					return err
 				}
 			}
-			a, err := openAppWith(dir, opts)
+			old, err := oldMasterKeys(os.Getenv("QH_MASTER_KEY_OLD"))
+			if err != nil {
+				return err
+			}
+			a, err := openAppWith(dir, opts, old...)
 			if err != nil {
 				return err
 			}
 			defer a.Close()
+			// Cancelled before a.Close runs (defers are last in, first out), so
+			// background work never outlives the store.
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
 			stderr := cmd.ErrOrStderr()
 			cfg := httpapi.Config{Service: a.svc, Store: a.st, Version: version, Logger: logger}
 			mode := "local"
@@ -129,8 +155,8 @@ func serveCmd(home *string, version string) *cobra.Command {
 			}
 			fmt.Fprintf(stderr, "qh listening on http://%s (%s mode)\n", ln.Addr(), mode)
 			srv := &http.Server{Handler: httpapi.New(cfg), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
-			ctx := cmd.Context()
 			a.pools.Start(ctx)
+			a.svc.Start(ctx)
 			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
 			done := make(chan error, 1)
 			go func() { done <- srv.Serve(ln) }()

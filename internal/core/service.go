@@ -84,6 +84,10 @@ func New(st store.Store, keys *secret.Keyring, pools *pool.Manager, cache *catal
 	return s
 }
 
+// notifyTimeout bounds telling other instances about an invalidation, so a
+// dead store host cannot hang a request that already succeeded.
+const notifyTimeout = 2 * time.Second
+
 // invalidate drops id's cached schema here and, when the store is shared,
 // in every other instance. Telling the others is best effort.
 func (s *Service) invalidate(ctx context.Context, id string) {
@@ -91,13 +95,16 @@ func (s *Service) invalidate(ctx context.Context, id string) {
 	if s.inv == nil {
 		return
 	}
-	if err := s.inv.Invalidate(context.WithoutCancel(ctx), id); err != nil && s.opts.Logger != nil {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
+	defer cancel()
+	if err := s.inv.Invalidate(ctx, id); err != nil && s.opts.Logger != nil {
 		s.opts.Logger.Warn("cannot tell other instances to drop a cached schema", "error", err)
 	}
 }
 
 // Start applies other instances' schema invalidations until ctx ends. It does
-// nothing when the store is not shared.
+// nothing when the store is not shared. Call it once; ctx must end no later
+// than the store is closed.
 func (s *Service) Start(ctx context.Context) {
 	if s.inv == nil {
 		return

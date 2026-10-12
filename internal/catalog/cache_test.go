@@ -149,3 +149,28 @@ func TestInvalidateAll(t *testing.T) {
 	get("a", 3)
 	get("b", 4)
 }
+
+func TestInvalidateAllDuringFirstBuildDiscardsResult(t *testing.T) {
+	c := New(time.Minute)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	stale := &engine.Catalog{}
+	slow := func(context.Context) (*engine.Catalog, error) {
+		calls.Add(1)
+		<-release
+		return stale, nil
+	}
+	done := make(chan struct{})
+	go func() { c.Get(context.Background(), "a", 1, slow); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	c.InvalidateAll()
+	close(release)
+	<-done
+	got, err := c.Get(context.Background(), "a", 1, counting(&calls))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || got == stale {
+		t.Fatalf("stale build was cached; calls = %d, stale = %v", calls.Load(), got == stale)
+	}
+}

@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +53,10 @@ func TestServiceSharesInvalidations(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc.Start(ctx)
+	rec, err := h.st.GetConnection(ctx, ws, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := svc.Schema(ctx, ws, SchemaInput{Source: "shop"}); err != nil { // fills the cache
 		t.Fatal(err)
 	}
@@ -61,32 +67,38 @@ func TestServiceSharesInvalidations(t *testing.T) {
 	inv.mu.Lock()
 	sent := append([]string(nil), inv.sent...)
 	inv.mu.Unlock()
-	if len(sent) == 0 {
-		t.Fatal("no invalidation sent")
+	if !slices.Contains(sent, rec.ID) {
+		t.Fatalf("sent = %q, want it to contain %q", sent, rec.ID)
 	}
-	// Another instance's DDL: the notice drops our cached schema.
-	if _, err := svc.Schema(ctx, ws, SchemaInput{Source: "shop"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.Query(ctx, ws, QueryInput{Source: "shop", Query: "SELECT 1"}); err != nil {
-		t.Fatal(err)
-	}
+
 	other := New(h.st, h.svc.keys, pool.New(OpenConn, pool.Options{}), catalog.New(time.Hour))
-	if _, err := other.Query(ctx, ws, QueryInput{Source: "shop", Query: "CREATE TABLE t2 (x int)"}); err != nil {
-		t.Fatal(err)
-	}
-	rec, _ := h.st.GetConnection(ctx, ws, "shop")
-	inv.ch <- rec.ID
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		out, err := svc.Schema(ctx, ws, SchemaInput{Source: "shop", Object: "t2"})
-		if err == nil && out != "" {
-			break
+	// otherCreates has another instance create table, checks that our cached
+	// schema does not show it yet, delivers notice, and waits for it to appear.
+	otherCreates := func(table, notice string) {
+		t.Helper()
+		if _, err := svc.Schema(ctx, ws, SchemaInput{Source: "shop"}); err != nil { // warm the cache
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("t2 never appeared: %q %v", out, err)
+		if _, err := other.Query(ctx, ws, QueryInput{Source: "shop", Query: "CREATE TABLE " + table + " (x int)"}); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(50 * time.Millisecond)
+		out, err := svc.Schema(ctx, ws, SchemaInput{Source: "shop", Object: table})
+		if err != nil || !strings.Contains(out, "no objects match") {
+			t.Fatalf("cached schema already shows %s before the notice: %q %v", table, out, err)
+		}
+		inv.ch <- notice
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			out, err = svc.Schema(ctx, ws, SchemaInput{Source: "shop", Object: table})
+			if err == nil && strings.Contains(out, table) && !strings.Contains(out, "no objects match") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s never appeared after notice %q: %q %v", table, notice, out, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
-	inv.ch <- "" // drop everything: must not panic or block
+	otherCreates("t2", rec.ID) // another instance's DDL on this connection
+	otherCreates("t3", "")     // a reconnect: drop everything
 }

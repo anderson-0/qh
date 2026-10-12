@@ -279,11 +279,16 @@ func TestPostgresInvalidations(t *testing.T) {
 	a, b := openPG(t, dsn), openPG(t, dsn)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch, err := b.Invalidations(ctx)
+	chA, err := a.Invalidations(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recv := func() string {
+	chB, err := b.Invalidations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := func(ch <-chan string) string {
+		t.Helper()
 		select {
 		case id := <-ch:
 			return id
@@ -292,29 +297,41 @@ func TestPostgresInvalidations(t *testing.T) {
 			return ""
 		}
 	}
-	time.Sleep(200 * time.Millisecond) // let LISTEN start
 	if err := a.Invalidate(ctx, "conn-1"); err != nil {
 		t.Fatal(err)
 	}
-	if got := recv(); got != "conn-1" {
+	if got := recv(chB); got != "conn-1" {
 		t.Fatalf("got %q", got)
 	}
-	// Kill the listening session: the listener reconnects and sends "".
-	db, _ := sql.Open("pgx", dsn)
-	defer db.Close()
-	if _, err := db.Exec(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE 'LISTEN%'`); err != nil {
+	// a's own notice is not echoed back to a: notices arrive in order, so the
+	// first thing a sees must be b's.
+	if err := b.Invalidate(ctx, "conn-b"); err != nil {
 		t.Fatal(err)
 	}
-	if got := recv(); got != "" {
+	if got := recv(chA); got != "conn-b" {
+		t.Fatalf("a got %q, want b's \"conn-b\" (its own notice was echoed)", got)
+	}
+	// Kill the listening sessions: the listeners reconnect and send "".
+	db, _ := sql.Open("pgx", dsn)
+	defer db.Close()
+	if _, err := db.Exec(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND query LIKE 'LISTEN%'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := recv(chB); got != "" {
 		t.Fatalf("after reconnect got %q, want \"\"", got)
+	}
+	if got := recv(chA); got != "" {
+		t.Fatalf("a after reconnect got %q, want \"\"", got)
 	}
 	if err := a.Invalidate(ctx, "conn-2"); err != nil {
 		t.Fatal(err)
 	}
-	if got := recv(); got != "conn-2" {
+	if got := recv(chB); got != "conn-2" {
 		t.Fatalf("after reconnect got %q", got)
 	}
 	cancel()
-	for range ch { // must close
+	for range chA { // must close
+	}
+	for range chB {
 	}
 }

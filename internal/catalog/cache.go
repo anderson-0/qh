@@ -31,6 +31,7 @@ type Cache struct {
 	mu      sync.Mutex
 	entries map[string]entry
 	gens    map[string]uint64
+	epoch   uint64 // bumped by InvalidateAll
 	group   singleflight.Group
 }
 
@@ -48,10 +49,10 @@ func (c *Cache) Get(ctx context.Context, id string, version int64, build Builder
 		c.mu.Unlock()
 		return e.cat, nil
 	}
-	gen := c.gens[id]
+	gen, epoch := c.gens[id], c.epoch
 	c.mu.Unlock()
 
-	key := fmt.Sprintf("%s@%d#%d", id, version, gen)
+	key := fmt.Sprintf("%s@%d#%d.%d", id, version, gen, epoch)
 	ch := c.group.DoChan(key, func() (any, error) {
 		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildTimeout)
 		defer cancel()
@@ -60,7 +61,7 @@ func (c *Cache) Get(ctx context.Context, id string, version int64, build Builder
 			return nil, err
 		}
 		c.mu.Lock()
-		if c.gens[id] == gen {
+		if c.gens[id] == gen && c.epoch == epoch {
 			c.entries[id] = entry{version: version, cat: cat, built: c.now()}
 		}
 		c.mu.Unlock()
@@ -88,12 +89,7 @@ func (c *Cache) Invalidate(id string) {
 // InvalidateAll drops every cached catalog, including builds in progress.
 func (c *Cache) InvalidateAll() {
 	c.mu.Lock()
-	for id := range c.entries {
-		c.gens[id]++
-	}
-	for id := range c.gens {
-		c.gens[id]++
-	}
+	c.epoch++
 	c.entries = map[string]entry{}
 	c.mu.Unlock()
 }

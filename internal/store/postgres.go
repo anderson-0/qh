@@ -96,6 +96,9 @@ type Postgres struct {
 	db  *sql.DB
 	cfg *pgx.ConnConfig // kept for the LISTEN connection
 	now func() time.Time
+	// origin tags this process's invalidation notices so its own listener
+	// skips them (NOTIFY is delivered to the sender too).
+	origin string
 }
 
 // OpenPostgres connects to dsn, waiting up to pgOpenRetry for the database,
@@ -120,7 +123,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: cannot reach the postgres store at %s:%d: %s", cfg.Host, cfg.Port, redactErr(err, cfg.Password))
 	}
-	p := &Postgres{db: db, cfg: cfg, now: func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }}
+	p := &Postgres{db: db, cfg: cfg, now: func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }, origin: NewID()}
 	if err := p.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %s", redactErr(err, cfg.Password))
@@ -652,15 +655,21 @@ func (p *Postgres) ResealConnections(ctx context.Context, fn func(c *Connection)
 	return n, nil
 }
 
-// Invalidate tells every instance listening on the store that id's schema is stale.
+const (
+	listenTimeout = 10 * time.Second // bounds each LISTEN connection attempt
+	closeTimeout  = 2 * time.Second  // bounds closing the LISTEN connection
+)
+
+// Invalidate tells every other instance listening on the store that id's
+// schema is stale.
 func (p *Postgres) Invalidate(ctx context.Context, id string) error {
-	_, err := p.db.ExecContext(ctx, `SELECT pg_notify('qh_catalog', $1)`, id)
+	_, err := p.db.ExecContext(ctx, `SELECT pg_notify('qh_catalog', $1)`, p.origin+":"+id)
 	return err
 }
 
 // Invalidations listens on qh_catalog with its own connection, reconnecting
 // with backoff; after each reconnect it sends "" because notices may have
-// been missed.
+// been missed. It skips this process's own notices.
 func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 	conn, err := p.listen(ctx)
 	if err != nil {
@@ -673,13 +682,17 @@ func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 		for {
 			n, err := conn.WaitForNotification(ctx)
 			if err == nil {
+				id, own := p.fromNotice(n.Payload)
+				if own {
+					continue
+				}
 				select {
-				case out <- n.Payload:
+				case out <- id:
 				case <-ctx.Done():
 				}
 				continue
 			}
-			conn.Close(context.Background())
+			closeConn(conn)
 			if ctx.Err() != nil {
 				return
 			}
@@ -698,7 +711,7 @@ func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 			select {
 			case out <- "":
 			case <-ctx.Done():
-				conn.Close(context.Background())
+				closeConn(conn)
 				return
 			}
 		}
@@ -706,14 +719,34 @@ func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 	return out, nil
 }
 
+// fromNotice splits a notice payload into the connection ID and whether this
+// process sent it. A payload without an origin prefix is forwarded as is.
+func (p *Postgres) fromNotice(payload string) (id string, own bool) {
+	origin, id, ok := strings.Cut(payload, ":")
+	if !ok {
+		return payload, false
+	}
+	return id, origin == p.origin
+}
+
+// listen opens a connection that listens on qh_catalog; each attempt is
+// bounded by listenTimeout.
 func (p *Postgres) listen(ctx context.Context) (*pgx.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, listenTimeout)
+	defer cancel()
 	conn, err := pgx.ConnectConfig(ctx, p.cfg.Copy())
 	if err != nil {
 		return nil, err
 	}
 	if _, err := conn.Exec(ctx, `LISTEN qh_catalog`); err != nil {
-		conn.Close(context.Background())
+		closeConn(conn)
 		return nil, err
 	}
 	return conn, nil
+}
+
+func closeConn(conn *pgx.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	conn.Close(ctx)
 }

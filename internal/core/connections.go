@@ -486,7 +486,7 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 		}
 		return nil, nil, err
 	}
-	s.cache.Invalidate(rec.ID)
+	s.invalidate(ctx, rec.ID)
 	return toInfo(rec, info), tr, nil
 }
 
@@ -503,7 +503,7 @@ func (s *Service) DeleteConnection(ctx context.Context, ws, name string) error {
 		return err
 	}
 	s.pools.Drop(rec.ID)
-	s.cache.Invalidate(rec.ID)
+	s.invalidate(ctx, rec.ID)
 	s.forget(ws, rec.ID)
 	return nil
 }
@@ -565,7 +565,7 @@ func (s *Service) RefreshSchema(ctx context.Context, ws, name string) (int, time
 		return 0, 0, err
 	}
 	start := time.Now()
-	s.cache.Invalidate(t.rec.ID)
+	s.invalidate(ctx, t.rec.ID)
 	conn, release, err := s.pools.Get(ctx, t.spec)
 	if err != nil {
 		return 0, 0, t.scrub(err)

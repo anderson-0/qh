@@ -83,13 +83,16 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := openAppWith(dir, core.Options{NoQueryLog: lf.off})
+			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off})
 			if err != nil {
 				return err
 			}
 			defer a.Close()
-			ctx := cmd.Context()
+			// Cancelled before a.Close runs, so background work never outlives the store.
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
 			a.pools.Start(ctx)
+			a.svc.Start(ctx)
 			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
 			ws, _ := workspaceOf(cmd)
 			if err := requireWorkspace(ctx, a, ws); err != nil {

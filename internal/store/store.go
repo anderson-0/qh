@@ -99,6 +99,15 @@ type Store interface {
 	ListWorkspaces(ctx context.Context) ([]*Workspace, error)
 	DeleteWorkspace(ctx context.Context, id string) error
 	CreateKey(ctx context.Context, k *APIKey) error
+	// CreateKeyIfNone creates k only when the store holds no API keys, atomically
+	// across processes, and reports whether it did.
+	CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error)
+	// ImportWorkspace stores w with its CreatedAt, replacing the CreatedAt of a
+	// workspace with the same id. ImportConnection and ImportKey insert a row
+	// exactly as given, timestamps and version included (qh store copy).
+	ImportWorkspace(ctx context.Context, w *Workspace) error
+	ImportConnection(ctx context.Context, c *Connection) error
+	ImportKey(ctx context.Context, k *APIKey) error
 	GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error)
 	ListKeys(ctx context.Context, workspaceID string) ([]*APIKey, error)
 	ListAllKeys(ctx context.Context) ([]*APIKey, error)
@@ -120,4 +129,14 @@ func NewID() string {
 		panic(err) // crypto/rand does not fail on supported platforms
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// Invalidator tells every instance sharing a store that a connection's cached
+// schema is stale. Stores shared by several processes implement it.
+type Invalidator interface {
+	Invalidate(ctx context.Context, connectionID string) error
+	// Invalidations delivers connection IDs other processes invalidated, and
+	// "" when every cached schema must be dropped (after a reconnect, when
+	// notices may have been missed). The channel closes when ctx ends.
+	Invalidations(ctx context.Context) (<-chan string, error)
 }

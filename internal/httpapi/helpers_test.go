@@ -24,7 +24,7 @@ import (
 type env struct {
 	srv   *httptest.Server
 	svc   *core.Service
-	st    *store.SQLite
+	st    store.Store
 	admin string // admin key (server mode only)
 }
 

@@ -64,15 +64,26 @@ func requireWorkspace(ctx context.Context, a *app, ws string) error {
 	return nil
 }
 
+// errStoreWithServer is returned when a command is given both a store to open
+// and a server to talk to.
+func errStoreWithServer() error {
+	return qerr.New(qerr.Invalid, "--store and --server cannot be used together").
+		WithHint("--server/QH_SERVER talks to a qh server; --store/QH_STORE_DSN opens a store directly")
+}
+
 // refuseRemote stops a local-only command from ignoring --server.
 func refuseRemote(cmd *cobra.Command) error {
 	if s, _ := cmd.Flags().GetString("server"); s != "" {
+		if storeDSN() != "" {
+			return errStoreWithServer()
+		}
 		return qerr.New(qerr.Invalid, cmd.CommandPath()+" runs locally only").WithHint("Remove --server")
 	}
 	return nil
 }
 
 func newRoot(version string) *cobra.Command {
+	storeFlag = "" // Execute may run many times in one process
 	var home string
 	root := &cobra.Command{
 		Use:           "qh",
@@ -83,6 +94,7 @@ func newRoot(version string) *cobra.Command {
 	pf := root.PersistentFlags()
 	pf.StringVar(&home, "home", "", "data directory (default $QH_HOME, else $XDG_CONFIG_HOME/qh or ~/.config/qh)")
 	pf.String("workspace", store.DefaultWorkspace, "workspace to act on (default $QH_WORKSPACE, else default)")
+	pf.StringVar(&storeFlag, "store", "", "postgres:// URL of a shared store (default $QH_STORE_DSN, else the SQLite file in the data directory)")
 	var server, key string
 	pf.StringVar(&server, "server", "", "qh server URL; commands then use its REST API (default $QH_SERVER)")
 	pf.StringVar(&key, "key", "", "API key for --server (default $QH_KEY)")
@@ -91,6 +103,9 @@ func newRoot(version string) *cobra.Command {
 			srv := server
 			if srv == "" {
 				srv = os.Getenv("QH_SERVER")
+			}
+			if srv != "" && storeDSN() != "" {
+				return errStoreWithServer()
 			}
 			if srv != "" {
 				k := key
@@ -112,7 +127,7 @@ func newRoot(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := openApp(dir)
+			a, err := openApp(cmd.Context(), dir)
 			if err != nil {
 				return err
 			}
@@ -143,6 +158,7 @@ func newRoot(version string) *cobra.Command {
 		serveCmd(&home, version),
 		workspaceCmd(with),
 		keyCmd(with),
+		storeCmd(&home),
 		masterkeyCmd(&home),
 	)
 	return root

@@ -14,15 +14,32 @@ import (
 	"github.com/anderson-0/qh/internal/secret"
 )
 
+// requireLocalStore fails when no store is selected with --store or
+// QH_STORE_DSN and the data directory has no SQLite store, so a wrong --home
+// never creates an empty store. With a store DSN, opening the store reports an
+// unreachable database itself.
+func requireLocalStore(dir string) error {
+	if storeDSN() != "" {
+		return nil
+	}
+	dbPath := filepath.Join(dir, "qh.db")
+	if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
+		return qerr.New(qerr.Invalid, "no qh store at "+dbPath).
+			WithHint("Pass --home DIR, where DIR is the server's --data-dir")
+	}
+	return nil
+}
+
 func masterkeyCmd(home *string) *cobra.Command {
 	c := &cobra.Command{Use: "masterkey", Short: "Manage the master key that seals connection strings"}
 	var oldFile string
 	var generate bool
 	rotate := &cobra.Command{
 		Use:   "rotate",
-		Short: "Re-seal every connection with the current master key (stop qh serve first)",
+		Short: "Re-seal every connection with the current master key (local store: stop qh serve first)",
 		Long: "Re-seals every stored connection with the current master key (QH_MASTER_KEY, or master.key in the data directory).\n" +
-			"--old-key-file holds the previous key. Stop any running qh serve or qh mcp first, and restart it with the new key afterwards.\n" +
+			"--old-key-file holds the previous key. With a local store, stop any running qh serve or qh mcp first, and restart it with the new key afterwards.\n" +
+			"With a shared store (--store or QH_STORE_DSN), do not stop the instances: run them with QH_MASTER_KEY_OLD first (see the README), and set QH_MASTER_KEY here; master.key is never used with a shared store.\n" +
 			"In local mode, when QH_MASTER_KEY is unset and master.key does not exist, pass --generate to create a new master.key.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -44,13 +61,14 @@ func masterkeyCmd(home *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			dbPath := filepath.Join(dir, "qh.db")
-			if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
-				return qerr.New(qerr.Invalid, "no qh store at "+dbPath).
-					WithHint("Pass --home DIR, where DIR is the server's --data-dir")
+			if err := requireLocalStore(dir); err != nil {
+				return err
 			}
 			keyPath := filepath.Join(dir, "master.key")
 			created := false
+			if storeDSN() != "" && os.Getenv("QH_MASTER_KEY") == "" {
+				return errSharedStoreNeedsKey() // never re-seal a fleet under a key file
+			}
 			if os.Getenv("QH_MASTER_KEY") == "" {
 				if _, err := os.Stat(keyPath); errors.Is(err, fs.ErrNotExist) {
 					if !generate {
@@ -60,7 +78,7 @@ func masterkeyCmd(home *string) *cobra.Command {
 					created = true
 				}
 			}
-			a, err := openAppWith(dir, core.Options{}, old)
+			a, err := openAppWith(cmd.Context(), dir, core.Options{}, old)
 			if err != nil {
 				return err
 			}

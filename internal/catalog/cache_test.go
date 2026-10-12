@@ -108,14 +108,16 @@ func TestInvalidateDuringBuildDiscardsResult(t *testing.T) {
 	c := New(time.Minute)
 	var calls atomic.Int32
 	release := make(chan struct{})
+	started := make(chan struct{})
 	slow := func(context.Context) (*engine.Catalog, error) {
 		calls.Add(1)
+		close(started)
 		<-release
 		return &engine.Catalog{}, nil
 	}
 	done := make(chan struct{})
 	go func() { c.Get(context.Background(), "a", 1, slow); close(done) }()
-	time.Sleep(20 * time.Millisecond)
+	<-started
 	c.Invalidate("a")
 	close(release)
 	<-done
@@ -124,5 +126,55 @@ func TestInvalidateDuringBuildDiscardsResult(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("stale build was cached; calls = %d", calls.Load())
+	}
+}
+
+func TestInvalidateAll(t *testing.T) {
+	c := New(10 * time.Minute)
+	var calls atomic.Int32
+	b := counting(&calls)
+	ctx := context.Background()
+	get := func(id string, want int32) {
+		t.Helper()
+		if _, err := c.Get(ctx, id, 1, b); err != nil {
+			t.Fatal(err)
+		}
+		if got := calls.Load(); got != want {
+			t.Fatalf("builds = %d, want %d", got, want)
+		}
+	}
+	get("a", 1)
+	get("b", 2)
+	get("a", 2)
+	get("b", 2)
+	c.InvalidateAll()
+	get("a", 3)
+	get("b", 4)
+}
+
+func TestInvalidateAllDuringFirstBuildDiscardsResult(t *testing.T) {
+	c := New(time.Minute)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	started := make(chan struct{})
+	stale := &engine.Catalog{}
+	slow := func(context.Context) (*engine.Catalog, error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		return stale, nil
+	}
+	done := make(chan struct{})
+	go func() { c.Get(context.Background(), "a", 1, slow); close(done) }()
+	<-started
+	c.InvalidateAll()
+	close(release)
+	<-done
+	got, err := c.Get(context.Background(), "a", 1, counting(&calls))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || got == stale {
+		t.Fatalf("stale build was cached; calls = %d, stale = %v", calls.Load(), got == stale)
 	}
 }

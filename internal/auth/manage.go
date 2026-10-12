@@ -136,7 +136,7 @@ func DeleteKey(ctx context.Context, st store.Store, id string) error {
 func Bootstrap(ctx context.Context, st store.Store, fixed string) (token string, created bool, err error) {
 	n, err := st.CountKeys(ctx)
 	if err != nil || n > 0 {
-		return "", false, err
+		return "", false, err // fast path: most starts find keys
 	}
 	k := &store.APIKey{ID: store.NewID(), Scopes: []string{ScopeAdmin}, Name: "bootstrap"}
 	if fixed != "" {
@@ -151,7 +151,9 @@ func Bootstrap(ctx context.Context, st store.Store, fixed string) (token string,
 			return "", false, err
 		}
 	}
-	if err := st.CreateKey(ctx, k); err != nil {
+	// Another instance may have created the first key since the count:
+	// CreateKeyIfNone is atomic, so exactly one bootstrap key exists.
+	if created, err = st.CreateKeyIfNone(ctx, k); err != nil || !created {
 		return "", false, err
 	}
 	return token, true, nil

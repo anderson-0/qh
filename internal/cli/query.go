@@ -88,7 +88,7 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := openAppWith(dir, core.Options{NoQueryLog: lf.off}, old...)
+			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off}, old...)
 			if err != nil {
 				return err
 			}

@@ -34,12 +34,13 @@ func storeDSN() string {
 	return os.Getenv("QH_STORE_DSN")
 }
 
-// storeOpenError classifies a failure of store.Open. The store package
-// already keeps the password out of its errors, so err is safe to show.
-func storeOpenError(err error) error {
+// storeOpenError classifies a failure of store.Open; shared says a store DSN
+// was given. The store package already keeps the password out of its errors,
+// so err is safe to show. A local SQLite failure is returned as it came.
+func storeOpenError(err error, shared bool) error {
 	switch {
-	case err == nil:
-		return nil
+	case err == nil || !shared:
+		return err
 	case errors.Is(err, store.ErrInvalidDSN):
 		return qerr.New(qerr.Invalid, "--store must be a postgres:// URL").WithHint("Leave it unset to use the SQLite file in the data directory")
 	}
@@ -64,9 +65,11 @@ func homeDir(flagValue string) (string, error) {
 	return filepath.Join(h, ".config", "qh"), nil
 }
 
-func openApp(home string) (*app, error) { return openAppWith(home, core.Options{}) }
+func openApp(ctx context.Context, home string) (*app, error) {
+	return openAppWith(ctx, home, core.Options{})
+}
 
-func openAppWith(home string, opts core.Options, oldKeys ...[]byte) (*app, error) {
+func openAppWith(ctx context.Context, home string, opts core.Options, oldKeys ...[]byte) (*app, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
@@ -84,9 +87,9 @@ func openAppWith(home string, opts core.Options, oldKeys ...[]byte) (*app, error
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.Open(context.Background(), storeDSN(), home)
+	st, err := store.Open(ctx, storeDSN(), home)
 	if err != nil {
-		return nil, storeOpenError(err)
+		return nil, storeOpenError(err, storeDSN() != "")
 	}
 	pools := pool.New(core.OpenConn, pool.Options{})
 	return &app{svc: core.New(st, keys, pools, catalog.New(10*time.Minute), opts), pools: pools, st: st, keys: keys}, nil

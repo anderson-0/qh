@@ -62,7 +62,7 @@ func masterkeyCmd(home *string) *cobra.Command {
 					created = true
 				}
 			}
-			a, err := openAppWith(dir, core.Options{}, old)
+			a, err := openAppWith(cmd.Context(), dir, core.Options{}, old)
 			if err != nil {
 				return err
 			}

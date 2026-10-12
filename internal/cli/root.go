@@ -127,7 +127,7 @@ func newRoot(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := openApp(dir)
+			a, err := openApp(cmd.Context(), dir)
 			if err != nil {
 				return err
 			}

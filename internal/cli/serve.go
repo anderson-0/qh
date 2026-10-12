@@ -124,7 +124,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := openAppWith(dir, opts, old...)
+			a, err := openAppWith(cmd.Context(), dir, opts, old...)
 			if err != nil {
 				return err
 			}
@@ -139,7 +139,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 			if server {
 				mode = "server"
 				cfg.Auth = auth.NewAuthenticator(a.st)
-				tok, created, err := auth.Bootstrap(cmd.Context(), a.st, os.Getenv("QH_BOOTSTRAP_ADMIN_KEY"))
+				tok, created, err := auth.Bootstrap(ctx, a.st, os.Getenv("QH_BOOTSTRAP_ADMIN_KEY"))
 				if err != nil {
 					return err
 				}

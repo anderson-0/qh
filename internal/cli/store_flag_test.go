@@ -89,18 +89,22 @@ func TestStoreFlagErrors(t *testing.T) {
 }
 
 func TestStoreOpenError(t *testing.T) {
-	err := storeOpenError(fmt.Errorf("open: %w", store.ErrInvalidDSN))
+	err := storeOpenError(fmt.Errorf("open: %w", store.ErrInvalidDSN), true)
 	var qe *qerr.Error
 	if !errors.As(err, &qe) || qe.Category != qerr.Invalid || !strings.Contains(err.Error(), "postgres://") {
 		t.Fatalf("invalid dsn: %v", err)
 	}
-	err = storeOpenError(errors.New("dial tcp 127.0.0.1:1: connection refused"))
+	err = storeOpenError(errors.New("dial tcp 127.0.0.1:1: connection refused"), true)
 	if !errors.As(err, &qe) || qe.Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), "cannot open the store") ||
 		!strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("other error: %v", err)
 	}
-	if storeOpenError(nil) != nil {
+	if storeOpenError(nil, true) != nil {
 		t.Fatal("nil error changed")
+	}
+	local := errors.New("unable to open database file")
+	if got := storeOpenError(local, false); got != local {
+		t.Fatalf("local SQLite error relabelled: %v", got)
 	}
 }
 

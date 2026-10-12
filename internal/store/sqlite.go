@@ -493,6 +493,12 @@ func (s *SQLite) CreateWorkspace(ctx context.Context, id string) (*Workspace, er
 	return &Workspace{ID: id, CreatedAt: now}, nil
 }
 
+func (s *SQLite) ImportWorkspace(ctx context.Context, w *Workspace) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET created_at = excluded.created_at`, w.ID, w.ID, w.CreatedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
 func (s *SQLite) ListWorkspaces(ctx context.Context) ([]*Workspace, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, created_at FROM workspaces ORDER BY id`)
 	if err != nil {

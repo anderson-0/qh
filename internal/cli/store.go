@@ -20,7 +20,8 @@ func storeCmd(home *string) *cobra.Command {
 		Short: "Copy everything from the current store to an empty Postgres store",
 		Long: "Copies workspaces, connections and API keys (and, with --with-query-log, the query log) from the current\n" +
 			"store (--store, or the SQLite file in the data directory) to the empty Postgres store --to. Sealed connection\n" +
-			"settings are copied as they are: keep using the same master key with the new store.",
+			"settings are copied as they are: keep using the same master key with the new store. Stop other writers (such as qh\n" +
+			"serve instances using the source store) before copying.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := refuseRemote(cmd); err != nil {
@@ -53,7 +54,8 @@ func storeCmd(home *string) *cobra.Command {
 			}
 			n, err := copyStore(ctx, src, dst, withLog)
 			if err != nil {
-				return err
+				return qerr.Wrap(qerr.ConnectionFailed, "copy failed: "+err.Error(), err).
+					WithHint("The target may be partly filled; drop and recreate that database before trying again")
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "copied %d workspaces, %d connections, %d keys, %d query-log entries\n",
 				n.workspaces, n.connections, n.keys, n.log)
@@ -68,7 +70,7 @@ func storeCmd(home *string) *cobra.Command {
 }
 
 // requireEmpty fails unless dst holds only the default workspace and no
-// connections or keys.
+// connections, keys or query-log entries.
 func requireEmpty(ctx context.Context, dst store.Store) error {
 	ws, err := dst.ListWorkspaces(ctx)
 	if err != nil {
@@ -82,7 +84,11 @@ func requireEmpty(ctx context.Context, dst store.Store) error {
 	if err != nil {
 		return err
 	}
-	if len(ws) != 1 || len(keys) != 0 || len(conns) != 0 {
+	logged, err := dst.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: store.DefaultWorkspace, Limit: 1})
+	if err != nil {
+		return err
+	}
+	if len(ws) != 1 || len(keys) != 0 || len(conns) != 0 || len(logged) != 0 {
 		return qerr.New(qerr.Invalid, "the target store is not empty").
 			WithHint("Copy into a new, empty database")
 	}
@@ -98,10 +104,8 @@ func copyStore(ctx context.Context, src, dst store.Store, withLog bool) (copied,
 		return n, err
 	}
 	for _, w := range wss {
-		if w.ID != store.DefaultWorkspace {
-			if _, err := dst.CreateWorkspace(ctx, w.ID); err != nil {
-				return n, fmt.Errorf("workspace %s: %w", w.ID, err)
-			}
+		if err := dst.ImportWorkspace(ctx, w); err != nil {
+			return n, fmt.Errorf("workspace %s: %w", w.ID, err)
 		}
 		n.workspaces++
 		conns, err := src.ListConnections(ctx, w.ID)

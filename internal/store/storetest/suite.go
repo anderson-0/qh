@@ -412,6 +412,27 @@ func testImport(t *testing.T, s store.Store) {
 	ctx := context.Background()
 	created := time.Date(2025, 1, 2, 3, 4, 5, 123000000, time.UTC)
 	updated := created.Add(time.Hour)
+	for _, id := range []string{"imported-ws", store.DefaultWorkspace} { // a new workspace, and the seeded one
+		if err := s.ImportWorkspace(ctx, &store.Workspace{ID: id, CreatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wss, err := s.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, w := range wss {
+		if w.ID == "imported-ws" || w.ID == store.DefaultWorkspace {
+			seen++
+			if !sameTime(w.CreatedAt, created, time.Microsecond) {
+				t.Fatalf("workspace %s created %v, want %v", w.ID, w.CreatedAt, created)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("workspaces = %+v", wss)
+	}
 	c := sample("imported")
 	c.Version, c.CreatedAt, c.UpdatedAt = 7, created, updated
 	if err := s.ImportConnection(ctx, c); err != nil {

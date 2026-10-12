@@ -364,6 +364,12 @@ func (p *Postgres) CreateWorkspace(ctx context.Context, id string) (*Workspace, 
 	return &Workspace{ID: id, CreatedAt: now}, nil
 }
 
+func (p *Postgres) ImportWorkspace(ctx context.Context, w *Workspace) error {
+	_, err := p.db.ExecContext(ctx, `INSERT INTO qh.workspaces (id, name, created_at) VALUES ($1, $1, $2)
+		ON CONFLICT (id) DO UPDATE SET created_at = excluded.created_at`, w.ID, w.CreatedAt.UTC().Truncate(time.Microsecond))
+	return err
+}
+
 func (p *Postgres) ListWorkspaces(ctx context.Context) ([]*Workspace, error) {
 	rows, err := p.db.QueryContext(ctx, `SELECT id, created_at FROM qh.workspaces ORDER BY id`)
 	if err != nil {

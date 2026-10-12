@@ -102,8 +102,10 @@ type Store interface {
 	// CreateKeyIfNone creates k only when the store holds no API keys, atomically
 	// across processes, and reports whether it did.
 	CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error)
-	// ImportConnection and ImportKey insert a row exactly as given, timestamps
-	// and version included (qh store copy).
+	// ImportWorkspace stores w with its CreatedAt, replacing the CreatedAt of a
+	// workspace with the same id. ImportConnection and ImportKey insert a row
+	// exactly as given, timestamps and version included (qh store copy).
+	ImportWorkspace(ctx context.Context, w *Workspace) error
 	ImportConnection(ctx context.Context, c *Connection) error
 	ImportKey(ctx context.Context, k *APIKey) error
 	GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error)

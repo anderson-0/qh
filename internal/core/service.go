@@ -34,6 +34,7 @@ type Service struct {
 	keys  *secret.Keyring
 	pools *pool.Manager
 	cache *catalog.Cache
+	inv   store.Invalidator // nil unless the store is shared between instances
 	opts  Options
 	refs  *secretref.Set
 
@@ -77,7 +78,46 @@ func New(st store.Store, keys *secret.Keyring, pools *pool.Manager, cache *catal
 		s.opts = opts[0]
 	}
 	s.refs = secretref.NewSet(s.opts.Dial != nil, s.opts.SecretRefs)
+	if inv, ok := st.(store.Invalidator); ok {
+		s.inv = inv
+	}
 	return s
+}
+
+// invalidate drops id's cached schema here and, when the store is shared,
+// in every other instance. Telling the others is best effort.
+func (s *Service) invalidate(ctx context.Context, id string) {
+	s.cache.Invalidate(id)
+	if s.inv == nil {
+		return
+	}
+	if err := s.inv.Invalidate(context.WithoutCancel(ctx), id); err != nil && s.opts.Logger != nil {
+		s.opts.Logger.Warn("cannot tell other instances to drop a cached schema", "error", err)
+	}
+}
+
+// Start applies other instances' schema invalidations until ctx ends. It does
+// nothing when the store is not shared.
+func (s *Service) Start(ctx context.Context) {
+	if s.inv == nil {
+		return
+	}
+	ch, err := s.inv.Invalidations(ctx)
+	if err != nil {
+		if s.opts.Logger != nil {
+			s.opts.Logger.Warn("cannot listen for other instances' schema changes; cached schemas expire after their TTL", "error", err)
+		}
+		return
+	}
+	go func() {
+		for id := range ch {
+			if id == "" {
+				s.cache.InvalidateAll()
+			} else {
+				s.cache.Invalidate(id)
+			}
+		}
+	}()
 }
 
 // checkInput applies the server's limits on tunnels and secret references.
@@ -329,7 +369,7 @@ func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engi
 	// Any statement that is not a plain read may change the schema (DDL, but
 	// also a DO block or a function call), so drop the cached catalog.
 	if access != sqlx.Read && !in.Explain {
-		s.cache.Invalidate(t.rec.ID)
+		s.invalidate(ctx, t.rec.ID)
 	}
 	return res, nil
 }

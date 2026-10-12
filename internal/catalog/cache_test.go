@@ -126,3 +126,26 @@ func TestInvalidateDuringBuildDiscardsResult(t *testing.T) {
 		t.Fatalf("stale build was cached; calls = %d", calls.Load())
 	}
 }
+
+func TestInvalidateAll(t *testing.T) {
+	c := New(10 * time.Minute)
+	var calls atomic.Int32
+	b := counting(&calls)
+	ctx := context.Background()
+	get := func(id string, want int32) {
+		t.Helper()
+		if _, err := c.Get(ctx, id, 1, b); err != nil {
+			t.Fatal(err)
+		}
+		if got := calls.Load(); got != want {
+			t.Fatalf("builds = %d, want %d", got, want)
+		}
+	}
+	get("a", 1)
+	get("b", 2)
+	get("a", 2)
+	get("b", 2)
+	c.InvalidateAll()
+	get("a", 3)
+	get("b", 4)
+}

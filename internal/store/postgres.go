@@ -651,3 +651,69 @@ func (p *Postgres) ResealConnections(ctx context.Context, fn func(c *Connection)
 	}
 	return n, nil
 }
+
+// Invalidate tells every instance listening on the store that id's schema is stale.
+func (p *Postgres) Invalidate(ctx context.Context, id string) error {
+	_, err := p.db.ExecContext(ctx, `SELECT pg_notify('qh_catalog', $1)`, id)
+	return err
+}
+
+// Invalidations listens on qh_catalog with its own connection, reconnecting
+// with backoff; after each reconnect it sends "" because notices may have
+// been missed.
+func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
+	conn, err := p.listen(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: listen: %s", redactErr(err, p.cfg.Password))
+	}
+	out := make(chan string, 64)
+	go func() {
+		defer close(out)
+		backoff := 500 * time.Millisecond
+		for {
+			n, err := conn.WaitForNotification(ctx)
+			if err == nil {
+				select {
+				case out <- n.Payload:
+				case <-ctx.Done():
+				}
+				continue
+			}
+			conn.Close(context.Background())
+			if ctx.Err() != nil {
+				return
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if conn, err = p.listen(ctx); err == nil {
+					backoff = 500 * time.Millisecond
+					break
+				}
+				backoff = min(backoff*2, 30*time.Second)
+			}
+			select {
+			case out <- "":
+			case <-ctx.Done():
+				conn.Close(context.Background())
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (p *Postgres) listen(ctx context.Context) (*pgx.Conn, error) {
+	conn, err := pgx.ConnectConfig(ctx, p.cfg.Copy())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `LISTEN qh_catalog`); err != nil {
+		conn.Close(context.Background())
+		return nil, err
+	}
+	return conn, nil
+}

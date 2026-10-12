@@ -128,3 +128,13 @@ func NewID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// Invalidator tells every instance sharing a store that a connection's cached
+// schema is stale. Stores shared by several processes implement it.
+type Invalidator interface {
+	Invalidate(ctx context.Context, connectionID string) error
+	// Invalidations delivers connection IDs other processes invalidated, and
+	// "" when every cached schema must be dropped (after a reconnect, when
+	// notices may have been missed). The channel closes when ctx ends.
+	Invalidations(ctx context.Context) (<-chan string, error)
+}

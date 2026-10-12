@@ -273,3 +273,48 @@ func TestPostgresCreateKeyIfNoneRace(t *testing.T) {
 		t.Fatalf("created %d keys", created.Load())
 	}
 }
+
+func TestPostgresInvalidations(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	a, b := openPG(t, dsn), openPG(t, dsn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := b.Invalidations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv := func() string {
+		select {
+		case id := <-ch:
+			return id
+		case <-time.After(10 * time.Second):
+			t.Fatal("no notification")
+			return ""
+		}
+	}
+	time.Sleep(200 * time.Millisecond) // let LISTEN start
+	if err := a.Invalidate(ctx, "conn-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := recv(); got != "conn-1" {
+		t.Fatalf("got %q", got)
+	}
+	// Kill the listening session: the listener reconnects and sends "".
+	db, _ := sql.Open("pgx", dsn)
+	defer db.Close()
+	if _, err := db.Exec(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE 'LISTEN%'`); err != nil {
+		t.Fatal(err)
+	}
+	if got := recv(); got != "" {
+		t.Fatalf("after reconnect got %q, want \"\"", got)
+	}
+	if err := a.Invalidate(ctx, "conn-2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := recv(); got != "conn-2" {
+		t.Fatalf("after reconnect got %q", got)
+	}
+	cancel()
+	for range ch { // must close
+	}
+}

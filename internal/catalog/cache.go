@@ -84,3 +84,16 @@ func (c *Cache) Invalidate(id string) {
 	c.gens[id]++
 	c.mu.Unlock()
 }
+
+// InvalidateAll drops every cached catalog, including builds in progress.
+func (c *Cache) InvalidateAll() {
+	c.mu.Lock()
+	for id := range c.entries {
+		c.gens[id]++
+	}
+	for id := range c.gens {
+		c.gens[id]++
+	}
+	c.entries = map[string]entry{}
+	c.mu.Unlock()
+}

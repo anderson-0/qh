@@ -216,6 +216,44 @@ func TestPostgresPasswordFile(t *testing.T) {
 	openPG(t, u.String()).Close()
 }
 
+func TestPostgresPasswordFileUnreadable(t *testing.T) {
+	missing := t.TempDir() + "/no-such-pw"
+	t.Setenv("QH_STORE_PASSWORD_FILE", missing)
+	_, err := store.OpenPostgres(context.Background(), "postgres://qh@127.0.0.1:1/qh")
+	if err == nil || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("want the path and the cause, got %v", err)
+	}
+}
+
+// A role that owns a pre-created qh schema but cannot create schemas in the
+// database must still be able to open the store.
+func TestPostgresOpenWithPrecreatedSchema(t *testing.T) {
+	admin := pgServer(t, "postgres:17-alpine")
+	dsn := freshDB(t, admin)
+	u, _ := url.Parse(dsn)
+	dbName := strings.TrimPrefix(u.Path, "/")
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		`CREATE ROLE app LOGIN PASSWORD 'app-pw-123'`,
+		`REVOKE CREATE ON DATABASE ` + dbName + ` FROM PUBLIC`,
+		`REVOKE CREATE ON DATABASE ` + dbName + ` FROM app`,
+		`CREATE SCHEMA qh AUTHORIZATION app`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	u.User = url.UserPassword("app", "app-pw-123")
+	s := openPG(t, u.String())
+	if err := s.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeFile(path, s string) error { return os.WriteFile(path, []byte(s), 0o600) }
 
 func TestPostgresOpenBoundsEachAttempt(t *testing.T) {

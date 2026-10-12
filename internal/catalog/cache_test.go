@@ -108,14 +108,16 @@ func TestInvalidateDuringBuildDiscardsResult(t *testing.T) {
 	c := New(time.Minute)
 	var calls atomic.Int32
 	release := make(chan struct{})
+	started := make(chan struct{})
 	slow := func(context.Context) (*engine.Catalog, error) {
 		calls.Add(1)
+		close(started)
 		<-release
 		return &engine.Catalog{}, nil
 	}
 	done := make(chan struct{})
 	go func() { c.Get(context.Background(), "a", 1, slow); close(done) }()
-	time.Sleep(20 * time.Millisecond)
+	<-started
 	c.Invalidate("a")
 	close(release)
 	<-done
@@ -154,15 +156,17 @@ func TestInvalidateAllDuringFirstBuildDiscardsResult(t *testing.T) {
 	c := New(time.Minute)
 	var calls atomic.Int32
 	release := make(chan struct{})
+	started := make(chan struct{})
 	stale := &engine.Catalog{}
 	slow := func(context.Context) (*engine.Catalog, error) {
 		calls.Add(1)
+		close(started)
 		<-release
 		return stale, nil
 	}
 	done := make(chan struct{})
 	go func() { c.Get(context.Background(), "a", 1, slow); close(done) }()
-	time.Sleep(20 * time.Millisecond)
+	<-started
 	c.InvalidateAll()
 	close(release)
 	<-done

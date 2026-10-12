@@ -26,6 +26,11 @@ const migrateLock = 7_212_011_970
 const bootstrapLock = 7_212_011_971
 
 // pgMigrations[i] moves the qh schema from version i to i+1.
+//
+// Migrations must be additive (new tables, nullable or defaulted columns, new
+// indexes; never a drop, rename or type change), so an older binary keeps
+// working against a newer schema during a rolling upgrade. A store whose
+// recorded version is higher than this binary knows is accepted as it is.
 var pgMigrations = [][]string{
 	{
 		`CREATE TABLE qh.workspaces (
@@ -112,13 +117,15 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	if f := os.Getenv("QH_STORE_PASSWORD_FILE"); f != "" {
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return nil, fmt.Errorf("store: cannot read QH_STORE_PASSWORD_FILE %s", f)
+			// The *PathError names the path and the cause, never the contents.
+			return nil, fmt.Errorf("store: cannot read QH_STORE_PASSWORD_FILE: %w", err)
 		}
 		cfg.Password = strings.TrimRight(string(b), "\r\n")
 	}
 	db := stdlib.OpenDB(*cfg)
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := pingUntil(ctx, db, time.Now().Add(pgOpenRetry)); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: cannot reach the postgres store at %s:%d: %s", cfg.Host, cfg.Port, redactErr(err, cfg.Password))
@@ -189,8 +196,16 @@ func (p *Postgres) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(migrateLock)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS qh`); err != nil {
+	// CREATE SCHEMA IF NOT EXISTS needs CREATE on the database even when the
+	// schema exists, so a role that owns a pre-created qh schema would fail.
+	var schemaExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'qh')`).Scan(&schemaExists); err != nil {
 		return err
+	}
+	if !schemaExists {
+		if _, err := tx.ExecContext(ctx, `CREATE SCHEMA qh`); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS qh.schema_migrations (
 		version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {

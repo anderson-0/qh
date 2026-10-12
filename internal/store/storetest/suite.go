@@ -27,6 +27,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 		"ConnectionSSHAndRefsSummaries":            testConnectionSSHAndRefsSummaries,
 		"ResealConnections":                        testResealConnections,
 		"CreateKeyIfNone":                          testCreateKeyIfNone,
+		"CreateKeyIfNoneUnknownWorkspace":          testCreateKeyIfNoneUnknownWorkspace,
 		"Import":                                   testImport,
 	} {
 		t.Run(name, func(t *testing.T) { fn(t, open(t)) })
@@ -397,6 +398,13 @@ func testCreateKeyIfNone(t *testing.T, s store.Store) {
 	}
 	if n, _ := s.CountKeys(ctx); n != 1 {
 		t.Fatalf("keys = %d", n)
+	}
+}
+
+func testCreateKeyIfNoneUnknownWorkspace(t *testing.T, s store.Store) {
+	k := &store.APIKey{ID: store.NewID(), Prefix: "qh_dddddddd", Hash: []byte{4}, Scopes: []string{"query"}, WorkspaceID: "nope"}
+	if created, err := s.CreateKeyIfNone(context.Background(), k); err != store.ErrNotFound || created {
+		t.Fatalf("unknown workspace: %v %v", created, err)
 	}
 }
 

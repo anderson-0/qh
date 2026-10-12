@@ -193,6 +193,13 @@ func TestBootstrap(t *testing.T) {
 	}
 }
 
+// staleCount reports no keys even when some exist, as a Bootstrap that read
+// the count just before another instance created the first key would see.
+type staleCount struct{ store.Store }
+
+func (staleCount) CountKeys(context.Context) (int, error) { return 0, nil }
+
+// TestBootstrapTwiceWithFixedKeyDoesNotFail guards the CountKeys fast path only.
 func TestBootstrapTwiceWithFixedKeyDoesNotFail(t *testing.T) {
 	st := newStore(t)
 	fixed := "qh_" + strings.Repeat("a", 8) + "_" + strings.Repeat("b", 40)
@@ -203,6 +210,26 @@ func TestBootstrapTwiceWithFixedKeyDoesNotFail(t *testing.T) {
 	_, created, err = Bootstrap(context.Background(), st, fixed)
 	if err != nil || created {
 		t.Fatalf("second: %v %v", created, err)
+	}
+}
+
+func TestBootstrapLostRace(t *testing.T) {
+	ctx := context.Background()
+	fixed := "qh_" + strings.Repeat("a", 8) + "_" + strings.Repeat("b", 40)
+	for name, key := range map[string]string{"fixed": fixed, "generated": ""} {
+		t.Run(name, func(t *testing.T) {
+			st := newStore(t)
+			if _, created, err := Bootstrap(ctx, st, key); err != nil || !created {
+				t.Fatalf("first: %v %v", created, err)
+			}
+			tok, created, err := Bootstrap(ctx, staleCount{st}, key)
+			if err != nil || created || tok != "" {
+				t.Fatalf("lost race: %q %v %v", tok, created, err)
+			}
+			if n, _ := st.CountKeys(ctx); n != 1 {
+				t.Fatalf("keys = %d", n)
+			}
+		})
 	}
 }
 

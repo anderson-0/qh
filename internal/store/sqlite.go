@@ -567,7 +567,7 @@ func (s *SQLite) CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error) {
 		return false, err
 	}
 	if n > 0 {
-		_, err := conn.ExecContext(ctx, "ROLLBACK")
+		_, err := conn.ExecContext(context.Background(), "ROLLBACK")
 		return false, err
 	}
 	now := s.now()
@@ -581,8 +581,11 @@ func (s *SQLite) CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error) {
 	if _, err := conn.ExecContext(ctx, `INSERT INTO api_keys (`+keyColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
 		k.ID, ws, k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now.Format(time.RFC3339Nano), formatTime(k.ExpiresAt), by); err != nil {
 		conn.ExecContext(context.Background(), "ROLLBACK")
-		if isUnique(err) {
+		switch {
+		case isUnique(err):
 			return false, ErrExists
+		case isForeignKey(err):
+			return false, ErrNotFound
 		}
 		return false, err
 	}

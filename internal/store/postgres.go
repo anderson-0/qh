@@ -439,8 +439,11 @@ func (p *Postgres) CreateKeyIfNone(ctx context.Context, k *APIKey) (bool, error)
 	now := p.now()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO qh.api_keys (`+keyColumns+`) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9)`,
 		k.ID, nullString(k.WorkspaceID), k.Prefix, k.Hash, strings.Join(k.Scopes, ","), k.Name, now, nullTime(k.ExpiresAt), nullString(k.CreatedBy)); err != nil {
-		if isPGUnique(err) {
+		switch {
+		case isPGUnique(err):
 			return false, ErrExists
+		case isPGForeignKey(err):
+			return false, ErrNotFound
 		}
 		return false, err
 	}

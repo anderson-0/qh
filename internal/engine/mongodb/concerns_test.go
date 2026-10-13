@@ -95,6 +95,12 @@ func TestConcernsReachCommands(t *testing.T) {
 	if rp := runPref(t, c.readOpts()); rp == nil || rp.Mode() != readpref.SecondaryPreferredMode {
 		t.Errorf("readOpts: %v", rp)
 	}
+	if rp := runPref(t, c.explainOpts(mustOp(t, `db.t.find()`))); rp == nil || rp.Mode() != readpref.SecondaryPreferredMode {
+		t.Errorf("explain of a read: %v", rp)
+	}
+	if rp := runPref(t, c.explainOpts(mustOp(t, `db.t.aggregate([{$out: "x"}])`))); rp != nil {
+		t.Errorf("explain of a write: %v", rp)
+	}
 	if _, ok := lookup(c.readCmd(bson.D{{Key: "count", Value: "t"}}), "readConcern"); !ok {
 		t.Error("introspection count has no readConcern")
 	}

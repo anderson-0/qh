@@ -472,7 +472,7 @@ func changed(reply bson.Raw, op *Op) int64 {
 }
 
 func (c *conn) explain(ctx context.Context, d *mongo.Database, op *Op) (*engine.Result, error) {
-	reply, err := d.RunCommand(ctx, op.explainCommand(), c.readOpts()).Raw()
+	reply, err := d.RunCommand(ctx, op.explainCommand(), c.explainOpts(op)).Raw()
 	if err != nil {
 		return nil, err
 	}

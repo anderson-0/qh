@@ -142,6 +142,21 @@ func (c *conn) namespace(ctx context.Context, db string) (engine.Namespace, erro
 // notSampled is the comment of a collection the catalog's time limit cut.
 const notSampled = "not sampled (time limit)"
 
+// timeLimitSlack is how close to the parent's deadline a server timeout
+// counts as the time limit: the driver sends maxTimeMS as the time left less
+// the round trip, so MaxTimeMSExpired can arrive just before ctx is done.
+const timeLimitSlack = 250 * time.Millisecond
+
+// cutByTimeLimit reports whether a sampling error came from the catalog's
+// time limit (parent) rather than from the collection itself.
+func cutByTimeLimit(parent context.Context, err error) bool {
+	if parent.Err() != nil {
+		return true
+	}
+	d, ok := parent.Deadline()
+	return ok && mongo.IsTimeout(err) && time.Until(d) < timeLimitSlack
+}
+
 // describe counts, lists the indexes of, and samples one collection, with
 // the index listing running alongside the count and the sample. Each step
 // that fails leaves its part empty; the catalog still builds.
@@ -191,7 +206,7 @@ func (c *conn) describe(parent context.Context, d *mongo.Database, db string, ci
 	}
 	inf := infer(docs)
 	obj.Fields, obj.Comment = inf.fields, inf.comment
-	if err != nil && parent.Err() != nil {
+	if err != nil && cutByTimeLimit(parent, err) {
 		obj.Comment = notSampled
 	}
 	<-listed

@@ -63,7 +63,7 @@ Agents that work with MongoDB today reach it through MongoDB's official MCP serv
 - **Dialling:** `spec.Dial`, when set, becomes the driver's `ContextDialer`, so netguard (server mode) and SSH tunnels apply to every host the driver contacts. SRV and TXT lookups use the system resolver; their results are still dialled through `spec.Dial`.
 - **TLS:** `spec.TLS`, when set, replaces the URL's TLS options through `TLS.Config(host)`.
 - **Passwords:** `spec.Password` (a resolved `password_ref`) replaces the URL's password. Errors are scrubbed of the password and the full DSN, the same way as for SQL engines.
-- **Read preference and concerns:** the connection string's `readPreference` (with its tags and `maxStalenessSeconds`), `readConcernLevel` and write concern (`w`, `journal`) apply to every command. Reads, explain and introspection go by the read preference, and `find`, `aggregate`, `distinct` and `count` carry the read concern. Writes and admin calls carry the write concern and always go to the primary. The driver ignores `wtimeoutMS`.
+- **Read preference and concerns:** the connection string's `readPreference` (with its tags and `maxStalenessSeconds`), `readConcernLevel` and write concern (`w`, `journal`) apply to every command. Reads, explain of a read, and introspection go by the read preference, and `find`, `aggregate`, `distinct` and `count` carry the read concern. Writes and admin calls carry the write concern and always go to the primary. The driver ignores `wtimeoutMS`.
 - **Server mode (`CheckServerDSN`):** an allowlist.
   - Option names are lowercased exactly as the driver lowercases them, and non-ASCII names are refused.
   - Allowed: authentication (`authSource`, `authMechanism`); replica sets and topology (`replicaSet`, `directConnection`, `loadBalanced`, `srvMaxHosts`, `srvServiceName`); `tls` and `ssl`; read and write concerns and read preference; timeouts, pool sizes, compression, `appName` and `serverMonitoringMode`.
@@ -149,7 +149,7 @@ Agents that work with MongoDB today reach it through MongoDB's official MCP serv
   - `insertOne` and `insertMany` also return their `_id` values as rows, at most `max_rows` of them;
   - the `findOneAnd*` methods return the document, as a read does;
   - a write that fails part-way reports how much was applied.
-- **Admin calls:** `RowsAffected = 0`, and for `createIndex(es)` an `index` column with a row per index name.
+- **Admin calls:** `RowsAffected = 0`, except `createIndex(es)`, which returns an `index` column with one row per index name.
 - **Explain:** one row, one column `plan`, holding the compact JSON of `queryPlanner.winningPlan`.
 
 ### 4.6 Errors
@@ -186,7 +186,7 @@ The catalog uses the existing cache, TTL and shared invalidation (Plan 8).
   - Fields come from `$sample: {size: 100}`. For collections of 100 documents or fewer, a plain `find` with limit 100 is used instead.
   - Sampling runs 4 collections at a time, each with a 5 s timeout, and stops at 8 MiB of documents per collection.
   - A collection whose sampling fails or times out is listed with its count and indexes and no fields. The build still succeeds.
-  - When the catalog's time limit is reached, the remaining collections are listed unsampled, with the comment `not sampled (time limit)`.
+  - When the catalog's time limit is reached, the remaining collections are listed unsampled, with the comment `not sampled (time limit)`, and databases not yet listed appear empty.
 - **Views** are sampled in the same way, through `find` with limit 100.
 
 ### 5.2 Fields

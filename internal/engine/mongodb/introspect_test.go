@@ -288,3 +288,30 @@ func TestIntrospectTimeLimitKeepsWhatWasBuilt(t *testing.T) {
 		t.Errorf("users: %+v", u)
 	}
 }
+
+func TestCutByTimeLimit(t *testing.T) {
+	maxTime := mongo.CommandError{Code: 50, Name: "MaxTimeMSExpired", Message: "operation exceeded time limit"}
+	other := mongo.CommandError{Code: 2, Name: "BadValue", Message: "bad"}
+	near, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	far, cancel2 := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel2()
+	done, cancel3 := context.WithCancel(context.Background())
+	cancel3()
+	for _, tc := range []struct {
+		name   string
+		parent context.Context
+		err    error
+		want   bool
+	}{
+		{"parent done", done, other, true},
+		{"server timeout near the deadline", near, maxTime, true},
+		{"other error near the deadline", near, other, false},
+		{"server timeout far from the deadline", far, maxTime, false},
+		{"no deadline", context.Background(), maxTime, false},
+	} {
+		if got := cutByTimeLimit(tc.parent, tc.err); got != tc.want {
+			t.Errorf("%s: %v", tc.name, got)
+		}
+	}
+}

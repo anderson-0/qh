@@ -46,6 +46,15 @@ func (c *concerns) readOpts() *options.RunCmdOptionsBuilder {
 	return o
 }
 
+// explainOpts are the run options of an explain: the read preference for a
+// read, the primary otherwise.
+func (c *concerns) explainOpts(op *Op) *options.RunCmdOptionsBuilder {
+	if op.Access == engine.Read {
+		return c.readOpts()
+	}
+	return options.RunCmd()
+}
+
 // readCmd returns cmd with readConcern added when it is set and cmd takes one.
 func (c *concerns) readCmd(cmd bson.D) bson.D {
 	if c.rc == nil || c.rc.Level == "" || len(cmd) == 0 || !contains(readConcernCommands, cmd[0].Key) {

@@ -272,6 +272,10 @@ func connDied(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	var ce *pgconn.ConnectError
+	if errors.As(err, &ce) {
+		return false // a new connection could not be made; trying again at once will not help
+	}
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) {
 		// The server ends the session after any FATAL error (57P05

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -80,6 +81,23 @@ func TestConnDied(t *testing.T) {
 			if got := connDied(err); got != tc.want {
 				t.Errorf("connDied(%v) = %v, want %v", err, got, tc.want)
 			}
+		}
+	}
+}
+
+// A failure to open a new connection is not a dead pooled one: trying again at
+// once would only redial (a refused port, a wrong password, a full server).
+func TestConnDiedIgnoresConnectErrors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pgx.Connect(ctx, "postgres://qh:pw-123456@127.0.0.1:1/qh?sslmode=disable&connect_timeout=2")
+	var ce *pgconn.ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("want a *pgconn.ConnectError, got %T: %v", err, err)
+	}
+	for _, err := range []error{err, fmt.Errorf("wrapped: %w", err)} {
+		if connDied(err) {
+			t.Errorf("connDied(%v) = true, want false", err)
 		}
 	}
 }

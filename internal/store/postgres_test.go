@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -535,7 +537,9 @@ func TestPostgresReadsSurviveTerminatedConnections(t *testing.T) {
 			}
 		})
 	}
-	// Ping takes no lock: end every pooled session instead.
+	// Ping takes no lock, so it only gets a resilience smoke test: end every
+	// pooled session, then ping. database/sql or pgx's ResetSession may recover
+	// Ping on their own, so this does not prove read's retry.
 	t.Run("Ping", func(t *testing.T) {
 		killOthers(t, adminDB(t, dsn, 1))
 		if err := s.Ping(ctx); err != nil {
@@ -635,8 +639,7 @@ func (p *tcpProxy) serve() {
 			return
 		}
 		if p.refuse.Load() {
-			c.Close()
-			p.refused.Add(1)
+			go p.refuseConn(c)
 			continue
 		}
 		s, err := net.Dial("tcp", p.target)
@@ -651,6 +654,22 @@ func (p *tcpProxy) serve() {
 		go l.pipe(s, c)
 		go l.pipe(c, s)
 	}
+}
+
+// cancelRequestCode opens a CancelRequest packet (pgx sends one for a lost
+// connection); it is not a connection attempt.
+const cancelRequestCode = 80877102
+
+// refuseConn counts c as refused, unless it is a cancel request, and then
+// closes it: the count is updated before the client sees the close.
+func (p *tcpProxy) refuseConn(c net.Conn) {
+	defer c.Close()
+	var head [8]byte
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(c, head[:]); err == nil && binary.BigEndian.Uint32(head[4:]) == cancelRequestCode {
+		return
+	}
+	p.refused.Add(1)
 }
 
 func (l *proxyLink) pipe(dst, src net.Conn) {
@@ -817,9 +836,8 @@ func TestPostgresListenerLogsReconnectFailures(t *testing.T) {
 	}
 	px.refuse.Store(true)
 	px.kill()
-	// Let at least two reconnects fail. Other dials reach the proxy too (pgx
-	// sends a cancel request for the lost connection), so count refusals only
-	// after the first failure is logged: the next one is the second attempt.
+	// Let at least two reconnects fail: once the first failure is logged, the
+	// next refusal is the second attempt (cancel requests are not counted).
 	waitFor := func(what string, cond func() bool) {
 		t.Helper()
 		for deadline := time.Now().Add(15 * time.Second); !cond(); {

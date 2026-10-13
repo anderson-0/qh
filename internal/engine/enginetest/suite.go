@@ -141,33 +141,57 @@ func Run(t *testing.T, h Harness) {
 	})
 
 	t.Run("introspect", func(t *testing.T) {
+		RunCatalog(t, CatalogHarness{Engine: h.Engine, Spec: roSpec, IDColumn: "id", GoldenPrefix: h.GoldenPrefix})
 		cat, err := ro.Introspect(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		orders, users, items, paid := one(t, cat, "orders"), one(t, cat, "users"), one(t, cat, "order_items"), one(t, cat, "paid_orders")
-		if !hasFK(orders, "user_id", "users", "id") {
-			t.Errorf("orders FKs: %+v", orders.ForeignKeys)
-		}
-		if len(users.ReferencedBy) == 0 || users.ReferencedBy[0].Object != "orders" {
-			t.Errorf("users.ReferencedBy: %+v", users.ReferencedBy)
-		}
-		if !reflect.DeepEqual(items.PrimaryKey, []string{"order_id", "sku"}) {
+		if items := one(t, cat, "order_items"); !reflect.DeepEqual(items.PrimaryKey, []string{"order_id", "sku"}) {
 			t.Errorf("order_items PK: %v", items.PrimaryKey)
 		}
-		if paid.Kind != engine.KindView {
-			t.Errorf("paid_orders kind: %v", paid.Kind)
-		}
-		if !hasUniqueIndex(users, "email") {
-			t.Errorf("users indexes: %+v", users.Indexes)
-		}
-		overview, _ := format.Schema(cat, format.SchemaOpts{})
-		golden(t, h.GoldenPrefix+"_overview.golden", overview)
-		ordersOut, _ := format.Schema(cat, format.SchemaOpts{Object: "orders"})
-		golden(t, h.GoldenPrefix+"_orders.golden", ordersOut)
-		usersOut, _ := format.Schema(cat, format.SchemaOpts{Object: "users"})
-		golden(t, h.GoldenPrefix+"_users.golden", usersOut)
 	})
+}
+
+// CatalogHarness adapts an engine to the catalog checks, which document
+// engines pass too.
+type CatalogHarness struct {
+	Engine engine.Engine
+	// Spec opens a connection to a database loaded with the engine's fixture
+	// (users, orders referencing users, order_items, the paid_orders view).
+	Spec engine.ConnSpec
+	// IDColumn is the key that orders.user_id references: "id" in SQL,
+	// "_id" in MongoDB.
+	IDColumn     string
+	GoldenPrefix string
+}
+
+// RunCatalog checks Introspect against the fixture and the golden files.
+func RunCatalog(t *testing.T, h CatalogHarness) {
+	ctx := context.Background()
+	c := open(t, h.Engine, h.Spec)
+	cat, err := c.Introspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders, users, paid := one(t, cat, "orders"), one(t, cat, "users"), one(t, cat, "paid_orders")
+	if !hasFK(orders, "user_id", "users", h.IDColumn) {
+		t.Errorf("orders FKs: %+v", orders.ForeignKeys)
+	}
+	if len(users.ReferencedBy) == 0 || users.ReferencedBy[0].Object != "orders" {
+		t.Errorf("users.ReferencedBy: %+v", users.ReferencedBy)
+	}
+	if paid.Kind != engine.KindView {
+		t.Errorf("paid_orders kind: %v", paid.Kind)
+	}
+	if !hasUniqueIndex(users, "email") {
+		t.Errorf("users indexes: %+v", users.Indexes)
+	}
+	overview, _ := format.Schema(cat, format.SchemaOpts{})
+	golden(t, h.GoldenPrefix+"_overview.golden", overview)
+	ordersOut, _ := format.Schema(cat, format.SchemaOpts{Object: "orders"})
+	golden(t, h.GoldenPrefix+"_orders.golden", ordersOut)
+	usersOut, _ := format.Schema(cat, format.SchemaOpts{Object: "users"})
+	golden(t, h.GoldenPrefix+"_users.golden", usersOut)
 }
 
 func open(t *testing.T, e engine.Engine, spec engine.ConnSpec) engine.Conn {

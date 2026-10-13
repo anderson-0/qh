@@ -50,7 +50,7 @@ type connFlags struct {
 func (f *connFlags) register(cmd *cobra.Command, create bool) {
 	fl := cmd.Flags()
 	if create {
-		fl.StringVar(&f.engine, "engine", "", "postgres, mysql (alias mariadb) or sqlite (required)")
+		fl.StringVar(&f.engine, "engine", "", "postgres, mysql (alias mariadb), sqlite or mongodb (required)")
 		fl.StringVar(&f.host, "host", "", "database host, instead of --dsn")
 		fl.IntVar(&f.port, "port", 0, "database port (default: the engine's)")
 		fl.StringVar(&f.database, "database", "", "database name, or the file path for sqlite")

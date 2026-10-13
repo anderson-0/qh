@@ -165,8 +165,12 @@ func TestServerModeTunnelNeedsTargetPolicy(t *testing.T) {
 // leakEngine fails to open with an error quoting the resolved secrets.
 type leakEngine struct{}
 
-func (leakEngine) Name() string                           { return "qhtest-leak" }
-func (leakEngine) Dialect() sqlx.Dialect                  { return sqlx.Postgres }
+func (leakEngine) Name() string                             { return "qhtest-leak" }
+func (leakEngine) Dialect() sqlx.Dialect                    { return sqlx.Postgres }
+func (leakEngine) Classify(q string) (engine.Access, error) { return sqlx.Classify(q, sqlx.Postgres) }
+func (leakEngine) ReferencedObjects(q string) []string {
+	return sqlx.ReferencedTables(q, sqlx.Postgres)
+}
 func (leakEngine) Inspect(string) (engine.DSNInfo, error) { return engine.DSNInfo{}, nil }
 func (leakEngine) Open(_ context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 	return nil, qerr.New(qerr.ConnectionFailed, "cannot open "+spec.DSN+" with "+spec.Password).WithHint("password was " + spec.Password)

@@ -1,6 +1,6 @@
 # qh benchmark
 
-Compares qh with [bytebase/dbhub](https://github.com/bytebase/dbhub) on Pagila (Postgres), Sakila (MySQL), Chinook (SQLite) and Lendco (Postgres).
+Compares qh with a rival MCP database server: [bytebase/dbhub](https://github.com/bytebase/dbhub) on Pagila (Postgres), Sakila (MySQL), Chinook (SQLite) and Lendco (Postgres), or MongoDB's official [mongodb-mcp-server](https://github.com/mongodb-js/mongodb-mcp-server) on Pagila and Lendco modelled as documents.
 
 Models know the first three sample databases by heart, so they can answer without looking at the schema. Lendco is Pagila's data rebuilt under unfamiliar table and column names (`harness/lendco.sql`), so its questions measure schema discovery too. Its 30 questions mirror Pagila's, and a test checks that each has the same answer as its Pagila twin.
 
@@ -19,7 +19,7 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
 ## Requirements
 
 - Docker.
-- Node 22.5 or later, with `npx`, for dbhub.
+- Node 22.5 or later, with `npx`, for dbhub and mongodb-mcp-server.
 - `ANTHROPIC_API_KEY`, for agent runs and token counting.
 - `ANTHROPIC_WORKSPACE_ID`, only for an API key that is not scoped to a workspace: it is sent as the `anthropic-workspace-id` header.
 
@@ -33,6 +33,25 @@ make bench ARGS="-skip-agent -skip-tokens"   # micro-benchmarks only, no API key
 ```
 
 Run the `-limit 1 -runs 1` smoke run before a full run: it checks your API key, the model id and both servers for a few cents.
+
+## MongoDB
+
+```bash
+make bench ARGS="-rival mongodb-mcp -limit 1 -runs 1"   # smoke run first
+make bench ARGS="-rival mongodb-mcp"                    # pagila-docs and lendco-docs, 3 runs
+```
+
+- **Rival:** MongoDB's official [`mongodb-mcp-server`](https://github.com/mongodb-js/mongodb-mcp-server), pinned to 3.0.5 and run with `--readOnly` and telemetry off.
+- **Datasets:** `pagila-docs` and `lendco-docs` are Pagila and Lendco modelled as documents.
+  - Addresses are embedded, films embed their actors and categories, and rentals and payments reference other collections by key.
+  - They reuse the 60 SQL questions. Every question has an aggregate twin that a test checks against the SQL reference answer.
+- **Fairness:**
+  - Neither server gets a dataset description, because mongodb-mcp-server has no place for one.
+  - Both servers cap results at 100 rows or documents by default.
+  - mongodb-mcp-server serves one connection per process, so its tool-definition tokens are measured with one connection.
+  - mongodb-mcp-server's `find` returns 10 documents unless the model passes a limit; its cap is 100.
+  - mongodb-mcp-server wraps its results in an `<untrusted-user-data>` notice. That is its real behaviour and the benchmark keeps it, so it costs that server tokens.
+- **Cost:** about 360 conversations (60 questions × 3 runs × 2 servers), roughly half a SQL run.
 
 ## Cost and time
 

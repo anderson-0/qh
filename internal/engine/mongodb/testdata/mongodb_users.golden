@@ -1,0 +1,9 @@
+shop.users ~3 rows
+  _id int PK
+  email string NN
+  name string
+  bio string
+  avatar binData
+  created_at date
+  ← orders.user_id, paid_orders.user_id
+  idx unique(email)

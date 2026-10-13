@@ -7,7 +7,7 @@ import (
 )
 
 func sampleReport() *Report {
-	r := &Report{Date: "2026-10-11", Model: "claude-sonnet-5-5", Effort: "high", Runs: 1, DBHubVersion: "1.5.0",
+	r := &Report{Date: "2026-10-11", Model: "claude-sonnet-5-5", Effort: "high", Runs: 1, RivalVersion: "1.5.0",
 		ToolTokens: map[string][]int64{"qh": {400, 400, 400, 400, 400}, "dbhub": {500, 1000, 1500, 2000, 2500}},
 		ColdSchema: map[string]time.Duration{"qh": 400 * time.Millisecond, "dbhub": 9 * time.Second},
 		LatencyP50: map[string]time.Duration{"qh": 2 * time.Millisecond, "dbhub": 4 * time.Millisecond},
@@ -164,5 +164,34 @@ func TestCriteriaUseOnlyPairedRuns(t *testing.T) {
 	r = &Report{Results: []Result{{Dataset: "chinook", Server: "qh", Question: "chinook-09", Run: 1, Aborted: true}}}
 	if strings.Contains(r.Markdown(), "chinook-09") {
 		t.Error("all-aborted question listed")
+	}
+}
+
+func TestReportNamesTheRival(t *testing.T) {
+	rep := &Report{Date: "2026-10-12", Model: "m", Runs: 1, Rival: "mongodb-mcp", RivalVersion: "3.0.5",
+		ToolTokens: map[string][]int64{"qh": {400}, "mongodb-mcp": {4000}}, ColdSchema: map[string]time.Duration{"qh": 2 * time.Second},
+		LatencyP50: map[string]time.Duration{}, LatencyP95: map[string]time.Duration{},
+		Results: []Result{
+			{Dataset: "pagila-docs", Server: "qh", Question: "q1", Kind: "lookup", Run: 1, Correct: true, InputTokens: 600, OutputTokens: 100, ToolCalls: 1},
+			{Dataset: "pagila-docs", Server: "mongodb-mcp", Question: "q1", Kind: "lookup", Run: 1, Correct: true, InputTokens: 1800, OutputTokens: 200, ToolCalls: 3},
+		}}
+	md := rep.Markdown()
+	if strings.Contains(md, "dbhub") || !strings.Contains(md, "# qh vs mongodb-mcp benchmark") || !strings.Contains(md, "mongodb-mcp 3.0.5") {
+		t.Fatalf("report:\n%s", md)
+	}
+	var tokens, cold Criterion
+	for _, c := range Criteria(rep) {
+		switch c.Name {
+		case "tokens":
+			tokens = c
+		case "cold schema":
+			cold = c
+		}
+	}
+	if !tokens.Known || !tokens.Pass || tokens.Target != "≥ 40% fewer than mongodb-mcp" {
+		t.Errorf("tokens criterion: %+v", tokens)
+	}
+	if cold.Label != "Cold schema build, 1,000 collections" || cold.Target != "< 5 s" || !cold.Pass {
+		t.Errorf("cold criterion: %+v", cold)
 	}
 }

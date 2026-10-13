@@ -1,4 +1,4 @@
-// Package harness runs the qh vs dbhub benchmark: datasets, questions,
+// Package harness runs the qh benchmark against dbhub or mongodb-mcp-server: datasets, questions,
 // servers under test, the agent loop and the report.
 package harness
 
@@ -30,7 +30,7 @@ import (
 // Dataset is a loaded sample database.
 type Dataset struct {
 	Name        string
-	Engine      string // postgres, mysql or sqlite
+	Engine      string // postgres, mysql, sqlite or mongodb
 	DSN         string // what the servers under test connect with
 	Description string // the same text is given to both servers
 	DB          *sql.DB
@@ -126,8 +126,12 @@ func StartDataset(ctx context.Context, name string) (*Dataset, func(), error) {
 		return OpenChinook(ctx)
 	case "lendco":
 		return StartLendco(ctx)
+	case "pagila-docs":
+		return StartPagilaDocs(ctx)
+	case "lendco-docs":
+		return StartLendcoDocs(ctx)
 	}
-	return nil, nil, fmt.Errorf("unknown dataset %q (want pagila, sakila, chinook or lendco)", name)
+	return nil, nil, fmt.Errorf("unknown dataset %q (want pagila, sakila, chinook, lendco, pagila-docs or lendco-docs)", name)
 }
 
 // StartPagila loads Pagila into a Postgres 17 container.

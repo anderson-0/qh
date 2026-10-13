@@ -35,7 +35,7 @@ func TestMicroQH(t *testing.T) {
 	}
 	defer cleanup()
 	start := func(ctx context.Context) (Server, error) { return StartQH(ctx, bin, []Conn{ConnFor(gen)}) }
-	prefix, args := SchemaCall("qh", gen.Name)
+	prefix, args := SchemaCall("qh", gen)
 	d, err := ColdSchema(ctx, start, prefix, args)
 	if err != nil || d <= 0 {
 		t.Fatalf("cold schema: %v %v", d, err)
@@ -49,7 +49,7 @@ func TestMicroQH(t *testing.T) {
 	if out, _ := srv.Call(ctx, "schema", args); !strings.Contains(out, "t_0049") {
 		t.Fatalf("generated tables missing: %q", out[:min(len(out), 300)])
 	}
-	qp, argsFor := QueryCall("qh", gen.Name)
+	qp, argsFor := QueryCall("qh", gen)
 	p50, p95, err := QueryLatency(ctx, srv, FindTool(srv.Tools(), qp), argsFor, []string{"SELECT count(*) FROM t_0001"}, 1, 5)
 	if err != nil || p50 <= 0 || p95 < p50 {
 		t.Fatalf("latency: %v %v %v", p50, p95, err)
@@ -77,7 +77,7 @@ func TestMicroDBHub(t *testing.T) {
 	start := func(ctx context.Context) (Server, error) {
 		return StartDBHub(ctx, DefaultDBHubVersion, []Conn{ConnFor(gen)})
 	}
-	prefix, args := SchemaCall("dbhub", gen.Name)
+	prefix, args := SchemaCall("dbhub", gen)
 	d, err := ColdSchema(ctx, start, prefix, args)
 	if err != nil || d <= 0 {
 		t.Fatalf("cold schema: %v %v", d, err)
@@ -92,10 +92,40 @@ func TestMicroDBHub(t *testing.T) {
 	if isErr || !strings.Contains(out, "t_0049") {
 		t.Fatalf("generated tables missing: %v %q", isErr, out[:min(len(out), 300)])
 	}
-	qp, argsFor := QueryCall("dbhub", gen.Name)
+	qp, argsFor := QueryCall("dbhub", gen)
 	p50, p95, err := QueryLatency(ctx, srv, FindTool(srv.Tools(), qp), argsFor, []string{"SELECT count(*) FROM t_0001"}, 1, 5)
 	if err != nil || p50 <= 0 || p95 < p50 {
 		t.Fatalf("latency: %v %v %v", p50, p95, err)
 	}
 	t.Logf("dbhub query latency: p50 %v p95 %v", p50, p95)
+}
+
+func TestMongoCalls(t *testing.T) {
+	ds := &Dataset{Name: "pagila-docs", Engine: "mongodb", DSN: "mongodb://127.0.0.1:1/pagila?directConnection=true"}
+	twin := `{"collection":"films","pipeline":[{"$match":{"rating":"PG"}},{"$count":"n"}]}`
+
+	name, args := SchemaCall("mongodb-mcp", ds)
+	if name != "list-collections" || string(args) != `{"connectionId":"preconfigured","database":"pagila"}` {
+		t.Errorf("schema call: %s %s", name, args)
+	}
+	if name, _ := SchemaCall("qh", ds); name != "schema" {
+		t.Errorf("qh schema tool %q", name)
+	}
+
+	name, argsFor := QueryCall("mongodb-mcp", ds)
+	var got struct {
+		ConnectionID, Database, Collection string
+		Pipeline                           []map[string]any
+	}
+	if err := json.Unmarshal(argsFor(twin), &got); err != nil || name != "aggregate" ||
+		got.ConnectionID != "preconfigured" || got.Database != "pagila" || got.Collection != "films" || len(got.Pipeline) != 2 {
+		t.Errorf("mongodb-mcp query: %s %s %v", name, argsFor(twin), err)
+	}
+
+	name, argsFor = QueryCall("qh", ds)
+	var q map[string]string
+	if err := json.Unmarshal(argsFor(twin), &q); err != nil || name != "query" || q["source"] != "pagila-docs" ||
+		q["query"] != `db["films"].aggregate([{"$match":{"rating":"PG"}},{"$count":"n"}])` {
+		t.Errorf("qh mongo query: %s %v", argsFor(twin), err)
+	}
 }

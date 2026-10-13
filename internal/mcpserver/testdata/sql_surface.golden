@@ -1,0 +1,60 @@
+{
+  "Instructions": "Query directly if you know the names; else call schema first. Errors on unknown names suggest close matches. Connection: shop (sqlite, ro). source may be omitted.",
+  "Tools": [
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Run one SQL statement. Returns TSV, at most 100 rows unless max_rows is set.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "explain": {
+            "description": "plan only",
+            "type": "boolean"
+          },
+          "max_rows": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "query"
+    },
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "No arguments: tables with columns, PKs and FK targets (names only for large schemas). pattern (* wildcard) or object: types, NN (not null), FKs (→ references, ← referenced by), enums, indexes.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "object": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "schema"
+    }
+  ]
+}

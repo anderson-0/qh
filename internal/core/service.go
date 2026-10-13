@@ -23,7 +23,6 @@ import (
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secret"
 	"github.com/anderson-0/qh/internal/secretref"
-	"github.com/anderson-0/qh/internal/sqlx"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/suggest"
 )
@@ -175,7 +174,7 @@ func (s *Service) checkDSN(eng engine.Engine, dsn string) error {
 func (s *Service) connSpec(ws, id string, version int64, in ConnInput) engine.ConnSpec {
 	spec := engine.ConnSpec{ID: id, Version: version, Engine: in.Engine, DSN: in.DSN, Mode: in.Mode, PoolSize: in.PoolSize,
 		Dial: s.opts.Dial, TLS: in.TLS, Server: s.opts.Dial != nil, SSH: in.SSH, DSNRef: in.DSNRef, PasswordRef: in.PasswordRef,
-		Resolve: s.refs.Resolve, CheckTarget: s.opts.CheckTarget}
+		Resolve: s.refs.Resolve, CheckTarget: s.opts.CheckTarget, Namespaces: in.AllowedNamespaces}
 	if s.opts.SQLiteRoot != "" {
 		spec.FileRoot = filepath.Join(s.opts.SQLiteRoot, ws)
 	}
@@ -344,12 +343,12 @@ func (s *Service) QueryResult(ctx context.Context, ws string, in QueryInput) (*e
 
 // runQuery classifies, guards and executes one statement on a resolved connection.
 func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engine.Result, error) {
-	access, err := sqlx.Classify(in.Query, t.eng.Dialect())
+	access, err := t.eng.Classify(in.Query)
 	if err != nil {
 		return nil, err
 	}
 	readOnly := t.spec.Mode != engine.ModeRW
-	if !in.Explain && readOnly && access != sqlx.Read {
+	if !in.Explain && readOnly && access != engine.Read {
 		return nil, qerr.New(qerr.ReadOnly, fmt.Sprintf("connection %q is read-only; only statements that read data are allowed", t.rec.Name)).
 			WithHint("Use a read-write connection to change data")
 	}
@@ -375,7 +374,7 @@ func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engi
 	}
 	// Any statement that is not a plain read may change the schema (DDL, but
 	// also a DO block or a function call), so drop the cached catalog.
-	if access != sqlx.Read && !in.Explain {
+	if access != engine.Read && !in.Explain {
 		s.invalidate(ctx, t.rec.ID)
 	}
 	return res, nil
@@ -446,7 +445,7 @@ func (s *Service) withSuggestions(ctx context.Context, conn engine.Conn, t *targ
 	}
 	out := *e
 	if out.UnknownColumn != "" {
-		out.Hint = suggest.ColumnHint(cat, out.UnknownColumn, sqlx.ReferencedTables(q, t.eng.Dialect()))
+		out.Hint = suggest.ColumnHint(cat, out.UnknownColumn, t.eng.ReferencedObjects(q))
 	} else {
 		out.Hint = suggest.TableHint(cat, out.UnknownTable)
 	}

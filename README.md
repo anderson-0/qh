@@ -8,7 +8,7 @@ whatever the number of connections, and names the connections in its MCP instruc
 | `schema` | Overview of tables with their columns, keys and foreign keys, or full definitions with types, foreign keys in both directions, enum values and indexes. With no arguments in a workspace with several connections, lists the connections |
 | `query` | Runs one statement and returns TSV, 100 rows by default, with a footer that says when rows were cut |
 
-Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+ and SQLite.
+Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+, SQLite and MongoDB (7 and 8).
 `qh serve` adds an HTTP server mode with a REST API, and `bench/` compares qh with dbhub (see `bench/README.md`).
 
 ## Install
@@ -224,6 +224,32 @@ qh --key "$ADMIN" --workspace team key create --scopes query,manage   # admin ke
 - Prefer `QH_KEY` to `--key`: command-line arguments are visible to other users of the machine and saved in shell history.
 - `mcp`, `serve` and `masterkey` always run locally.
 
+## MongoDB
+
+```bash
+qh conn add events --engine mongodb --dsn -    # paste mongodb://user:pw@host:27017/events
+qh query events 'db.orders.find({status: "paid"}).sort({total: -1}).limit(5)'
+```
+
+Agents query MongoDB through the same `schema` and `query` tools, in mongosh syntax. qh parses a fixed subset and never runs JavaScript:
+
+- **Reads:** `find`, `findOne`, `aggregate`, `countDocuments`, `estimatedDocumentCount`, `distinct`, `getIndexes` and `db.getCollectionNames()`. `find` takes `.sort`, `.limit`, `.skip`, `.project`, `.hint`, `.collation`, `.count()` and `.explain()`.
+- **Writes and admin calls:** these need a read-write connection. A write that is only partly applied reports how much was written.
+  - Document writes: `insertOne/Many`, `updateOne/Many`, `replaceOne`, `deleteOne/Many` and `findOneAnd*`.
+  - Aggregates with `$out`/`$merge`.
+  - Admin calls: `createIndex(es)`, `dropIndex(es)`, `drop`, `renameCollection` and `db.createCollection`.
+- **Literals:** relaxed JSON plus `ObjectId()`, `ISODate()`, `new Date("…")`, `NumberLong()`, `NumberInt()`, `NumberDecimal()`, `UUID()`, `Timestamp()`, `MinKey()`, `MaxKey()` and `/regex/flags`.
+- **Results:** TSV, with `_id` first. Nested documents and arrays are compact JSON, and a missing field is `NULL`.
+- **Schema:** sampled from up to 100 documents per collection.
+  - Fields show as dotted paths with their types, and the overview folds nested fields as `address{city,country,…}`.
+  - String fields list the values seen, ending in `…`, only when at least 50 sampled documents have the field, with at most 8 distinct values, none longer than 40 characters.
+  - Fields named `<x>_id`, `<x>Id`, `<x>_key` or `<x>_ref`, such as `customer_id`, show as references (`→customers`). The target is the collection named `<x>` or `<x>s`, or else the one collection whose name ends in `_<x>` or `_<x>s`. The field's type must match the target's `_id` type, and at least 4 of 5 sampled values must exist in the target (all of them, if fewer than 5 were sampled).
+- **Databases:** the database in the connection string is the default, and the only one qh introspects. If it names none, every non-system database is listed and `db.<collection>` uses `test`, as mongosh does. Without `--namespaces` (`allowed_namespaces` in the REST API), `db.getSiblingDB("x")` still reaches other databases, and the server's own authorisation decides what is allowed. With it, a query is refused with `forbidden` if it names another database, either through `getSiblingDB` or in a `$out`, `$merge`, `$lookup` or `$unionWith` stage.
+- **Server mode:** connection strings may only use an allowlist of options (names are matched the way the driver matches them): authentication and replica-set settings, `tls`/`ssl`, timeouts, pool sizes, read and write concerns, compression and similar. Options that read files on the server, such as `tlsCAFile`, `tlsCertificateKeyFile`, `tlsCertificateKeyFilePassword` and their `ssl*` aliases, are refused, and so are `tlsInsecure`, `tlsAllowInvalidCertificates` and `tlsAllowInvalidHostnames`. Use qh's TLS settings instead. `authMechanism` may be `SCRAM-SHA-1`, `SCRAM-SHA-256`, `PLAIN` or `MONGODB-X509`; the others (`MONGODB-AWS`, `GSSAPI`, `MONGODB-OIDC`) take the qh host's own credentials. `authMechanismProperties` is refused. The driver's OCSP checks go through the same address guard as database connections.
+- **Server-side JavaScript:** qh does not block `$where` and `$function`; they run as part of reads. On MongoDB 7 and 8 they have no database handle, so they cannot reach other databases. A MongoDB role cannot forbid them for a user who may `find` or `aggregate`; only disabling server-side scripting on the server (`security.javascriptEnabled: false`) does.
+
+Use a MongoDB user with the `read` role for read-only connections; qh checks every call, and the role is a second line of defence.
+
 ## Read-only safety
 
 On read-only connections every query runs in a read-only transaction (Postgres, MySQL/MariaDB) or on a file opened
@@ -253,7 +279,7 @@ Don't grant the `FILE` privilege: with it, `SELECT LOAD_FILE(...)` reads files o
 ## Development
 
 ```bash
-make test        # needs Docker for the Postgres and MySQL/MariaDB tests
+make test        # needs Docker for the Postgres, MySQL/MariaDB and MongoDB tests
 make test-short  # skips Docker tests
 make build       # static binary in bin/qh
 ```

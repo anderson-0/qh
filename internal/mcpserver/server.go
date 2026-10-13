@@ -19,6 +19,10 @@ import (
 // so they stay terse.
 const instructions = "Query directly if you know the names; else call schema first. Errors on unknown names suggest close matches."
 
+// mongoHint follows the connections line when a workspace has a MongoDB
+// connection; SQL-only workspaces never pay for it.
+const mongoHint = "mongodb sources take mongosh syntax: db.<collection>.find(…)/aggregate([…])."
+
 // maxListed caps the connections named in the instructions.
 const maxListed = 20
 
@@ -84,6 +88,12 @@ func withConnections(svc *core.Service, ws WorkspaceFunc) mcp.Middleware {
 			}
 			if list, lerr := svc.ListConnections(ctx, ws(ctx)); lerr == nil {
 				*in += " " + connectionsLine(list)
+				for _, c := range list {
+					if c.Engine == "mongodb" {
+						*in += " " + mongoHint
+						break
+					}
+				}
 			}
 			return res, nil
 		}

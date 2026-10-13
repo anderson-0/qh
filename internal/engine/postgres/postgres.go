@@ -41,8 +41,10 @@ var slotWait = 10 * time.Second
 // Engine is the PostgreSQL engine.
 type Engine struct{}
 
-func (Engine) Name() string          { return "postgres" }
-func (Engine) Dialect() sqlx.Dialect { return sqlx.Postgres }
+func (Engine) Name() string                             { return "postgres" }
+func (Engine) Dialect() sqlx.Dialect                    { return sqlx.Postgres }
+func (Engine) Classify(q string) (engine.Access, error) { return sqlx.Classify(q, sqlx.Postgres) }
+func (Engine) ReferencedObjects(q string) []string      { return sqlx.ReferencedTables(q, sqlx.Postgres) }
 
 // BuildDSN implements engine.DSNBuilder.
 func (Engine) BuildDSN(f engine.DSNFields) (string, error) { return engine.BuildURL("postgres", f) }

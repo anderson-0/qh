@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -45,40 +46,54 @@ func (Engine) ReferencedObjects(q string) []string {
 	return []string{c.Collection}
 }
 
-// uri is a parsed mongodb:// or mongodb+srv:// connection string. net/url
-// cannot parse a host list, so the parts are split by hand.
+// uri is a parsed mongodb:// or mongodb+srv:// connection string, split
+// exactly as the driver splits it (x/mongo/driver/connstring), so that
+// Inspect, redaction, TLS stripping and the server-mode check all see what
+// the driver will apply.
 type uri struct {
 	srv            bool
 	user, password string
 	hasPassword    bool
-	hosts          []string // host or host:port
+	pwStart, pwEnd int      // the raw password's byte offsets in the DSN; pwStart < 0 when there is none
+	hosts          []string // host or host:port, unescaped as the driver does
 	db             string
-	query          url.Values
+	hasPath        bool   // a "/" follows the hosts
+	base           string // the DSN up to the "?" before the options
+	options        []option
+}
+
+// option is one query option, in order.
+type option struct {
+	raw   string // as written, "key=value"
+	key   string // unescaped, in its original spelling
+	lkey  string // key lowered with strings.ToLower, as the driver does
+	value string // unescaped
 }
 
 func badURI() error {
 	return qerr.New(qerr.Invalid, "invalid mongodb connection string").
-		WithHint("The form is scheme://user:password@host:27017/database, where scheme is mongodb or mongodb+srv")
+		WithHint("The form is scheme://user:password@host:27017/database, where scheme is mongodb or mongodb+srv; escape @ : / ? in the user name and password as %40 %3A %2F %3F")
 }
 
 func parseURI(dsn string) (*uri, error) {
-	u := &uri{}
-	rest, ok := strings.CutPrefix(dsn, "mongodb://")
-	if !ok {
-		if rest, ok = strings.CutPrefix(dsn, "mongodb+srv://"); !ok {
+	u := &uri{pwStart: -1, pwEnd: -1}
+	var off int
+	switch {
+	case strings.HasPrefix(dsn, "mongodb+srv://"):
+		u.srv, off = true, len("mongodb+srv://")
+	case strings.HasPrefix(dsn, "mongodb://"):
+		off = len("mongodb://")
+	default:
+		return nil, badURI()
+	}
+	rest := dsn[off:]
+	// The driver takes the userinfo up to the first "@" anywhere in the
+	// string, and refuses "/" in it and ":" in the password.
+	if at := strings.IndexByte(rest, '@'); at >= 0 {
+		name, pw, has := strings.Cut(rest[:at], ":")
+		if strings.Contains(name, "/") || has && strings.ContainsAny(pw, ":/") {
 			return nil, badURI()
 		}
-		u.srv = true
-	}
-	hostEnd := strings.IndexAny(rest, "/?")
-	authority, tail := rest, ""
-	if hostEnd >= 0 {
-		authority, tail = rest[:hostEnd], rest[hostEnd:]
-	}
-	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
-		userinfo := authority[:at]
-		authority = authority[at+1:]
-		name, pw, has := strings.Cut(userinfo, ":")
 		var err error
 		if u.user, err = url.PathUnescape(name); err != nil {
 			return nil, badURI()
@@ -88,75 +103,99 @@ func parseURI(dsn string) (*uri, error) {
 				return nil, badURI()
 			}
 			u.hasPassword = true
+			u.pwStart, u.pwEnd = off+len(name)+1, off+at
 		}
+		off += at + 1
+		rest = rest[at+1:]
 	}
-	if authority == "" {
+	hostPart, tail := rest, ""
+	if i := strings.IndexAny(rest, "/?@"); i >= 0 {
+		if rest[i] != '/' { // "@" in the hosts, or "?" with no "/" before it
+			return nil, badURI()
+		}
+		hostPart, tail = rest[:i], rest[i:]
+	}
+	if hostPart == "" {
 		return nil, badURI()
 	}
-	for _, h := range strings.Split(authority, ",") {
+	for _, h := range strings.Split(hostPart, ",") {
 		if h == "" {
 			return nil, badURI()
 		}
-		if _, port, err := net.SplitHostPort(h); err == nil {
+		h, err := url.QueryUnescape(h)
+		if err != nil {
+			return nil, badURI()
+		}
+		_, port, err := net.SplitHostPort(h)
+		if err != nil {
+			var ae *net.AddrError
+			if !errors.As(err, &ae) || ae.Err != "missing port in address" {
+				return nil, badURI()
+			}
+		}
+		if port != "" {
 			if n, err := strconv.Atoi(port); err != nil || n <= 0 || n > 65535 || u.srv {
 				return nil, badURI()
 			}
-		} else if strings.Contains(strings.TrimSuffix(strings.TrimPrefix(h, "["), "]"), ":") && !strings.HasPrefix(h, "[") {
-			return nil, badURI()
 		}
 		u.hosts = append(u.hosts, h)
 	}
 	if u.srv && len(u.hosts) != 1 {
 		return nil, badURI()
 	}
-	path, query, _ := strings.Cut(tail, "?")
-	// The driver unescapes the database and options with QueryUnescape.
-	db, err := url.QueryUnescape(strings.TrimPrefix(path, "/"))
-	if err != nil {
-		return nil, badURI()
-	}
-	u.db = db
-	if u.query, err = parseOptions(query); err != nil {
-		return nil, badURI()
+	u.base = dsn
+	if tail != "" {
+		u.hasPath = true
+		path, query, hasQuery := strings.Cut(tail[1:], "?")
+		db, err := url.QueryUnescape(path)
+		if err != nil {
+			return nil, badURI()
+		}
+		u.db = db
+		if hasQuery {
+			u.base = dsn[:len(dsn)-len(query)-1]
+			if u.options, err = parseOptions(query); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return u, nil
 }
 
-// splitOptions splits a query string as the driver does: on "&" and ";".
-func splitOptions(query string) []string {
-	return strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ';' })
-}
-
-// parseOptions parses query exactly as the driver does, so that the
-// server-mode checks see the options the driver will apply.
-func parseOptions(query string) (url.Values, error) {
-	v := url.Values{}
-	for _, pair := range splitOptions(query) {
-		k, val, ok := strings.Cut(pair, "=")
+// parseOptions parses query as the driver does: pairs split on "&" and ";",
+// each "key=value" with both parts QueryUnescaped and the key lowered with
+// strings.ToLower.
+func parseOptions(query string) ([]option, error) {
+	var opts []option
+	for _, pair := range strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ';' }) {
+		k, v, ok := strings.Cut(pair, "=")
 		if !ok || k == "" {
 			return nil, badURI()
 		}
-		k, err := url.QueryUnescape(k)
+		key, err := url.QueryUnescape(k)
 		if err != nil {
 			return nil, badURI()
 		}
-		if val, err = url.QueryUnescape(val); err != nil {
+		val, err := url.QueryUnescape(v)
+		if err != nil {
 			return nil, badURI()
 		}
-		v.Add(k, val)
+		opts = append(opts, option{raw: pair, key: key, lkey: strings.ToLower(key), value: val})
 	}
-	return v, nil
+	return opts, nil
 }
 
-// param returns the value of query parameter name, matched case-insensitively
-// as the driver does.
+// param returns the last value of the option called name, matched as the
+// driver matches it.
 func (u *uri) param(name string) (string, bool) {
-	for k, v := range u.query {
-		if strings.EqualFold(k, name) && len(v) > 0 {
-			return v[len(v)-1], true
+	name = strings.ToLower(name)
+	val, found := "", false
+	for _, o := range u.options {
+		if o.lkey == name {
+			val, found = o.value, true
 		}
 	}
-	return "", false
+	return val, found
 }
 
 func (Engine) Inspect(dsn string) (engine.DSNInfo, error) {
@@ -180,36 +219,36 @@ func (Engine) Inspect(dsn string) (engine.DSNInfo, error) {
 		}
 	}
 	info.Host = strings.Join(names, ",")
-	info.Redacted = redactURI(dsn)
+	info.Redacted = u.redact(dsn)
 	return info, nil
 }
 
-// secretParams are query parameters whose values are secrets.
-var secretParams = []string{"tlsCertificateKeyFilePassword", "sslClientCertificateKeyPassword"}
+// secretParams are options whose values are secrets, lowered.
+var secretParams = []string{"tlscertificatekeyfilepassword", "sslclientcertificatekeypassword"}
 
-// redactURI replaces the password in dsn's authority, and the values of
-// secretParams, with ***, leaving every other byte as it was.
-func redactURI(dsn string) string {
-	dsn = redactAuthority(dsn)
-	base, query, ok := strings.Cut(dsn, "?")
-	if !ok {
-		return dsn
+// redact returns dsn (which parsed as u) with the password and the values
+// of secretParams replaced by ***, leaving every other byte as it was.
+func (u *uri) redact(dsn string) string {
+	base := u.base
+	if u.pwStart >= 0 {
+		base = dsn[:u.pwStart] + "***" + dsn[u.pwEnd:len(u.base)]
+	}
+	if len(u.base) == len(dsn) {
+		return base
 	}
 	var b strings.Builder
-	b.WriteString(base + "?")
+	b.WriteString(base)
+	b.WriteByte('?')
+	query := dsn[len(u.base)+1:]
 	start := 0
 	for i := 0; i <= len(query); i++ {
 		if i < len(query) && query[i] != '&' && query[i] != ';' {
 			continue
 		}
 		kv := query[start:i]
-		k, _, has := strings.Cut(kv, "=")
-		if uk, err := url.QueryUnescape(k); err == nil {
-			k = uk
-		}
-		for _, sp := range secretParams {
-			if has && strings.EqualFold(k, sp) {
-				kv = kv[:strings.IndexByte(kv, '=')+1] + "***"
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			if uk, err := url.QueryUnescape(k); err == nil && contains(secretParams, strings.ToLower(uk)) {
+				kv = k + "=***"
 			}
 		}
 		b.WriteString(kv)
@@ -221,63 +260,58 @@ func redactURI(dsn string) string {
 	return b.String()
 }
 
-// redactAuthority replaces the password in dsn's authority with ***.
-func redactAuthority(dsn string) string {
-	i := strings.Index(dsn, "://")
-	if i < 0 {
-		return dsn
-	}
-	start := i + 3
-	end := len(dsn)
-	if j := strings.IndexAny(dsn[start:], "/?"); j >= 0 {
-		end = start + j
-	}
-	at := strings.LastIndexByte(dsn[start:end], '@')
-	if at < 0 {
-		return dsn
-	}
-	colon := strings.IndexByte(dsn[start:start+at], ':')
-	if colon < 0 {
-		return dsn
-	}
-	return dsn[:start+colon+1] + "***" + dsn[start+at:]
+// serverOptions are the options server mode accepts, lowered. None reads a
+// file or changes how hosts are reached: every connection still goes
+// through spec.Dial. The driver ignores wtimeoutms and waitqueuetimeoutms.
+var serverOptions = []string{
+	"authsource", "authmechanism", "replicaset", "tls", "ssl", "retrywrites", "retryreads", "w", "wtimeoutms",
+	"journal", "readpreference", "readpreferencetags", "maxstalenessseconds", "readconcernlevel", "appname",
+	"compressors", "zlibcompressionlevel", "zstdcompressionlevel", "connecttimeoutms", "sockettimeoutms",
+	"serverselectiontimeoutms", "heartbeatfrequencyms", "localthresholdms", "maxpoolsize", "minpoolsize",
+	"maxconnecting", "maxidletimems", "waitqueuetimeoutms", "directconnection", "loadbalanced", "srvmaxhosts",
+	"srvservicename", "timeoutms", "servermonitoringmode",
 }
 
-// refusedServerParams make the driver read files on the qh host, or turn off
-// certificate checks; server mode refuses them. The ssl* names and
-// tlsCertificateFile/tlsPrivateKeyFile are aliases the driver also accepts.
-var refusedServerParams = []string{
-	"tlsCAFile", "tlsCertificateKeyFile", "tlsCertificateKeyFilePassword", "tlsInsecure",
-	"tlsCertificateFile", "tlsPrivateKeyFile",
-	"sslCertificateAuthorityFile", "sslClientCertificateKeyFile", "sslClientCertificateKeyPassword", "sslInsecure",
-	"tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames",
-}
+// serverMechanisms are the authMechanism values server mode accepts, matched
+// exactly. The others use the qh host's ambient credentials (AWS
+// environment and instance metadata, Kerberos tickets, cloud identity
+// tokens). MONGODB-X509 takes its certificate from the connection's tls
+// settings.
+var serverMechanisms = []string{"SCRAM-SHA-1", "SCRAM-SHA-256", "PLAIN", "MONGODB-X509"}
 
-// refusedMechanisms use the qh host's ambient credentials (AWS environment
-// and instance metadata, Kerberos tickets, cloud identity tokens).
-var refusedMechanisms = []string{"MONGODB-AWS", "GSSAPI", "MONGODB-OIDC"}
+const serverOptionsHint = "TLS certificates, keys and CAs go in the connection's tls settings, and the password in the connection string's user info or password_ref"
 
-// CheckServerDSN implements engine.ServerDSNChecker.
+// CheckServerDSN implements engine.ServerDSNChecker. Server mode accepts
+// only the options in serverOptions.
 func (Engine) CheckServerDSN(dsn string) error {
 	u, err := parseURI(dsn)
 	if err != nil {
 		return err
 	}
-	for _, p := range refusedServerParams {
-		if _, ok := u.param(p); ok {
-			return qerr.New(qerr.Invalid, "this server does not accept "+p+" in a mongodb connection string").
-				WithHint("Give TLS certificates through the connection's tls settings instead")
-		}
-	}
-	if m, ok := u.param("authMechanism"); ok {
-		for _, r := range refusedMechanisms {
-			if strings.EqualFold(m, r) {
-				return qerr.New(qerr.Invalid, "this server does not accept authMechanism "+r).
-					WithHint("Use a user name and password (SCRAM), or X.509 with the connection's tls settings")
+	for _, o := range u.options {
+		if !isASCII(o.key) || !contains(serverOptions, o.lkey) {
+			key := o.key
+			if len(key) > 64 {
+				key = key[:64] + "…"
 			}
+			return qerr.New(qerr.Invalid, "this server does not accept the option "+key+" in a mongodb connection string").
+				WithHint(serverOptionsHint)
+		}
+		if o.lkey == "authmechanism" && !contains(serverMechanisms, o.value) {
+			return qerr.New(qerr.Invalid, "this server does not accept that authMechanism; it accepts "+strings.Join(serverMechanisms, ", ")).
+				WithHint(serverOptionsHint)
 		}
 	}
 	return nil
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // dialer adapts spec.Dial to the driver's ContextDialer.
@@ -287,41 +321,30 @@ func (d dialer) DialContext(ctx context.Context, network, addr string) (net.Conn
 	return d(ctx, network, addr)
 }
 
-// tlsParams are the connection-string settings spec.TLS replaces.
-var tlsParams = []string{"tls", "ssl", "tlsCAFile", "tlsCertificateKeyFile", "tlsCertificateKeyFilePassword",
-	"tlsCertificateFile", "tlsPrivateKeyFile",
-	"sslCertificateAuthorityFile", "sslClientCertificateKeyFile", "sslClientCertificateKeyPassword", "sslInsecure",
-	"tlsInsecure", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames",
-	"tlsDisableOCSPEndpointCheck", "tlsDisableCertificateRevocationCheck"}
+// tlsParams are the connection-string settings spec.TLS replaces, lowered.
+var tlsParams = []string{"tls", "ssl", "tlscafile", "tlscertificatekeyfile", "tlscertificatekeyfilepassword",
+	"tlscertificatefile", "tlsprivatekeyfile",
+	"sslcertificateauthorityfile", "sslclientcertificatekeyfile", "sslclientcertificatekeypassword", "sslinsecure",
+	"tlsinsecure", "tlsallowinvalidcertificates", "tlsallowinvalidhostnames",
+	"tlsdisableocspendpointcheck", "tlsdisablecertificaterevocationcheck"}
 
-// withoutParams returns dsn without the named query parameters
-// (case-insensitively, after unescaping as the driver does), plus extra
-// ("k=v") when not empty.
-func withoutParams(dsn string, names []string, extra string) string {
-	base, query, _ := strings.Cut(dsn, "?")
+// withoutParams returns the DSN u was parsed from without the options named
+// in names (lowered), plus extra ("k=v") when not empty.
+func (u *uri) withoutParams(names []string, extra string) string {
 	var keep []string
-	for _, kv := range splitOptions(query) {
-		k, _, _ := strings.Cut(kv, "=")
-		if uk, err := url.QueryUnescape(k); err == nil {
-			k = uk
-		}
-		drop := false
-		for _, n := range names {
-			if strings.EqualFold(k, n) {
-				drop = true
-			}
-		}
-		if !drop {
-			keep = append(keep, kv)
+	for _, o := range u.options {
+		if !contains(names, o.lkey) {
+			keep = append(keep, o.raw)
 		}
 	}
 	if extra != "" {
 		keep = append(keep, extra)
 	}
 	if len(keep) == 0 {
-		return base
+		return u.base
 	}
-	if !strings.Contains(base[strings.Index(base, "://")+3:], "/") {
+	base := u.base
+	if !u.hasPath {
 		base += "/"
 	}
 	return base + "?" + strings.Join(keep, "&")
@@ -350,7 +373,7 @@ func clientOptions(spec engine.ConnSpec) (*options.ClientOptions, *uri, error) {
 		if tlsCfg == nil {
 			extra = "tls=false"
 		}
-		dsn = withoutParams(dsn, tlsParams, extra)
+		dsn = u.withoutParams(tlsParams, extra)
 	}
 	opts := options.Client().ApplyURI(dsn)
 	if err := opts.Validate(); err != nil {
@@ -402,7 +425,9 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	}
 	c.client = client
 	if _, err := c.Ping(ctx); err != nil {
-		_ = client.Disconnect(context.Background())
+		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = client.Disconnect(dctx)
 		return nil, err
 	}
 	return c, nil

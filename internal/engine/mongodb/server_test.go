@@ -226,7 +226,9 @@ func TestTLSSettingsApply(t *testing.T) {
 
 func TestServerModeRefusesFileOptions(t *testing.T) {
 	_, err := Engine{}.Open(context.Background(), engine.ConnSpec{Engine: "mongodb", DSN: "mongodb://h/db?tlsCAFile=/etc/passwd", Server: true})
-	if e := qerr.From(err); err == nil || e.Category != qerr.Invalid {
+	// The driver's own error for an unreadable CA file is invalid too, so
+	// check that qh's guard refused it.
+	if e := qerr.From(err); err == nil || e.Category != qerr.Invalid || !strings.Contains(e.Message, "does not accept the option tlsCAFile") {
 		t.Fatalf("server mode with tlsCAFile: %v", err)
 	}
 }

@@ -56,11 +56,17 @@ func TestDocsTwinsMatchTruth(t *testing.T) {
 			if ds.Engine != "mongodb" || !strings.HasPrefix(ds.DSN, "mongodb://") {
 				t.Fatalf("dataset %+v", ds)
 			}
-			qs, _ := LoadQuestions(name)
+			qs, err := LoadQuestions(name)
+			if err != nil || len(qs) == 0 {
+				t.Fatalf("questions: %d, %v", len(qs), err)
+			}
 			for _, q := range qs {
 				want, err := Truth(ctx, ds.DB, q.SQL)
 				if err != nil {
 					t.Fatalf("%s truth: %v", q.ID, err)
+				}
+				if len(want) == 0 {
+					t.Fatalf("%s: the reference query returns no rows", q.ID)
 				}
 				got, err := RunTwin(ctx, ds.DSN, q.Mongo)
 				if err != nil {
@@ -72,5 +78,14 @@ func TestDocsTwinsMatchTruth(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunTwinNeedsADatabase(t *testing.T) {
+	twin := json.RawMessage(`{"collection": "film", "pipeline": [{"$count": "n"}]}`)
+	for _, dsn := range []string{"mongodb://127.0.0.1:1", "mongodb://127.0.0.1:1/", "mongodb://127.0.0.1:1/?appName=x"} {
+		if _, err := RunTwin(context.Background(), dsn, twin); err == nil || !strings.Contains(err.Error(), "names no database") {
+			t.Errorf("%s: %v", dsn, err)
+		}
 	}
 }

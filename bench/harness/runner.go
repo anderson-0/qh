@@ -362,7 +362,7 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 		if len(rep.ColdSchema) > 0 {
 			note := "Cold schema: qh's overview lists the first 200 of 1,000 tables with a pattern hint (it builds the full catalogue); dbhub's search_objects (summary, limit 1000) lists all 1,000."
 			if docs {
-				note = "Cold schema: qh samples 100 documents from each of 1,000 collections and infers fields and references; mongodb-mcp-server's list-collections returns names only."
+				note = "Cold schema: qh samples 100 documents from each of 1,000 collections and infers fields and references; mongodb-mcp-server's list-collections returns names only. mongodb-mcp-server connects when it starts, so its figure excludes connecting; qh's includes it."
 			}
 			rep.Notes = append(rep.Notes, note,
 				"Cold schema is the first schema call after process start; it includes any database connection the server makes lazily (qh connects on first use).")

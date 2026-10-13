@@ -3,8 +3,10 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -208,6 +210,10 @@ func RunTwin(ctx context.Context, dsn string, twin json.RawMessage) ([][]any, er
 	if err != nil {
 		return nil, err
 	}
+	db := strings.TrimPrefix(u.Path, "/")
+	if db == "" {
+		return nil, errors.New("the twin's connection string names no database")
+	}
 	client, err := mongo.Connect(options.Client().ApplyURI(dsn))
 	if err != nil {
 		return nil, err
@@ -215,7 +221,7 @@ func RunTwin(ctx context.Context, dsn string, twin json.RawMessage) ([][]any, er
 	defer client.Disconnect(context.Background())
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	cur, err := client.Database(u.Path[1:]).Collection(t.Collection).Aggregate(ctx, t.Pipeline)
+	cur, err := client.Database(db).Collection(t.Collection).Aggregate(ctx, t.Pipeline)
 	if err != nil {
 		return nil, err
 	}

@@ -1,8 +1,11 @@
 package mongodb
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -92,6 +95,32 @@ func TestParseErrors(t *testing.T) {
 		{`db.orders.find({"a\u0000b": 1})`, `cannot contain a NUL character`},
 		{`db.orders.find({a: 1 + 2})`, `unexpected "+" at 1:22`},
 		{`db.orders.find({a: new Date()})`, `new Date() needs an argument`},
+		{`db.orders.find({a: ISODate()})`, `ISODate() needs an argument`},
+		{`db.orders.find({a: Date()})`, `Date() needs an argument`},
+		{`db.orders.find({a: new NumberInt("x")})`, `new NumberInt() takes one integer`},
+		{`db.orders.find({a: NumberLong("x")})`, `NumberLong() takes one integer`},
+		{`db.orders.find({a: Date(1e30)})`, `Date() is out of range`},
+		{`db.orders.find({a: new Date(-1e30)})`, `new Date() is out of range`},
+		{`db[""].find()`, `collection name cannot be empty`},
+		{`db.getCollection("").find()`, `getCollection takes one collection name`},
+		{"db[\"a\\0b\"].find()", `cannot contain a NUL character`},
+		{"db.getCollection(\"a\\0b\").find()", `cannot contain a NUL character`},
+		{"db.getSiblingDB(\"a\\0b\").t.find()", `cannot contain a NUL character`},
+		{`db.getSiblingDB("x")`, `expected a collection after getSiblingDB(...)`},
+		{`db.t.find() /* open`, `unterminated comment at 1:13`},
+		{`db.t.find(/* open`, `unterminated comment at 1:11`},
+		{"db.t.find({a: \"\xff\"})", `query is not valid UTF-8`},
+		{`db.t.find({a: 1, a: 2})`, `duplicate key "a" at 1:18`},
+		{`db.t.find({a: 1, "b": 1, 'b': 2})`, `duplicate key "b"`},
+		{`db.t.find({a: /x/ii})`, `duplicate regex flag "i"`},
+		{`db.t.find({a: /x/iq})`, `unsupported regex flag "q"`},
+		{`db.t.find({a: "\ud800"})`, `invalid surrogate`},
+		{`db.t.find({a: "\udc00"})`, `invalid surrogate`},
+		{`db.t.find({a: "\ud800\u0041"})`, `invalid surrogate`},
+		{`db.t.find({a: "\xZZ"})`, `invalid \x escape`},
+		{`db.t.find({a: "\x4"})`, `invalid \x escape`},
+		{`db.t.find({a: "\q"})`, `unsupported escape`},
+		{`db.t.find({a: "\1"})`, `unsupported escape`},
 		{`db.orders.find({a: ObjectId("xyz")})`, `invalid ObjectId`},
 		{`db.orders.find({a: /x/g})`, `unsupported regex flag "g"`},
 		{`db.orders.find(); db.users.find()`, `only one statement per query`},
@@ -101,10 +130,85 @@ func TestParseErrors(t *testing.T) {
 		{"db.orders.find({\n  a: ]\n})", `unexpected "]" at 2:6`},
 	} {
 		_, err := Parse(tc.in)
+		if err == nil {
+			t.Errorf("Parse(%q) = nil error, want invalid containing %q", tc.in, tc.want)
+			continue
+		}
 		e := qerr.From(err)
-		if err == nil || e.Category != qerr.Invalid || !strings.Contains(e.Message, tc.want) {
+		if e.Category != qerr.Invalid || !strings.Contains(e.Message, tc.want) {
 			t.Errorf("Parse(%q) = %v, want invalid containing %q", tc.in, err, tc.want)
 		}
+	}
+}
+
+func TestParseEscapes(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`\ud83d\ude00`, "\U0001F600"},
+		{`\u00e9\u0041`, "\u00e9A"},
+		{`\x41\xe9`, "A\u00e9"},
+		{`a\vb`, "a\vb"},
+		{`\0`, "\x00"},
+		{`\\ \' \" \/ \- \.`, `\ ' " / - .`},
+		{`\n\t\r\b\f`, "\n\t\r\b\f"},
+	} {
+		c, err := Parse(`db.t.find("` + tc.in + `")`)
+		if err != nil {
+			t.Errorf("Parse(%q): %v", tc.in, err)
+			continue
+		}
+		if got, _ := c.Args[0].(string); got != tc.want {
+			t.Errorf("escape %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParseSlowInputs(t *testing.T) {
+	flags := "db.t.find({a: /x/" + strings.Repeat("i", 250000) + "})"
+	start := time.Now()
+	_, err := Parse(flags)
+	if d := time.Since(start); err == nil || !strings.Contains(err.Error(), "duplicate regex flag") || d > 50*time.Millisecond {
+		t.Errorf("flags: err=%v took %v", err, d)
+	}
+	keys := new(strings.Builder)
+	keys.WriteString("db.t.find({")
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(keys, "k%d: 1,", i)
+	}
+	keys.WriteString("})")
+	start = time.Now()
+	if _, err := Parse(keys.String()); err != nil || time.Since(start) > 200*time.Millisecond {
+		t.Errorf("many keys: err=%v took %v", err, time.Since(start))
+	}
+}
+
+func TestParseRegexFlagOrder(t *testing.T) {
+	c, err := Parse(`db.t.find({a: /x/uxsmi})`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Args[0].(bson.D)[0].Value.(bson.Regex).Options; got != "imsxu" {
+		t.Errorf("options = %q", got)
+	}
+}
+
+func TestParseLongLineColumn(t *testing.T) {
+	prefix := `db.t.find({a: "` + strings.Repeat("é", 300) + `", b: `
+	col := utf8.RuneCountInString(prefix) + 1
+	_, err := Parse(prefix + `]})`)
+	e := qerr.From(err)
+	if want := fmt.Sprintf("unexpected \"]\" at 1:%d", col); !strings.Contains(e.Message, want) {
+		t.Fatalf("message = %q, want %q", e.Message, want)
+	}
+	if !utf8.ValidString(e.Hint) {
+		t.Fatalf("hint is not valid UTF-8: %q", e.Hint)
+	}
+	lines := strings.Split(e.Hint, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("hint = %q", e.Hint)
+	}
+	caret := utf8.RuneCountInString(strings.TrimSuffix(lines[1], "^"))
+	if r := []rune(lines[0]); caret >= len(r) || r[caret] != ']' {
+		t.Errorf("caret at %d does not sit under ]: %q", caret, e.Hint)
 	}
 }
 
@@ -133,7 +237,11 @@ func FuzzParse(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, q string) {
+		start := time.Now()
 		c, err := Parse(q)
+		if d := time.Since(start); d > 100*time.Millisecond {
+			t.Fatalf("Parse(%q) took %v", q, d)
+		}
 		if err != nil {
 			if qerr.From(err).Category != qerr.Invalid {
 				t.Fatalf("Parse(%q): non-invalid error %v", q, err)

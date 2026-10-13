@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -43,6 +44,10 @@ type parser struct {
 	src   string
 	pos   int
 	depth int
+
+	// commentAt is the offset of an unterminated /* comment, or -1. skip cannot
+	// return an error, so errAt reports this one in place of any later error.
+	commentAt int
 }
 
 // Parse parses one mongosh call. Errors are *qerr.Error values with category
@@ -51,12 +56,18 @@ func Parse(q string) (*Call, error) {
 	if len(q) > maxQueryBytes {
 		return nil, qerr.New(qerr.Invalid, "query is longer than 256 KiB")
 	}
-	p := &parser{src: q}
+	if !utf8.ValidString(q) {
+		return nil, qerr.New(qerr.Invalid, "query is not valid UTF-8")
+	}
+	p := &parser{src: q, commentAt: -1}
 	c, err := p.call()
 	if err != nil {
 		return nil, err
 	}
 	p.skip()
+	if p.commentAt >= 0 {
+		return nil, p.errAt(p.pos, "")
+	}
 	if p.peek() == ';' {
 		p.pos++
 		p.skip()
@@ -80,11 +91,15 @@ func (p *parser) call() (*Call, error) {
 		case '[':
 			p.pos++
 			p.skip()
+			at := p.pos
 			s, err := p.str()
 			if err != nil {
 				return nil, err
 			}
 			if err := p.expect(']'); err != nil {
+				return nil, err
+			}
+			if err := p.checkName(at, "collection", s); err != nil {
 				return nil, err
 			}
 			names = append(names, s)
@@ -93,6 +108,9 @@ func (p *parser) call() (*Call, error) {
 			p.pos++
 		default:
 			if len(names) == 0 {
+				if c.DB != "" {
+					return nil, p.errAt(p.pos, "expected a collection after getSiblingDB(...)")
+				}
 				return nil, p.unexpected()
 			}
 			return nil, p.errAt(p.pos, "expected a method call such as .find(...)")
@@ -121,12 +139,18 @@ func (p *parser) call() (*Call, error) {
 			if !ok || s == "" {
 				return nil, p.errAt(at, "getSiblingDB takes one database name")
 			}
+			if err := p.checkName(at, "database", s); err != nil {
+				return nil, err
+			}
 			c.DB = s
 			continue
 		case len(names) == 0 && id == "getCollection":
 			s, ok := oneString(args)
 			if !ok {
 				return nil, p.errAt(at, "getCollection takes one collection name")
+			}
+			if err := p.checkName(at, "collection", s); err != nil {
+				return nil, err
 			}
 			names = append(names, s)
 			continue
@@ -157,6 +181,17 @@ func (p *parser) call() (*Call, error) {
 		}
 		c.Modifiers = append(c.Modifiers, Modifier{Name: id, Args: args})
 	}
+}
+
+// checkName rejects empty names and names with a NUL, which MongoDB cannot store.
+func (p *parser) checkName(at int, kind, s string) error {
+	if s == "" {
+		return p.errAt(at, kind+" name cannot be empty")
+	}
+	if strings.ContainsRune(s, 0) {
+		return p.errAt(at, kind+" names cannot contain a NUL character")
+	}
+	return nil
 }
 
 func oneString(args []any) (string, bool) {
@@ -222,6 +257,7 @@ func (p *parser) value() (any, error) {
 func (p *parser) object() (bson.D, error) {
 	p.pos++ // {
 	d := bson.D{}
+	seen := map[string]struct{}{}
 	for {
 		p.skip()
 		switch ch := p.peek(); {
@@ -233,6 +269,7 @@ func (p *parser) object() (bson.D, error) {
 		default:
 			return nil, p.unexpected()
 		}
+		keyAt := p.pos
 		var key string
 		var err error
 		if ch := p.peek(); ch == '"' || ch == '\'' {
@@ -253,6 +290,10 @@ func (p *parser) object() (bson.D, error) {
 		if strings.ContainsRune(key, 0) {
 			return nil, p.errAt(p.pos, "object keys cannot contain a NUL character")
 		}
+		if _, dup := seen[key]; dup {
+			return nil, p.errAt(keyAt, fmt.Sprintf("duplicate key %q", key))
+		}
+		seen[key] = struct{}{}
 		d = append(d, bson.E{Key: key, Value: v})
 		p.skip()
 		switch p.peek() {
@@ -323,19 +364,46 @@ func (p *parser) str() (string, error) {
 				b.WriteByte('\b')
 			case 'f':
 				b.WriteByte('\f')
+			case 'v':
+				b.WriteByte('\v')
 			case '0':
 				b.WriteByte(0)
-			case 'u':
-				if p.pos+4 > len(p.src) {
-					return "", p.errAt(p.pos-2, `invalid \u escape`)
-				}
-				n, err := strconv.ParseUint(p.src[p.pos:p.pos+4], 16, 32)
-				if err != nil {
-					return "", p.errAt(p.pos-2, `invalid \u escape`)
+			case 'x':
+				n, ok := hexN(p.src, p.pos, 2)
+				if !ok {
+					return "", p.errAt(p.pos-2, `invalid \x escape`)
 				}
 				b.WriteRune(rune(n))
+				p.pos += 2
+			case 'u':
+				at := p.pos - 2
+				n, ok := hexN(p.src, p.pos, 4)
+				if !ok {
+					return "", p.errAt(at, `invalid \u escape`)
+				}
 				p.pos += 4
-			default: // \\ \' \" \/ and any other character stand for themselves
+				r := rune(n)
+				switch {
+				case r >= 0xD800 && r < 0xDC00: // high surrogate: needs a low one
+					lo, ok := uint32(0), false
+					if strings.HasPrefix(p.src[p.pos:], `\u`) {
+						lo, ok = hexN(p.src, p.pos+2, 4)
+					}
+					r2 := utf16.DecodeRune(r, rune(lo))
+					if !ok || r2 == utf8.RuneError {
+						return "", p.errAt(at, `invalid surrogate in \u escape`)
+					}
+					p.pos += 6
+					r = r2
+				case utf16.IsSurrogate(r):
+					return "", p.errAt(at, `invalid surrogate in \u escape`)
+				}
+				b.WriteRune(r)
+			default:
+				if esc >= '0' && esc <= '9' || esc >= 'a' && esc <= 'z' || esc >= 'A' && esc <= 'Z' {
+					return "", p.errAt(p.pos-2, fmt.Sprintf(`unsupported escape \%c`, esc))
+				}
+				// \\ \' \" \/ and other punctuation stand for themselves
 				b.WriteByte(esc)
 			}
 		default:
@@ -344,6 +412,28 @@ func (p *parser) str() (string, error) {
 		}
 	}
 	return "", p.errAt(start, "unterminated string")
+}
+
+// hexN reads exactly n hex digits at s[at:].
+func hexN(s string, at, n int) (uint32, bool) {
+	if at+n > len(s) {
+		return 0, false
+	}
+	var v uint32
+	for _, c := range []byte(s[at : at+n]) {
+		switch {
+		case c >= '0' && c <= '9':
+			c -= '0'
+		case c >= 'a' && c <= 'f':
+			c = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			c = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		v = v<<4 | uint32(c)
+	}
+	return v, true
 }
 
 func (p *parser) number() (any, error) {
@@ -414,24 +504,25 @@ func (p *parser) regex() (bson.Regex, error) {
 	for p.pos < len(p.src) && isIdentPart(p.src[p.pos]) {
 		p.pos++
 	}
-	flags := p.src[flagsAt:p.pos]
-	for _, f := range flags {
-		if !strings.ContainsRune("imsxu", f) {
-			return bson.Regex{}, p.errAt(flagsAt, fmt.Sprintf("unsupported regex flag %q (MongoDB accepts i, m, s, x, u)", string(f)))
+	const order = "imsxu" // BSON wants the options alphabetical
+	var seen [len(order)]bool
+	for i := flagsAt; i < p.pos; i++ {
+		k := strings.IndexByte(order, p.src[i])
+		if k < 0 {
+			return bson.Regex{}, p.errAt(i, fmt.Sprintf("unsupported regex flag %q (MongoDB accepts i, m, s, x, u)", string(p.src[i])))
+		}
+		if seen[k] {
+			return bson.Regex{}, p.errAt(i, fmt.Sprintf("duplicate regex flag %q", string(p.src[i])))
+		}
+		seen[k] = true
+	}
+	var opts []byte
+	for k := range order {
+		if seen[k] {
+			opts = append(opts, order[k])
 		}
 	}
-	return bson.Regex{Pattern: b.String(), Options: sortFlags(flags)}, nil
-}
-
-// sortFlags orders regex flags alphabetically, as BSON requires.
-func sortFlags(f string) string {
-	out := []byte(f)
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
-	return string(out)
+	return bson.Regex{Pattern: b.String(), Options: string(opts)}, nil
 }
 
 // word2value parses a bare word in value position: a literal or a helper call.
@@ -441,6 +532,7 @@ func (p *parser) word2value() (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	isNew := false
 	switch w {
 	case "true":
 		return true, nil
@@ -449,6 +541,7 @@ func (p *parser) word2value() (any, error) {
 	case "null", "undefined":
 		return nil, nil
 	case "new":
+		isNew = true
 		p.skip()
 		at = p.pos
 		if w, err = p.ident(); err != nil {
@@ -466,10 +559,14 @@ func (p *parser) word2value() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.helper(at, w, args)
+	return p.helper(at, w, isNew, args)
 }
 
-func (p *parser) helper(at int, name string, args []any) (any, error) {
+func (p *parser) helper(at int, name string, isNew bool, args []any) (any, error) {
+	label := name + "()"
+	if isNew {
+		label = "new " + label
+	}
 	str := func() (string, bool) {
 		if len(args) != 1 {
 			return "", false
@@ -481,7 +578,7 @@ func (p *parser) helper(at int, name string, args []any) (any, error) {
 	case "ObjectId":
 		s, ok := str()
 		if !ok {
-			return nil, p.errAt(at, "ObjectId() needs a 24-character hex string")
+			return nil, p.errAt(at, label+" needs a 24-character hex string")
 		}
 		id, err := bson.ObjectIDFromHex(s)
 		if err != nil {
@@ -490,7 +587,7 @@ func (p *parser) helper(at int, name string, args []any) (any, error) {
 		return id, nil
 	case "ISODate", "Date":
 		if len(args) == 0 {
-			return nil, p.errAt(at, "new Date() needs an argument (qh does not evaluate the current time)")
+			return nil, p.errAt(at, label+" needs an argument (qh does not evaluate the current time)")
 		}
 		if len(args) == 1 {
 			switch v := args[0].(type) {
@@ -505,10 +602,13 @@ func (p *parser) helper(at int, name string, args []any) (any, error) {
 			case int64:
 				return bson.DateTime(v), nil
 			case float64:
+				if !(v >= -(1<<63) && v < 1<<63) { // also rejects NaN
+					return nil, p.errAt(at, label+" is out of range")
+				}
 				return bson.DateTime(int64(v)), nil
 			}
 		}
-		return nil, p.errAt(at, name+"() takes one date string or a number of milliseconds")
+		return nil, p.errAt(at, label+" takes one date string or a number of milliseconds")
 	case "NumberInt", "NumberLong":
 		var n int64
 		var err error
@@ -523,11 +623,11 @@ func (p *parser) helper(at int, name string, args []any) (any, error) {
 			err = fmt.Errorf("bad")
 		}
 		if err != nil || len(args) != 1 {
-			return nil, p.errAt(at, name+"() takes one integer")
+			return nil, p.errAt(at, label+" takes one integer")
 		}
 		if name == "NumberInt" {
 			if n < math.MinInt32 || n > math.MaxInt32 {
-				return nil, p.errAt(at, "NumberInt() is out of range")
+				return nil, p.errAt(at, label+" is out of range")
 			}
 			return int32(n), nil
 		}
@@ -542,14 +642,14 @@ func (p *parser) helper(at int, name string, args []any) (any, error) {
 		}
 		d, err := bson.ParseDecimal128(text)
 		if err != nil || len(args) != 1 {
-			return nil, p.errAt(at, "NumberDecimal() takes one number as a string")
+			return nil, p.errAt(at, label+" takes one number as a string")
 		}
 		return d, nil
 	case "UUID":
 		s, ok := str()
 		raw, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
 		if !ok || err != nil || len(raw) != 16 {
-			return nil, p.errAt(at, "UUID() takes one UUID string")
+			return nil, p.errAt(at, label+" takes one UUID string")
 		}
 		return bson.Binary{Subtype: 4, Data: raw}, nil
 	case "Timestamp":
@@ -560,10 +660,10 @@ func (p *parser) helper(at int, name string, args []any) (any, error) {
 				return bson.Timestamp{T: t, I: i}, nil
 			}
 		}
-		return nil, p.errAt(at, "Timestamp() takes two integers (seconds, increment)")
+		return nil, p.errAt(at, label+" takes two integers (seconds, increment)")
 	case "MinKey", "MaxKey":
 		if len(args) != 0 {
-			return nil, p.errAt(at, name+"() takes no arguments")
+			return nil, p.errAt(at, label+" takes no arguments")
 		}
 		if name == "MinKey" {
 			return bson.MinKey{}, nil
@@ -680,6 +780,9 @@ func (p *parser) skip() {
 			if i := strings.Index(p.src[p.pos+2:], "*/"); i >= 0 {
 				p.pos += i + 4
 			} else {
+				if p.commentAt < 0 {
+					p.commentAt = p.pos
+				}
 				p.pos = len(p.src)
 			}
 		default:
@@ -697,8 +800,12 @@ func (p *parser) unexpected() error {
 }
 
 // errAt reports msg at byte offset pos as "msg at line:col", with the query
-// line and a caret in the hint.
+// line and a caret in the hint. An unterminated comment, which skip could not
+// report, replaces the error.
 func (p *parser) errAt(pos int, msg string) error {
+	if p.commentAt >= 0 {
+		pos, msg = p.commentAt, "unterminated comment"
+	}
 	pos = min(pos, len(p.src))
 	lineStart := strings.LastIndexByte(p.src[:pos], '\n') + 1
 	lineEnd := strings.IndexByte(p.src[pos:], '\n')
@@ -709,12 +816,13 @@ func (p *parser) errAt(pos int, msg string) error {
 	}
 	line := strings.Count(p.src[:pos], "\n") + 1
 	col := utf8.RuneCountInString(p.src[lineStart:pos]) + 1
-	text := p.src[lineStart:lineEnd]
+	text := []rune(p.src[lineStart:lineEnd])
+	caret := col - 1     // rune index of the error within text
 	if len(text) > 200 { // keep the hint short around the position
-		from := max(0, pos-lineStart-100)
+		from := max(0, caret-100)
 		text = text[from:min(len(text), from+200)]
-		col -= utf8.RuneCountInString(p.src[lineStart : lineStart+from])
+		caret -= from
 	}
 	e := qerr.New(qerr.Invalid, fmt.Sprintf("%s at %d:%d", msg, line, col))
-	return e.WithHint(text + "\n" + strings.Repeat(" ", col-1) + "^")
+	return e.WithHint(string(text) + "\n" + strings.Repeat(" ", caret) + "^")
 }

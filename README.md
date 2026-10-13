@@ -106,8 +106,9 @@ claude mcp add --transport http qh http://localhost:8080/mcp --header "Authoriza
 ```
 
 Server mode refuses database addresses on loopback and link-local ranges (including cloud metadata at
-169.254.169.254), and Unix sockets. Use `--allow-cidr 127.0.0.0/8` to allow a local database, and `--deny-cidr`
-to block more (for example your private ranges). SQLite is off unless you pass `--sqlite-root DIR`; files must
+169.254.169.254), and Unix sockets. Use `--allow-cidr 127.0.0.0/8` to allow a local database (this does not help
+when qh runs in a container, because the host's databases are not on the container's loopback; see the
+`host.docker.internal` note under Install), and `--deny-cidr` to block more (for example your private ranges). SQLite is off unless you pass `--sqlite-root DIR`; files must
 then live under `DIR/<workspace>/`, so each workspace sees only its own directory. Each API key may run 4
 queries at once; an extra request waits up to 10 s for a free slot, then gets HTTP 429.
 

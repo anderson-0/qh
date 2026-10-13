@@ -248,3 +248,36 @@ func TestOverviewLeavesSQLColumnsAlone(t *testing.T) {
 		t.Errorf("got\n%s\nwant\n%s", out, want)
 	}
 }
+
+// A namespace the engine could not list is shown with its reason, even though
+// it has no objects; a normal namespace never carries one.
+func TestOverviewShowsUnlistedNamespace(t *testing.T) {
+	c := schemaCatalog()
+	c.Namespaces = append([]engine.Namespace{{Name: "archive", Note: "not listed: query_error: not authorized"}}, c.Namespaces...)
+	want := "archive: (not listed: query_error: not authorized)\n" +
+		"analytics: 1 table\n" +
+		"  events ~10M: id PK, user_id→public.users.id\n" +
+		"public: 3 tables, 1 view\n" +
+		"  order_items ~4.8M: order_id PK→orders.id, sku PK\n" +
+		"  orders ~1.2M: id PK, user_id→users.id, status [pending|paid|shipped], total\n" +
+		"  paid_orders (view): id\n" +
+		"  users ~90k: id PK, email, created_at\n"
+	if got, n := Schema(c, SchemaOpts{}); got != want || n != 5 {
+		t.Fatalf("rich n=%d got:\n%s", n, got)
+	}
+	// The names-only overview shows it too.
+	got, _ := Schema(c, SchemaOpts{MaxOverview: 3})
+	if !strings.HasPrefix(got, "archive: (not listed: query_error: not authorized)\nanalytics: 1 table\n") {
+		t.Errorf("capped:\n%s", got)
+	}
+	// Alone, it is not reported as an empty catalog.
+	only := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "archive", Note: "not listed: timeout"}}}
+	if got, n := Schema(only, SchemaOpts{}); got != "archive: (not listed: timeout)\n" || n != 0 {
+		t.Errorf("only: n=%d %q", n, got)
+	}
+	// A namespace that is simply empty is still not shown.
+	empty := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "blank"}}}
+	if got, _ := Schema(empty, SchemaOpts{}); got != "-- no tables or views found\n" {
+		t.Errorf("empty: %q", got)
+	}
+}

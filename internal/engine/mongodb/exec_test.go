@@ -338,7 +338,6 @@ func TestNamespaceGuardCoversStagesThatNameADatabase(t *testing.T) {
 		`db.orders.aggregate([{$lookup: {from: "items", as: "i", pipeline: [{$unionWith: {coll: "c", db: "admin"}}]}}])`,
 		`db.orders.aggregate([{$unionWith: {coll: "c", pipeline: [{$facet: {z: [{$merge: {into: {db: "admin", coll: "x"}}}]}}]}}])`,
 		`db.orders.aggregate([{$lookup: {from: {db: "ſhop2", coll: "c"}, as: "u", pipeline: []}}])`,
-		`db.orders.aggregate([{$lookup: {from: {db: {$literal: "shop"}, coll: "c"}, as: "u", pipeline: []}}])`, // not a string: cannot be checked
 	}
 	for _, q := range refused {
 		_, err := c.Query(context.Background(), q, roOpts)
@@ -364,6 +363,28 @@ func TestNamespaceGuardCoversStagesThatNameADatabase(t *testing.T) {
 	// With no allowed namespaces nothing is refused.
 	if _, err := (&conn{defaultDB: "shop"}).prepare(refused[0], 10); err != nil {
 		t.Errorf("unrestricted: %v", err)
+	}
+}
+
+// A db that is not a plain string cannot be checked against the allowed list.
+// The message names the stage rather than printing the value.
+func TestNamespaceGuardNamesStageWithNonStringDB(t *testing.T) {
+	c := &conn{defaultDB: "shop", namespaces: []string{"shop"}}
+	for stage, q := range map[string]string{
+		"$lookup":    `db.orders.aggregate([{$lookup: {from: {db: {$literal: "shop"}, coll: "c"}, as: "u", pipeline: []}}])`,
+		"$out":       `db.orders.aggregate([{$out: {db: ["shop"], coll: "x"}}])`,
+		"$merge":     `db.orders.aggregate([{$merge: {into: {db: 7, coll: "x"}}}])`,
+		"$unionWith": `db.orders.aggregate([{$facet: {a: [{$unionWith: {coll: "c", db: {$concat: ["sh", "op"]}}}]}}])`,
+	} {
+		_, err := c.prepare(q, 10)
+		e := qerr.From(err)
+		want := "a " + stage + " stage's db must be a plain string"
+		if err == nil || e.Category != qerr.Invalid || e.Message != want {
+			t.Errorf("%s: %v", stage, err)
+		}
+		if strings.Contains(err.Error(), "$literal") || strings.Contains(err.Error(), "not allowed") {
+			t.Errorf("%s: message shows the value: %v", stage, err)
+		}
 	}
 }
 

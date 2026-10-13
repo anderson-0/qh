@@ -49,6 +49,18 @@ func Schema(c *engine.Catalog, o SchemaOpts) (string, int) {
 	return b.String(), len(objs)
 }
 
+// nsHeader is a namespace's overview line. A namespace with a note, which is
+// one the engine could not fully list, shows it in parentheses.
+func nsHeader(ns engine.Namespace) string {
+	switch {
+	case ns.Note == "":
+		return fmt.Sprintf("%s: %s", ns.Name, kindCounts(ns.Objects))
+	case len(ns.Objects) == 0:
+		return fmt.Sprintf("%s: (%s)", ns.Name, ns.Note)
+	}
+	return fmt.Sprintf("%s: %s (%s)", ns.Name, kindCounts(ns.Objects), ns.Note)
+}
+
 // RichOverviewBudget is the largest overview, in bytes, that lists every
 // object's columns. A schema that fits is described in one call, so an agent
 // can write a join without a call per table; a larger one gets names only.
@@ -56,7 +68,7 @@ const RichOverviewBudget = 8000
 
 func overview(c *engine.Catalog, max int) (string, int) {
 	total := c.Count()
-	if total == 0 {
+	if total == 0 && !c.HasNotes() {
 		return "-- no tables or views found\n", 0
 	}
 	if total <= max {
@@ -67,10 +79,13 @@ func overview(c *engine.Catalog, max int) (string, int) {
 	var b strings.Builder
 	shown := 0
 	for _, ns := range c.Namespaces {
+		if len(ns.Objects) == 0 && ns.Note == "" {
+			continue
+		}
+		b.WriteString(nsHeader(ns) + "\n")
 		if len(ns.Objects) == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%s: %s\n", ns.Name, kindCounts(ns.Objects))
 		parts := make([]string, 0, len(ns.Objects))
 		for _, obj := range ns.Objects {
 			if shown == max {
@@ -94,10 +109,10 @@ func overview(c *engine.Catalog, max int) (string, int) {
 func richOverview(c *engine.Catalog) (string, bool) {
 	var b strings.Builder
 	for _, ns := range c.Namespaces {
-		if len(ns.Objects) == 0 {
+		if len(ns.Objects) == 0 && ns.Note == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "%s: %s\n", ns.Name, kindCounts(ns.Objects))
+		b.WriteString(nsHeader(ns) + "\n")
 		for _, o := range ns.Objects {
 			b.WriteString("  " + overviewEntry(o) + ": " + columnList(o) + "\n")
 			if b.Len() > RichOverviewBudget {

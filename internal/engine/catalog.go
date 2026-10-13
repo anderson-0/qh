@@ -21,6 +21,9 @@ type Catalog struct {
 type Namespace struct {
 	Name    string
 	Objects []*Object
+	// Note is a short reason the namespace is incomplete, such as
+	// "not listed: <reason>". It is empty for a normal namespace.
+	Note string
 }
 
 // Object is a table, view or collection.
@@ -124,6 +127,16 @@ func (c *Catalog) Count() int {
 		n += len(ns.Objects)
 	}
 	return n
+}
+
+// HasNotes reports whether any namespace carries a Note.
+func (c *Catalog) HasNotes() bool {
+	for _, ns := range c.Namespaces {
+		if ns.Note != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Only returns the catalog limited to the named namespaces (ignoring case).

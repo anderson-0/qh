@@ -23,7 +23,7 @@
       "ConnectionInput": { "type": "object", "required": ["name", "engine"], "additionalProperties": false,
         "description": "Give dsn or dsn_ref, or host (database for sqlite) with port, database, username, password and params; not both",
         "properties": {
-        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" }, "engine": { "type": "string", "enum": ["postgres", "mysql", "mariadb", "sqlite"] },
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" }, "engine": { "type": "string", "enum": ["postgres", "mysql", "mariadb", "sqlite", "mongodb"] },
         "dsn": { "type": "string" }, "host": { "type": "string" }, "port": { "type": "integer" }, "database": { "type": "string" },
         "username": { "type": "string" }, "password": { "type": "string" },
         "params": { "type": "object", "additionalProperties": { "type": "string" } },

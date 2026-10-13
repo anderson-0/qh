@@ -122,6 +122,11 @@ func (b blockingLog) AppendQueryLog(ctx context.Context, e *store.QueryLogEntry)
 }
 
 func TestSlowQueryLogDoesNotDelayQueries(t *testing.T) {
+	// Writing a full queue (logQueueSize entries) can take longer than
+	// closeWait under -race on a busy CI runner; the test checks what is
+	// written, not how fast.
+	defer func(d time.Duration) { closeWait = d }(closeWait)
+	closeWait = 2 * time.Minute
 	h := newHarness(t)
 	h.addShop(t, engine.ModeRO)
 	bl := blockingLog{h.st, make(chan struct{})}

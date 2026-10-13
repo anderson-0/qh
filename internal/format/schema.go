@@ -119,9 +119,13 @@ func columnList(o *engine.Object) string {
 			fks[fk.Columns[0]] = fk
 		}
 	}
+	// Only sampled (Inferred) fields fold: a SQL column named
+	// "address.city" stays a column of its own.
 	names := map[string]bool{}
 	for _, f := range o.Fields {
-		names[f.Name] = true
+		if f.Inferred {
+			names[f.Name] = true
+		}
 	}
 	children := map[string][]string{}
 	// childRefs holds "→target" for a child that is itself a referencing
@@ -129,19 +133,19 @@ func columnList(o *engine.Object) string {
 	childRefs := map[string]string{}
 	for _, f := range o.Fields {
 		p, c, ok := childOf(f.Name)
-		if !ok || !names[p] {
+		if !ok || !f.Inferred || !names[p] {
 			continue
 		}
 		if !contains(children[p], c) {
 			children[p] = append(children[p], c)
 		}
 		if fk, ok := fks[f.Name]; ok && (f.Name == p+"."+c || f.Name == p+"[]."+c) {
-			childRefs[p+"\x00"+c] = arrow(o.Namespace, f.Name, fk)
+			childRefs[p+"\x00"+c] = arrow(o.Namespace, f, fk)
 		}
 	}
 	var cols []string
 	for _, f := range o.Fields {
-		if p, _, ok := childOf(f.Name); ok && names[p] {
+		if p, _, ok := childOf(f.Name); ok && f.Inferred && names[p] {
 			continue
 		}
 		s := f.Name
@@ -152,7 +156,7 @@ func columnList(o *engine.Object) string {
 			s += " PK"
 		}
 		if fk, ok := fks[f.Name]; ok {
-			s += arrow(o.Namespace, f.Name, fk)
+			s += arrow(o.Namespace, f, fk)
 		}
 		if len(f.Enum) > 0 && len(f.Enum) <= 10 {
 			s += " [" + strings.Join(f.Enum, "|") + "]"
@@ -163,10 +167,10 @@ func columnList(o *engine.Object) string {
 }
 
 // arrow renders a single-column reference as →table, →table.column when the
-// names differ, or →collection for a reference to _id.
-func arrow(from, col string, fk engine.ForeignKey) string {
+// names differ, or →collection for a sampled field's reference to _id.
+func arrow(from string, f engine.Field, fk engine.ForeignKey) string {
 	s := "→" + target(from, fk.RefNamespace, fk.RefObject)
-	if fk.RefColumns[0] != col && fk.RefColumns[0] != "_id" {
+	if fk.RefColumns[0] != f.Name && !(f.Inferred && fk.RefColumns[0] == "_id") {
 		s += "." + fk.RefColumns[0]
 	}
 	return s

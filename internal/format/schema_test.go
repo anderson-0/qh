@@ -197,10 +197,10 @@ func TestMatching(t *testing.T) {
 func TestOverviewFoldsNestedFields(t *testing.T) {
 	c := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "shop", Objects: []*engine.Object{
 		{Namespace: "shop", Name: "customers", Kind: engine.KindCollection, RowEstimate: 599, PrimaryKey: []string{"_id"},
-			Fields: []engine.Field{{Name: "_id"}, {Name: "name"}, {Name: "address"}, {Name: "address.city"},
-				{Name: "address.country"}, {Name: "address.zip"}, {Name: "items"}, {Name: "items[].product_id"}, {Name: "items[].qty"},
-				{Name: "cast"}, {Name: "cast[].given_nm"}, {Name: "cast[].family_nm"}, {Name: "cast[].performer_key"},
-				{Name: "store_id"}},
+			Fields: inferred("_id", "name", "address", "address.city",
+				"address.country", "address.zip", "items", "items[].product_id", "items[].qty",
+				"cast", "cast[].given_nm", "cast[].family_nm", "cast[].performer_key",
+				"store_id"),
 			ForeignKeys: []engine.ForeignKey{
 				{Namespace: "shop", Object: "customers", Columns: []string{"store_id"},
 					RefNamespace: "shop", RefObject: "stores", RefColumns: []string{"_id"}},
@@ -221,5 +221,30 @@ func TestKindCountsListCollectionsBeforeViews(t *testing.T) {
 	objs := []*engine.Object{{Kind: engine.KindView}, {Kind: engine.KindCollection}, {Kind: engine.KindCollection}}
 	if got := kindCounts(objs); got != "2 collections, 1 view" {
 		t.Errorf("kindCounts = %q", got)
+	}
+}
+
+func inferred(names ...string) []engine.Field {
+	out := make([]engine.Field, len(names))
+	for i, n := range names {
+		out[i] = engine.Field{Name: n, Inferred: true}
+	}
+	return out
+}
+
+// Folding and the →collection form of a reference to _id apply to sampled
+// fields only: SQL columns that happen to contain dots, or a column called
+// _id, render as before.
+func TestOverviewLeavesSQLColumnsAlone(t *testing.T) {
+	c := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "public", Objects: []*engine.Object{
+		{Namespace: "public", Name: "people", Kind: engine.KindTable, RowEstimate: -1,
+			Fields: []engine.Field{{Name: "address"}, {Name: "address.city"}, {Name: "address.zip"}, {Name: "address.country"}, {Name: "owner"}},
+			ForeignKeys: []engine.ForeignKey{{Namespace: "public", Object: "people", Columns: []string{"owner"},
+				RefNamespace: "public", RefObject: "users", RefColumns: []string{"_id"}}}},
+	}}}}
+	out, _ := Schema(c, SchemaOpts{})
+	want := "public: 1 table\n  people: address, address.city, address.zip, address.country, owner→users._id\n"
+	if out != want {
+		t.Errorf("got\n%s\nwant\n%s", out, want)
 	}
 }

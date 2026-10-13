@@ -206,10 +206,11 @@ Use them with `--dsn-ref`, `--password-ref`, `--ssh-key-ref`, `--ssh-passphrase-
 
 **Server mode.** A tenant must not be able to read the server's environment or cloud secrets, or tunnel into its network:
 
-- References are refused unless the operator allows them: `qh serve --http :8765 --allow-secret-ref 'env:QH_SHARED_*' --allow-secret-ref 'aws-sm://arn:aws:secretsmanager:us-east-1:123456789012:secret:qh/*'`.
+- References are refused unless the operator allows them: `qh serve --http :8765 --allow-secret-ref 'env:TENANT_DB_*' --allow-secret-ref 'aws-sm://arn:aws:secretsmanager:us-east-1:123456789012:secret:qh/*'`.
 - An allowed reference can be used by every tenant with a manage key on that server, and a tenant can read its value (for example by pointing a connection at a server it controls, which then receives the password). Allow only secrets you would hand to all tenants. Tenants who must not share secrets need separate servers.
 - For `file:` patterns, a mounted secret that is a symlink (as in Kubernetes secret volumes) must be allowed with a directory pattern such as `file:/var/run/secrets/db/*`, because the real path behind the symlink must also match.
 - Both the bastion and the database behind it are checked against the server's network policy (`--allow-cidr`/`--deny-cidr`). By default only loopback, unspecified and link-local addresses (including the cloud metadata addresses) are refused, so private ranges such as `10.0.0.0/8` stay reachable; add `--deny-cidr 10.0.0.0/8 …` to keep tenants out of them. A database on the bastion's own loopback is allowed.
+- A tenant's encrypted SSH private key may use at most 128 KDF rounds (`ssh-keygen -a`; the default is 16). Re-encrypt one with more using `ssh-keygen -p -a 100 -f KEY`.
 - `--deny-ssh` turns tunnels off.
 
 ## Query log

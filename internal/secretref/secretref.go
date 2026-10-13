@@ -135,7 +135,7 @@ func CheckPattern(p string) error {
 		}
 	}
 	return qerr.New(qerr.Invalid, fmt.Sprintf("invalid --allow-secret-ref pattern %q", p)).
-		WithHint("Start it with env:, file: or aws-sm://, e.g. env:QH_TENANT_*")
+		WithHint("Start it with env:, file: or aws-sm://, e.g. env:TENANT_DB_*")
 }
 
 func glob(p string) *regexp.Regexp {

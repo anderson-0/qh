@@ -18,6 +18,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/netguard"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/sshkey"
 )
 
 // Config describes a tunnel. Credentials are already resolved.
@@ -25,9 +26,13 @@ type Config struct {
 	Addr       string // bastion host:port
 	User       string
 	HostKey    string // SHA256 fingerprint; "" rejects every key, reporting the one presented
-	PrivateKey string // PEM; empty for password authentication
+	PrivateKey string // PEM, at most 16 KiB; empty for password authentication
 	Passphrase string
 	Password   string
+	// MaxKDFRounds refuses an encrypted OpenSSH key whose bcrypt KDF asks
+	// for more rounds, before any are run (server mode: the key is a
+	// tenant's). 0 means no limit.
+	MaxKDFRounds int
 	// DialBastion opens the TCP connection to the bastion (server mode: the
 	// netguard policy). Nil uses a plain dialer.
 	DialBastion func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -66,6 +71,12 @@ func (e *hostKeyError) Error() string { return "host key " + e.typ + " " + e.got
 // hostKeyAlgorithms is OpenSSH's preference order. x/crypto's default puts
 // ECDSA and RSA before Ed25519, so a bastion holding several host keys would
 // present a key other than the Ed25519 one a user normally pins.
+//
+// Plain ssh-rsa is left out on purpose: it signs with SHA-1, which OpenSSH
+// has disabled by default since 8.8. An RSA host key still works, because
+// it is negotiated as rsa-sha2-512 or rsa-sha2-256 (same key, SHA-2
+// signatures); only bastions too old to offer those (OpenSSH before 7.2)
+// cannot be reached.
 var hostKeyAlgorithms = []string{
 	ssh.KeyAlgoED25519,
 	ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
@@ -90,6 +101,9 @@ func New(cfg Config) (*Tunnel, error) {
 	}
 	var auth ssh.AuthMethod
 	if cfg.PrivateKey != "" {
+		if err := sshkey.Check(cfg.PrivateKey, cfg.MaxKDFRounds); err != nil {
+			return nil, qerr.New(qerr.ConnectionFailed, "ssh: "+err.Error())
+		}
 		var key any
 		var err error
 		if cfg.Passphrase != "" {
@@ -275,8 +289,12 @@ func (t *Tunnel) handshakeErr(err error) error {
 	switch {
 	case errors.As(err, &hk) && t.cfg.HostKey == "":
 		host, port, _ := net.SplitHostPort(t.cfg.Addr)
+		scan := "ssh-keyscan"
+		if typ := keyscanType(hk.typ); typ != "" {
+			scan += " -t " + typ
+		}
 		return t.failed(fmt.Sprintf("unknown host key for %s: it presented its %s key %s", t.cfg.Addr, hk.typ, hk.got)).
-			WithHint(fmt.Sprintf("Verify it (ssh-keyscan -t ed25519 -p %s %s | ssh-keygen -lf -), then set it with --ssh-host-key %s", port, host, hk.got))
+			WithHint(fmt.Sprintf("Verify it (%s -p %s %s | ssh-keygen -lf -), then set it with --ssh-host-key %s", scan, port, host, hk.got))
 	case errors.As(err, &hk):
 		return t.failed(fmt.Sprintf("host key mismatch for %s (got %s %s, expected %s)", t.cfg.Addr, hk.typ, hk.got, t.cfg.HostKey)).
 			WithHint("If the bastion's key really changed, verify the new one and edit the connection")
@@ -284,6 +302,20 @@ func (t *Tunnel) handshakeErr(err error) error {
 		return t.failed(fmt.Sprintf("authentication failed for %s@%s", t.cfg.User, t.cfg.Addr))
 	}
 	return t.failed("handshake with the bastion " + t.cfg.Addr + " failed: " + err.Error())
+}
+
+// keyscanType maps the type of a presented host key to the name
+// ssh-keyscan -t takes, or "" when there is none.
+func keyscanType(keyType string) string {
+	switch {
+	case keyType == ssh.KeyAlgoED25519:
+		return "ed25519"
+	case strings.HasPrefix(keyType, "ecdsa-sha2-"):
+		return "ecdsa"
+	case keyType == ssh.KeyAlgoRSA, strings.HasPrefix(keyType, "rsa-sha2-"):
+		return "rsa"
+	}
+	return ""
 }
 
 func (t *Tunnel) drop(c *ssh.Client) {

@@ -23,6 +23,7 @@ import (
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secret"
 	"github.com/anderson-0/qh/internal/secretref"
+	"github.com/anderson-0/qh/internal/sshkey"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/suggest"
 )
@@ -145,6 +146,15 @@ func (s *Service) checkInput(in ConnInput) error {
 			WithHint("The operator turned them off with qh serve --deny-ssh")
 	}
 	return nil
+}
+
+// maxKDFRounds caps the bcrypt rounds of a tenant's encrypted SSH key in
+// server mode; a local user's own key is not limited.
+func (s *Service) maxKDFRounds() int {
+	if s.opts.Dial != nil {
+		return sshkey.ServerMaxKDFRounds
+	}
+	return 0
 }
 
 // allowEngine refuses engines this server does not permit.

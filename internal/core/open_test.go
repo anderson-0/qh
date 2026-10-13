@@ -207,3 +207,46 @@ func TestServerModeTunnelTargetDenied(t *testing.T) {
 		t.Fatalf("bastion asked to reach %v", got)
 	}
 }
+
+// In server mode a tenant's encrypted private key may not ask for more
+// than 128 bcrypt rounds: refused before any are run, whether the key is
+// given inline (checked on input) or by reference (checked when the tunnel
+// is built). Local mode leaves the round count to x/crypto.
+func TestServerModeCapsKeyKDFRounds(t *testing.T) {
+	const want = "ssh: the private key's KDF uses 1000000 rounds; this server accepts at most 128 (re-encrypt it with ssh-keygen -p -a 100)"
+	huge := sshtest.KeyWithRounds(1_000_000)
+	var d net.Dialer
+	server := newServiceWith(t, openStore(t), Options{Dial: d.DialContext, CheckTarget: func(netip.Addr) bool { return true }})
+	local := newHarness(t).svc
+	inline := ConnInput{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app",
+		SSH: &engine.SSH{Host: "127.0.0.1", User: "u", HostKey: fp, PrivateKey: huge, Passphrase: "pp"}}
+
+	start := time.Now()
+	_, err := server.TestInput(context.Background(), ws, inline)
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("refusing took %v", d)
+	}
+	if qerr.From(err).Category != qerr.Invalid || !strings.Contains(err.Error(), want) {
+		t.Fatalf("server, inline: %v", err)
+	}
+	if _, err := local.TestInput(context.Background(), ws, inline); err == nil || strings.Contains(err.Error(), "this server accepts") {
+		t.Fatalf("local, inline: %v", err)
+	}
+
+	t.Setenv("QH_TEST_HUGE_KEY", huge)
+	spec := engine.ConnSpec{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app", Resolve: secretref.NewSet(false, nil).Resolve,
+		SSH: &engine.SSH{Host: "127.0.0.1", User: "u", HostKey: fp, PrivateKeyRef: "env:QH_TEST_HUGE_KEY", Passphrase: "pp"}}
+	_, err = OpenConn(context.Background(), spec)
+	if err == nil || strings.Contains(err.Error(), "this server accepts") {
+		t.Fatalf("local, ref: %v", err)
+	}
+	spec.Server, spec.Dial, spec.CheckTarget = true, d.DialContext, func(netip.Addr) bool { return true }
+	start = time.Now()
+	_, err = OpenConn(context.Background(), spec)
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("refusing took %v", d)
+	}
+	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
+		t.Fatalf("server, ref: %v", err)
+	}
+}

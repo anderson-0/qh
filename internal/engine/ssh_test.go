@@ -45,19 +45,20 @@ func TestSSHValidate(t *testing.T) {
 		}
 	}
 	bad := map[string]SSH{
-		"ssh.host is required":                 {User: "u", HostKey: fp, Password: "pw"},
-		"ssh.user is required":                 {Host: "b", HostKey: fp, Password: "pw"},
-		"ssh.port must be between 1 and 65535": {Host: "b", Port: 70000, User: "u", HostKey: fp, Password: "pw"},
-		"ssh.host_key must look like SHA256:":  {Host: "b", User: "u", HostKey: "MD5:aa", Password: "pw"},
-		"exactly one of":                       {Host: "b", User: "u", HostKey: fp},
-		"exactly one of ":                      {Host: "b", User: "u", HostKey: fp, Password: "pw", PrivateKey: key},
-		"ssh.password and ssh.password_ref":    {Host: "b", User: "u", HostKey: fp, Password: "pw", PasswordRef: "env:X"},
-		"invalid secret reference":             {Host: "b", User: "u", HostKey: fp, PasswordRef: "env:"},
-		"is encrypted":                         {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
-		"does not decrypt":                     {Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"},
-		"is not encrypted":                     {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
-		"not a PEM private key":                {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
-		"passphrase applies only":              {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
+		"ssh.host is required":                  {User: "u", HostKey: fp, Password: "pw"},
+		"ssh.user is required":                  {Host: "b", HostKey: fp, Password: "pw"},
+		"ssh.port must be between 1 and 65535":  {Host: "b", Port: 70000, User: "u", HostKey: fp, Password: "pw"},
+		"ssh.host_key must look like SHA256:":   {Host: "b", User: "u", HostKey: "MD5:aa", Password: "pw"},
+		"exactly one of":                        {Host: "b", User: "u", HostKey: fp},
+		"exactly one of ":                       {Host: "b", User: "u", HostKey: fp, Password: "pw", PrivateKey: key},
+		"ssh.password and ssh.password_ref":     {Host: "b", User: "u", HostKey: fp, Password: "pw", PasswordRef: "env:X"},
+		"invalid secret reference":              {Host: "b", User: "u", HostKey: fp, PasswordRef: "env:"},
+		"is encrypted":                          {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
+		"does not decrypt":                      {Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"},
+		"is not encrypted":                      {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
+		"not a PEM private key":                 {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
+		"the private key is larger than 16 KiB": {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
+		"passphrase applies only":               {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
 	}
 	for want, s := range bad {
 		err := s.Validate()

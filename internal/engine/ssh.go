@@ -12,6 +12,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secretref"
+	"github.com/anderson-0/qh/internal/sshkey"
 )
 
 // SSH is a connection's tunnel through a bastion host. The private key,
@@ -103,6 +104,9 @@ func (s *SSH) Validate() error {
 }
 
 func checkKey(key, pass string, passRef bool) error {
+	if err := sshkey.Check(key, 0); err != nil {
+		return sshInvalid("ssh: " + err.Error())
+	}
 	_, err := ssh.ParseRawPrivateKey([]byte(key))
 	var missing *ssh.PassphraseMissingError
 	switch {

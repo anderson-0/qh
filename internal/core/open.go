@@ -7,6 +7,7 @@ import (
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/netguard"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/sshkey"
 	"github.com/anderson-0/qh/internal/tunnel"
 )
 
@@ -67,6 +68,10 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 		cfg := tunnel.Config{Addr: s.Addr(), User: s.User, HostKey: s.HostKey,
 			PrivateKey: s.PrivateKey, Passphrase: s.Passphrase, Password: s.Password,
 			DialBastion: spec.Dial, CheckTarget: spec.CheckTarget}
+		if spec.Server {
+			// The key is a tenant's: bound what parsing it may cost.
+			cfg.MaxKDFRounds = sshkey.ServerMaxKDFRounds
+		}
 		for _, f := range []struct {
 			ref string
 			dst *string

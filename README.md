@@ -9,9 +9,38 @@ whatever the number of connections, and names the connections in its MCP instruc
 | `query` | Runs one statement and returns TSV, 100 rows by default, with a footer that says when rows were cut |
 
 Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+, SQLite and MongoDB (7 and 8).
-`qh serve` adds an HTTP server mode with a REST API, and `bench/` compares qh with dbhub (see `bench/README.md`).
+`qh serve` adds an HTTP server mode with a REST API, and `bench/` compares qh with dbhub and with mongodb-mcp-server (see `bench/README.md`).
 
 ## Install
+
+Download a binary for Linux, macOS or Windows (amd64 or arm64) from the
+[releases page](https://github.com/anderson-0/qh/releases), unpack it and put `qh` on your `PATH`.
+Each release lists SHA-256 checksums in `checksums.txt`. The binaries are not signed: on macOS, a binary
+downloaded with a browser needs `xattr -d com.apple.quarantine qh` before its first run.
+
+Or run the server image, which starts server mode on port 8765 and keeps its store in the `/data` volume.
+Create the master key once and keep it: it decrypts the stored connection strings, so pass the same key every
+time you recreate the container, for example to upgrade:
+
+```bash
+openssl rand -base64 32 > qh-master.key && chmod 600 qh-master.key
+docker run -d --name qh -p 127.0.0.1:8765:8765 -v qh-data:/data \
+  -e QH_MASTER_KEY="$(cat qh-master.key)" ghcr.io/anderson-0/qh:1
+docker logs qh   # shows the admin API key once, on first start
+```
+
+- **Exposure.** API keys travel in plain HTTP, so the example listens on localhost only. Put a TLS proxy in
+  front of qh before exposing it to other machines.
+- **Arguments.** Arguments after the image name replace the default `serve --http :8765`.
+- **Reaching host databases.** Inside the container, `localhost` is the container itself. Reach a database on
+  the Docker host as `host.docker.internal`; on Linux, add `--add-host=host.docker.internal:host-gateway`.
+- **Health checks.** `GET /healthz` answers `ok` without a key, for liveness and readiness probes.
+- **Storage.** The image runs as uid 65532:
+  - a named volume works as shown;
+  - a bind-mounted directory must be writable by that uid (`chown 65532 DIR`);
+  - on Kubernetes, set `securityContext.fsGroup: 65532`.
+
+Or build it with Go:
 
 ```bash
 go install github.com/anderson-0/qh/cmd/qh@latest
@@ -283,3 +312,7 @@ make test        # needs Docker for the Postgres, MySQL/MariaDB and MongoDB test
 make test-short  # skips Docker tests
 make build       # static binary in bin/qh
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -480,15 +479,7 @@ func scrubText(s string, secrets ...string) string {
 	return s
 }
 
-// Query, Explain and Introspect are implemented in exec.go and introspect.go.
-func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
-	return nil, qerr.New(qerr.Invalid, fmt.Sprintf("not implemented: %q", q))
-}
-
-func (c *conn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
-	return nil, qerr.New(qerr.Invalid, "not implemented")
-}
-
+// Introspect is implemented in introspect.go.
 func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 	return nil, qerr.New(qerr.Invalid, "not implemented")
 }

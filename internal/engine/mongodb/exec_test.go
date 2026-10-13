@@ -227,3 +227,142 @@ func TestHugeDocumentsAreCapped(t *testing.T) {
 		t.Fatalf("cells not cut (%d bytes): %.300s", len(out), out)
 	}
 }
+
+func TestReadOnlyHalves(t *testing.T) {
+	spec := fixtureSpec(t, mongo8, engine.ModeRO)
+	ro := openSpec(t, spec)
+	rw := openSpec(t, engine.ConnSpec{Engine: "mongodb", DSN: spec.DSN, Mode: engine.ModeRW})
+	const w = `db.users.updateMany({}, {$set: {name: "x"}})`
+	// A read-only connection refuses a write even when the call does not ask for it.
+	if _, err := ro.Query(context.Background(), w, engine.QueryOpts{MaxRows: 10, Timeout: 10 * time.Second}); qerr.From(err).Category != qerr.ReadOnly {
+		t.Errorf("read-only connection, ReadOnly=false: %v", err)
+	}
+	// A read-write connection refuses a write when the call asks for read-only.
+	if _, err := rw.Query(context.Background(), w, roOpts); qerr.From(err).Category != qerr.ReadOnly {
+		t.Errorf("read-write connection, ReadOnly=true: %v", err)
+	}
+	expectOut(t, "untouched", runQ(t, rw, `db.users.countDocuments({name: "x"})`, roOpts), "count\n0\n-- 1 row")
+}
+
+func TestExplainRefusals(t *testing.T) {
+	spec := fixtureSpec(t, mongo8, engine.ModeRW)
+	rw := openSpec(t, spec)
+	w := engine.QueryOpts{MaxRows: 10, Timeout: 10 * time.Second}
+	if _, err := rw.Explain(context.Background(), `db.orders.aggregate([{$match: {}}, {$out: "evil"}])`, w); qerr.From(err).Category != qerr.Invalid {
+		t.Errorf("explain of $out: %v", err)
+	}
+	if _, err := rw.Query(context.Background(), `db.orders.deleteMany({}).explain()`, w); qerr.From(err).Category != qerr.Invalid {
+		t.Errorf(".explain() on a write: %v", err)
+	}
+	expectOut(t, "nothing ran", runQ(t, rw, `db.orders.countDocuments({})`, w), "count\n250\n-- 1 row")
+	if got := runQ(t, rw, `db.getCollectionNames()`, w); strings.Contains(got, "evil") {
+		t.Errorf("evil exists: %q", got)
+	}
+}
+
+func TestEmptyReadOfAViewIsNotAMissingCollection(t *testing.T) {
+	ro := openSpec(t, fixtureSpec(t, mongo8, engine.ModeRO))
+	expectOut(t, "find", runQ(t, ro, `db.paid_orders.find({status: "x"})`, roOpts), "_id\n-- 0 rows")
+	expectOut(t, "count", runQ(t, ro, `db.paid_orders.countDocuments({status: "x"})`, roOpts), "count\n0\n-- 1 row")
+}
+
+func TestPartialInsertSaysWhatWasWritten(t *testing.T) {
+	rw := openSpec(t, fixtureSpec(t, mongo8, engine.ModeRW))
+	w := engine.QueryOpts{MaxRows: 100, Timeout: 10 * time.Second}
+	_, err := rw.Query(context.Background(), `db.users.insertMany([{_id: 1, email: "dup@example.com"}, {_id: 100, email: "a@example.com"}, {_id: 101, email: "b@example.com"}], {ordered: false})`, w)
+	if e := qerr.From(err); err == nil || e.Category != qerr.QueryError || !strings.Contains(e.Message, "E11000") ||
+		!strings.HasSuffix(e.Message, "; 2 of 3 documents were written before the error") {
+		t.Errorf("unordered: %v", err)
+	}
+	expectOut(t, "written", runQ(t, rw, `db.users.countDocuments({_id: {$gt: 99}})`, w), "count\n2\n-- 1 row")
+	_, err = rw.Query(context.Background(), `db.users.insertMany([{_id: 200, email: "c@example.com"}, {_id: 1, email: "dup2@example.com"}, {_id: 201, email: "d@example.com"}])`, w)
+	if e := qerr.From(err); err == nil || !strings.HasSuffix(e.Message, "; 1 of 3 documents were written before the error") {
+		t.Errorf("ordered: %v", err)
+	}
+	// Nothing was written: no suffix.
+	_, err = rw.Query(context.Background(), `db.users.insertOne({_id: 1, email: "dup3@example.com"})`, w)
+	if e := qerr.From(err); err == nil || strings.Contains(e.Message, "written before") {
+		t.Errorf("single: %v", err)
+	}
+}
+
+func TestWriteErrorReplies(t *testing.T) {
+	reply := func(d bson.D) bson.Raw { return rawDoc(t, d) }
+	wc := bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 1},
+		{Key: "writeConcernError", Value: bson.D{{Key: "code", Value: 64}, {Key: "errmsg", Value: "waiting for replication timed out"}}}}
+	err := writeError(reply(wc), &Op{Kind: kInsert, IDs: []any{1}})
+	if e := qerr.From(err); err == nil || e.Category != qerr.QueryError ||
+		!strings.Contains(e.Message, "applied") || !strings.Contains(e.Message, "not confirmed") || !strings.Contains(e.Message, "waiting for replication timed out") {
+		t.Errorf("write concern error: %v", err)
+	}
+	if err := writeError(reply(bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 1}}), &Op{Kind: kInsert, IDs: []any{1}}); err != nil {
+		t.Errorf("clean reply: %v", err)
+	}
+}
+
+func TestUpsertCountsAsAffected(t *testing.T) {
+	rw := openSpec(t, fixtureSpec(t, mongo8, engine.ModeRW))
+	w := engine.QueryOpts{MaxRows: 100, Timeout: 10 * time.Second}
+	expectOut(t, "upsert", runQ(t, rw, `db.users.updateOne({_id: 500}, {$set: {email: "up@example.com"}}, {upsert: true})`, w), "-- 1 row affected")
+	expectOut(t, "again", runQ(t, rw, `db.users.updateOne({_id: 500}, {$set: {email: "up2@example.com"}}, {upsert: true})`, w), "-- 1 row affected")
+	expectOut(t, "unchanged", runQ(t, rw, `db.users.updateOne({_id: 500}, {$set: {email: "up2@example.com"}}, {upsert: true})`, w), "-- 0 rows affected")
+}
+
+func TestAllowedIsASCIICaseInsensitive(t *testing.T) {
+	c := &conn{namespaces: []string{"shop"}}
+	for db, want := range map[string]bool{"shop": true, "SHOP": true, "Shop": true, "ſhop": false, "shop2": false, "": false, "sh0p": false, "KHop": false} {
+		if got := c.allowed(db); got != want {
+			t.Errorf("allowed(%q) = %v, want %v", db, got, want)
+		}
+	}
+	if !(&conn{}).allowed("anything") {
+		t.Error("no namespaces allows everything")
+	}
+	// The Kelvin sign folds to k in Unicode.
+	if (&conn{namespaces: []string{"k"}}).allowed("\u212a") {
+		t.Error("Kelvin sign matched k")
+	}
+}
+
+func TestNamespaceGuardCoversStagesThatNameADatabase(t *testing.T) {
+	// A nil client proves the refusal comes before any server contact.
+	c := &conn{defaultDB: "shop", namespaces: []string{"shop"}}
+	refused := []string{
+		`db.orders.aggregate([{$out: {db: "admin", coll: "x"}}])`,
+		`db.orders.aggregate([{$merge: {into: {db: "admin", coll: "x"}}}])`,
+		`db.orders.aggregate([{$lookup: {from: {db: "admin", coll: "system.users"}, localField: "a", foreignField: "b", as: "u"}}])`,
+		`db.orders.aggregate([{$unionWith: {coll: "system.users", db: "admin"}}])`,
+		`db.orders.aggregate([{$unionWith: {db: "ADMIN", coll: "c", pipeline: [{$match: {}}]}}])`,
+		// nested
+		`db.orders.aggregate([{$facet: {a: [{$lookup: {from: {db: "admin", coll: "c"}, as: "u", pipeline: []}}]}}])`,
+		`db.orders.aggregate([{$lookup: {from: "items", as: "i", pipeline: [{$unionWith: {coll: "c", db: "admin"}}]}}])`,
+		`db.orders.aggregate([{$unionWith: {coll: "c", pipeline: [{$facet: {z: [{$merge: {into: {db: "admin", coll: "x"}}}]}}]}}])`,
+		`db.orders.aggregate([{$lookup: {from: {db: "ſhop2", coll: "c"}, as: "u", pipeline: []}}])`,
+		`db.orders.aggregate([{$lookup: {from: {db: {$literal: "shop"}, coll: "c"}, as: "u", pipeline: []}}])`, // not a string: cannot be checked
+	}
+	for _, q := range refused {
+		_, err := c.Query(context.Background(), q, roOpts)
+		if e := qerr.From(err); err == nil || e.Category != qerr.Forbidden {
+			t.Errorf("%s: %v", q, err)
+		}
+		if _, err := c.Explain(context.Background(), q, roOpts); qerr.From(err).Category != qerr.Forbidden && qerr.From(err).Category != qerr.Invalid {
+			t.Errorf("explain %s: %v", q, err)
+		}
+	}
+	// Stages that name only allowed databases, or none, pass the guard.
+	for _, q := range []string{
+		`db.orders.aggregate([{$lookup: {from: {db: "shop", coll: "c"}, as: "u", pipeline: []}}])`,
+		`db.orders.aggregate([{$lookup: {from: "items", as: "u", localField: "a", foreignField: "b"}}])`,
+		`db.orders.aggregate([{$unionWith: {coll: "c", db: "SHOP"}}])`,
+		`db.orders.aggregate([{$facet: {a: [{$match: {db: "admin"}}]}}])`, // a field called db is not a database
+		`db.orders.find({db: "admin"})`,
+	} {
+		if _, err := c.prepare(q, 10); err != nil {
+			t.Errorf("%s: %v", q, err)
+		}
+	}
+	// With no allowed namespaces nothing is refused.
+	if _, err := (&conn{defaultDB: "shop"}).prepare(refused[0], 10); err != nil {
+		t.Errorf("unrestricted: %v", err)
+	}
+}

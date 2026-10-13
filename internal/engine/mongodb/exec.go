@@ -16,16 +16,91 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
+// allowed reports whether db is one of the connection's allowed namespaces.
+// Names compare equal ignoring ASCII case only, as the server treats
+// database names; Unicode folding would make "ſhop" match "shop".
 func (c *conn) allowed(db string) bool {
 	if len(c.namespaces) == 0 {
 		return true
 	}
 	for _, n := range c.namespaces {
-		if strings.EqualFold(n, db) {
+		if equalASCIIFold(n, db) {
 			return true
 		}
 	}
 	return false
+}
+
+func equalASCIIFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if lowerASCII(a[i]) != lowerASCII(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerASCII(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + 'a' - 'A'
+	}
+	return b
+}
+
+func (c *conn) forbidden(db string) error {
+	return qerr.New(qerr.Forbidden, fmt.Sprintf("database %q is not allowed on this connection", db)).
+		WithHint("Allowed: " + strings.Join(c.namespaces, ", "))
+}
+
+// checkStages refuses any $out, $merge, $lookup or $unionWith, however deeply
+// nested ($facet, $lookup.pipeline, $unionWith.pipeline), that names a
+// database outside the allowed list, or names one that cannot be checked
+// because it is not a plain string.
+func (c *conn) checkStages(v any) error {
+	switch x := v.(type) {
+	case bson.D:
+		for _, e := range x {
+			var target any
+			switch e.Key {
+			case "$out", "$unionWith":
+				target = e.Value
+			case "$merge":
+				target, _ = field(e.Value, "into")
+			case "$lookup":
+				target, _ = field(e.Value, "from")
+			}
+			if d, ok := field(target, "db"); ok {
+				s, isStr := d.(string)
+				if !isStr {
+					s = fmt.Sprintf("%v", d)
+				}
+				if !isStr || !c.allowed(s) {
+					return c.forbidden(s)
+				}
+			}
+			if err := c.checkStages(e.Value); err != nil {
+				return err
+			}
+		}
+	case bson.A:
+		for _, y := range x {
+			if err := c.checkStages(y); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// field returns the value of key in v when v is a document.
+func field(v any, key string) (any, bool) {
+	if d, ok := v.(bson.D); ok {
+		return lookup(d, key)
+	}
+	return nil, false
 }
 
 // prepare parses q, resolves its database and translates it.
@@ -39,13 +114,21 @@ func (c *conn) prepare(q string, maxRows int) (*Op, error) {
 		db = c.defaultDB
 	}
 	if !c.allowed(db) {
-		return nil, qerr.New(qerr.Forbidden, fmt.Sprintf("database %q is not allowed on this connection", db)).
-			WithHint("Allowed: " + strings.Join(c.namespaces, ", "))
+		return nil, c.forbidden(db)
 	}
 	if maxRows <= 0 {
 		maxRows = 100
 	}
-	return translate(call, db, maxRows)
+	op, err := translate(call, db, maxRows)
+	if err != nil {
+		return nil, err
+	}
+	if len(c.namespaces) > 0 {
+		if err := c.checkStages(op.Command); err != nil {
+			return nil, err
+		}
+	}
+	return op, nil
 }
 
 func (c *conn) Query(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
@@ -158,7 +241,7 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 		if err != nil {
 			return nil, err
 		}
-		defer cur.Close(context.WithoutCancel(ctx))
+		defer closeCursor(ctx, cur)
 		var docs []bson.Raw
 		for len(docs) <= maxRows && cur.Next(ctx) {
 			if op.Kind == kNames && systemName(cur.Current) {
@@ -185,9 +268,18 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 	}
 	reply, err := d.RunCommand(ctx, cmd).Raw()
 	if err != nil {
+		// The driver turns a reply's writeErrors and writeConcernError into
+		// a WriteException but still returns the reply, which says how much
+		// of the write was applied.
+		var we mongo.WriteException
+		if errors.As(err, &we) && len(reply) > 0 {
+			if werr := writeError(reply, op); werr != nil {
+				return nil, werr
+			}
+		}
 		return nil, err
 	}
-	if err := writeError(reply); err != nil {
+	if err := writeError(reply, op); err != nil {
 		return nil, err
 	}
 	switch op.Kind {
@@ -215,9 +307,9 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 		}
 		return r, nil
 	case kUpdate:
-		return &engine.Result{RowsAffected: asInt(reply.Lookup("nModified"))}, nil
+		return &engine.Result{RowsAffected: changed(reply, op)}, nil
 	case kDelete:
-		return &engine.Result{RowsAffected: asInt(reply.Lookup("n"))}, nil
+		return &engine.Result{RowsAffected: changed(reply, op)}, nil
 	case kFindAndModify:
 		v := reply.Lookup("value")
 		if doc, ok := v.DocumentOK(); ok {
@@ -235,6 +327,14 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 		return &engine.Result{RowsAffected: 0}, nil
 	}
 	return nil, fmt.Errorf("unknown operation kind %d", op.Kind)
+}
+
+// closeCursor kills the server-side cursor even when ctx is done, but never
+// waits longer than five seconds for a stalled server.
+func closeCursor(ctx context.Context, cur *mongo.Cursor) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = cur.Close(cctx)
 }
 
 func countResult(n string) *engine.Result {
@@ -289,21 +389,44 @@ func asInt(v bson.RawValue) int64 {
 }
 
 // writeError returns the first write error or write-concern error in a write
-// command's reply; RunCommand reports neither.
-func writeError(reply bson.Raw) error {
+// command's reply. When part of the write was
+// applied before the error, the message says how much.
+func writeError(reply bson.Raw, op *Op) error {
 	if arr, ok := reply.Lookup("writeErrors").ArrayOK(); ok {
 		vals, _ := arr.Values()
 		if len(vals) > 0 {
 			d := vals[0].Document()
 			msg, _ := d.Lookup("errmsg").StringValueOK()
-			return qerr.New(qerr.QueryError, fmt.Sprintf("%s (code %d)", msg, asInt(d.Lookup("code"))))
+			msg = fmt.Sprintf("%s (code %d)", msg, asInt(d.Lookup("code")))
+			switch n := asInt(reply.Lookup("n")); {
+			case op.Kind == kInsert && n > 0:
+				msg += fmt.Sprintf("; %d of %d documents were written before the error", n, len(op.IDs))
+			case op.Kind == kUpdate || op.Kind == kDelete:
+				if n = changed(reply, op); n > 0 {
+					msg += fmt.Sprintf("; %d documents were changed before the error", n)
+				}
+			}
+			return qerr.New(qerr.QueryError, msg)
 		}
 	}
 	if d, ok := reply.Lookup("writeConcernError").DocumentOK(); ok {
 		msg, _ := d.Lookup("errmsg").StringValueOK()
-		return qerr.New(qerr.QueryError, "write concern error: "+msg)
+		return qerr.New(qerr.QueryError, "the write was applied but not confirmed at the requested write concern: "+msg)
 	}
 	return nil
+}
+
+// changed is how many documents an update or delete reply says it changed.
+func changed(reply bson.Raw, op *Op) int64 {
+	if op.Kind == kDelete {
+		return asInt(reply.Lookup("n"))
+	}
+	n := asInt(reply.Lookup("nModified"))
+	if up, ok := reply.Lookup("upserted").ArrayOK(); ok {
+		vals, _ := up.Values()
+		n += int64(len(vals))
+	}
+	return n
 }
 
 func (c *conn) explain(ctx context.Context, d *mongo.Database, op *Op) (*engine.Result, error) {

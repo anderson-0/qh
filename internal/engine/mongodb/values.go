@@ -3,6 +3,7 @@ package mongodb
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,7 @@ func valueOf(v bson.RawValue) engine.Value {
 	case bson.TypeInt64:
 		return engine.Value{Text: strconv.FormatInt(v.Int64(), 10)}
 	case bson.TypeDouble:
-		return engine.Value{Text: strconv.FormatFloat(v.Double(), 'f', -1, 64)}
+		return engine.Value{Text: formatDouble(v.Double())}
 	case bson.TypeDecimal128:
 		return engine.Value{Text: v.Decimal128().String()}
 	case bson.TypeBoolean:
@@ -38,7 +39,7 @@ func valueOf(v bson.RawValue) engine.Value {
 		return engine.Value{Text: hex.EncodeToString(id[:])}
 	case bson.TypeBinary:
 		sub, data := v.Binary()
-		if (sub == 4 || sub == 3) && len(data) == 16 {
+		if sub == 4 && len(data) == 16 {
 			h := hex.EncodeToString(data)
 			return engine.Value{Text: h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]}
 		}
@@ -55,6 +56,16 @@ func valueOf(v bson.RawValue) engine.Value {
 		return engine.Value{Text: "MaxKey"}
 	}
 	return engine.Value{Text: relaxedJSON(v)}
+}
+
+// formatDouble prints f in plain decimal when that is short (zero, or a
+// magnitude from 1e-6 up to 1e21), else in exponent form. NaN and the
+// infinities print as Go prints them.
+func formatDouble(f float64) string {
+	if a := math.Abs(f); f == 0 || a >= 1e-6 && a < 1e21 {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
 // relaxedJSON renders v as compact relaxed Extended JSON, the form nested

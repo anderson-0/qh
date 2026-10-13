@@ -1,6 +1,7 @@
 package mongodb
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -139,14 +140,24 @@ func TestTranslateErrors(t *testing.T) {
 		{`db.orders.replaceOne({}, {$set: {a: 1}})`, `replaceOne takes a replacement document without $ operators`, ""},
 		{`db.orders.updateOne({}, {a: 1})`, `updateOne takes an update with $ operators or a pipeline`, ""},
 		{`db.orders.find().limit("x")`, `limit takes a number`, ""},
+		{`db.a.getCollectionNames()`, `getCollectionNames is called on db, as in db.getCollectionNames()`, ""},
+		{`db.a.createCollection("b")`, `createCollection is called on db, as in db.createCollection("name")`, ""},
+		{`db.a.getIndexes({})`, `getIndexes takes no arguments`, ""},
+		{`db.a.drop(1)`, `drop takes no arguments`, ""},
+		{`db.a.find().skip(-1)`, `skip takes a non-negative number`, ""},
+		{`db.a.createIndexes([{a: 1}, {b: 1}], {name: "x"})`, `name applies to one index; use createIndex`, ""},
 		{`db.createCollection()`, `createCollection takes a collection name`, ""},
 	} {
 		c, err := Parse(tc.q)
 		if err == nil {
 			_, err = translate(c, "shop", 100)
 		}
+		if err == nil {
+			t.Errorf("%s: no error, want invalid %q", tc.q, tc.msg)
+			continue
+		}
 		e := qerr.From(err)
-		if err == nil || e.Category != qerr.Invalid || !strings.Contains(e.Message, tc.msg) || !strings.Contains(e.Hint, tc.hint) {
+		if e.Category != qerr.Invalid || !strings.Contains(e.Message, tc.msg) || !strings.Contains(e.Hint, tc.hint) {
 			t.Errorf("%s: %v (hint %q), want invalid %q hint %q", tc.q, err, e.Hint, tc.msg, tc.hint)
 		}
 	}
@@ -154,11 +165,125 @@ func TestTranslateErrors(t *testing.T) {
 
 func TestClassifyMatchesTranslate(t *testing.T) {
 	for _, q := range []string{`db.a.find()`, `db.a.insertOne({})`, `db.a.drop()`, `db.a.aggregate([{$out: "b"}])`} {
-		c, _ := Parse(q)
+		c, err := Parse(q)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", q, err)
+		}
 		a, err := classify(c)
-		op, _ := translate(c, "x", 10)
-		if err != nil || a != op.Access {
-			t.Errorf("%s: classify %v %v, translate %v", q, a, err, op.Access)
+		if err != nil {
+			t.Fatalf("classify(%q): %v", q, err)
+		}
+		op, err := translate(c, "x", 10)
+		if err != nil {
+			t.Fatalf("translate(%q): %v", q, err)
+		}
+		if a != op.Access {
+			t.Errorf("%s: classify %v, translate %v", q, a, op.Access)
+		}
+	}
+}
+
+func TestReadOnlyBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		q      string
+		access engine.Access
+	}{
+		{`db.a.aggregate([{$lookup: {from: "b", pipeline: [{$merge: {into: "c"}}], as: "x"}}])`, engine.Write},
+		{`db.a.aggregate([{$unionWith: {coll: "b", pipeline: [{$out: "c"}]}}])`, engine.Write},
+		{`db.a.aggregate([{$facet: {"$out": [{$match: {}}]}}])`, engine.Write},
+		{`db.a.aggregate([{$limit: 1, $out: "z"}])`, engine.Write},
+		{`db.a.aggregate([{$out: "z"}, {$match: {}}])`, engine.Write},
+		{`db.a.aggregate([{$lookup: {from: "b", localField: "x", foreignField: "y", as: "z"}}])`, engine.Read},
+		{`db.a.aggregate([{$unionWith: {coll: "b", pipeline: [{$match: {}}]}}])`, engine.Read},
+		{`db.a.aggregate([{$facet: {x: [{$match: {}}]}}])`, engine.Read},
+	} {
+		c, err := Parse(tc.q)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.q, err)
+		}
+		a, err := classify(c)
+		if err != nil || a != tc.access {
+			t.Errorf("%s: classify %v %v, want %v", tc.q, a, err, tc.access)
+		}
+		op, err := translate(c, "x", 10)
+		if err != nil || op.Access != tc.access {
+			t.Errorf("%s: translate %v, want %v", tc.q, err, tc.access)
+		}
+	}
+
+	// explain is for reads only, and cursor methods are limited per method.
+	for _, q := range []string{
+		`db.a.insertOne({}).explain()`, `db.a.insertMany([{}]).explain()`,
+		`db.a.updateOne({}, {$set: {a: 1}}).explain()`, `db.a.updateMany({}, {$set: {a: 1}}).explain()`,
+		`db.a.replaceOne({}, {a: 1}).explain()`, `db.a.deleteOne({}).explain()`, `db.a.deleteMany({}).explain()`,
+		`db.a.findOneAndUpdate({}, {$set: {a: 1}}).explain()`, `db.a.findOneAndReplace({}, {a: 1}).explain()`,
+		`db.a.findOneAndDelete({}).explain()`, `db.a.createIndex({a: 1}).explain()`,
+		`db.a.createIndexes([{a: 1}]).explain()`, `db.a.dropIndex("a_1").explain()`,
+		`db.a.dropIndexes().explain()`, `db.a.drop().explain()`, `db.a.renameCollection("b").explain()`,
+		`db.createCollection("b").explain()`,
+		`db.a.findOne().limit(2)`, `db.a.findOne().skip(1)`,
+		`db.a.getIndexes({})`, `db.a.distinct(1)`, `db.a.distinct("")`,
+	} {
+		c, err := Parse(q)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", q, err)
+		}
+		if _, err := translate(c, "x", 10); err == nil || qerr.From(err).Category != qerr.Invalid {
+			t.Errorf("%s: err = %v, want invalid", q, err)
+		}
+	}
+}
+
+func TestExplainVerbosityIsFixed(t *testing.T) {
+	op := mustTranslate(t, `db.a.find().explain("executionStats")`)
+	if got := relaxed(t, op.explainCommand()); !strings.Contains(got, `"verbosity":"queryPlanner"`) || strings.Contains(got, "executionStats") {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func TestAggregateOptionsAreAllowlisted(t *testing.T) {
+	op := mustTranslate(t, `db.a.aggregate([{$match: {}}], {allowDiskUse: true, writeConcern: {w: 0}, readConcern: {level: "linearizable"}, bypassDocumentValidation: true, explain: true, cursor: {batchSize: 5}, maxTimeMS: 1, comment: "c"})`)
+	want := `{"aggregate":"a","pipeline":[{"$match":{}},{"$limit":101}],"cursor":{"batchSize":101},"allowDiskUse":true,"comment":"c"}`
+	if got := relaxed(t, op.Command); got != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}
+
+func TestReadMethodsAreAllowlisted(t *testing.T) {
+	want := []string{"aggregate", "countDocuments", "distinct", "estimatedDocumentCount", "find", "findOne", "getCollectionNames", "getIndexes"}
+	var got []string
+	for name, m := range methods {
+		if m.access == engine.Read {
+			got = append(got, name)
+		}
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("Read methods are %v, want %v; review the read-only boundary before changing this list", got, want)
+	}
+}
+
+func TestExplainOfAggregateDropsCursor(t *testing.T) {
+	op := mustTranslate(t, `db.a.aggregate([{$match: {}}]).explain()`)
+	want := `{"explain":{"aggregate":"a","pipeline":[{"$match":{}},{"$limit":101}],"cursor":{}},"verbosity":"queryPlanner"}`
+	if got := relaxed(t, op.explainCommand()); got != want {
+		t.Fatalf("got %s", got)
+	}
+	if got := relaxed(t, op.Command); !strings.Contains(got, `"cursor":{"batchSize":101}`) {
+		t.Fatalf("op.Command was mutated: %s", got)
+	}
+}
+
+func TestTranslateOptionHandling(t *testing.T) {
+	for _, tc := range []struct{ q, want string }{
+		{`db.createCollection("logs", {create: "other", capped: true})`, `{"create":"logs","capped":true}`},
+		{`db.a.createIndex({x: 1}, {key: {y: 1}, unique: true})`,
+			`{"createIndexes":"a","indexes":[{"key":{"x":1},"name":"x_1","unique":true}]}`},
+		{`db.a.createIndexes([{x: 1}], {name: "mine", key: {y: 1}})`,
+			`{"createIndexes":"a","indexes":[{"key":{"x":1},"name":"mine"}]}`},
+	} {
+		if got := relaxed(t, mustTranslate(t, tc.q).Command); got != tc.want {
+			t.Errorf("%s\n got %s\nwant %s", tc.q, got, tc.want)
 		}
 	}
 }

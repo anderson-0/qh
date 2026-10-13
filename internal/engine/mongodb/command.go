@@ -85,6 +85,13 @@ func invalid(msg string) error { return qerr.New(qerr.Invalid, msg) }
 // classify checks c's method, arguments and modifiers and returns its access class.
 func classify(c *Call) (engine.Access, error) {
 	m, ok := methods[c.Method]
+	if ok && m.dbLevel && c.Collection != "" {
+		example := "db.getCollectionNames()"
+		if c.Method == "createCollection" {
+			example = `db.createCollection("name")`
+		}
+		return 0, invalid(fmt.Sprintf("%s is called on db, as in %s", c.Method, example))
+	}
 	if !ok || m.dbLevel != (c.Collection == "") {
 		e := qerr.New(qerr.Invalid, fmt.Sprintf("unsupported method %q", c.Method))
 		if s := closest(c.Method, methodNames()); s != "" {
@@ -94,6 +101,9 @@ func classify(c *Call) (engine.Access, error) {
 	}
 	if len(c.Args) < m.minArgs || len(c.Args) > m.maxArgs {
 		if len(c.Args) > m.maxArgs {
+			if m.maxArgs == 0 {
+				return 0, invalid(c.Method + " takes no arguments")
+			}
 			return 0, invalid(fmt.Sprintf("%s takes at most %d arguments", c.Method, m.maxArgs))
 		}
 		return 0, invalid(argHelp(c.Method))
@@ -231,6 +241,9 @@ func translate(c *Call, db string, maxRows int) (*Op, error) {
 				collation, err = modDoc(m)
 			case "skip":
 				skip, err = modInt(m)
+				if err == nil && skip < 0 {
+					err = invalid("skip takes a non-negative number")
+				}
 			case "limit":
 				limit, err = modInt(m)
 				if limit < 0 {
@@ -483,17 +496,18 @@ func translate(c *Call, db string, maxRows int) (*Op, error) {
 		indexes := bson.A{}
 		for _, k := range keys {
 			name := indexName(k)
-			if v, ok := lookup(opts, "name"); ok && len(keys) == 1 {
-				if s, ok := v.(string); ok {
-					name = s
+			if v, ok := lookup(opts, "name"); ok {
+				if len(keys) > 1 {
+					return nil, invalid("name applies to one index; use createIndex")
 				}
+				s, ok := v.(string)
+				if !ok || s == "" {
+					return nil, invalid("the index name must be a non-empty string")
+				}
+				name = s
 			}
 			spec := bson.D{{Key: "key", Value: k}, {Key: "name", Value: name}}
-			for _, e := range opts {
-				if e.Key != "name" {
-					spec = append(spec, e)
-				}
-			}
+			spec = append(spec, omit(opts, "key", "name")...)
 			indexes = append(indexes, spec)
 			op.IndexNames = append(op.IndexNames, name)
 		}
@@ -535,7 +549,7 @@ func translate(c *Call, db string, maxRows int) (*Op, error) {
 			if err != nil {
 				return nil, err
 			}
-			cmd = append(cmd, opts...)
+			cmd = append(cmd, omit(opts, "create")...)
 		}
 		op.Kind, op.Collection, op.Command = kAdmin, name, cmd
 	}
@@ -543,7 +557,19 @@ func translate(c *Call, db string, maxRows int) (*Op, error) {
 }
 
 func (op *Op) explainCommand() bson.D {
-	return bson.D{{Key: "explain", Value: op.Command}, {Key: "verbosity", Value: "queryPlanner"}}
+	cmd := op.Command
+	if len(cmd) > 0 && cmd[0].Key == "aggregate" {
+		// explain takes an aggregate without a cursor batch size; copy so
+		// op.Command, which is also run for real, is left alone.
+		cmd = make(bson.D, len(op.Command))
+		for i, e := range op.Command {
+			if e.Key == "cursor" {
+				e.Value = bson.D{}
+			}
+			cmd[i] = e
+		}
+	}
+	return bson.D{{Key: "explain", Value: cmd}, {Key: "verbosity", Value: "queryPlanner"}}
 }
 
 func countPipeline(coll string, filter bson.D) bson.D {
@@ -592,6 +618,17 @@ func pick(d bson.D, keys ...string) bson.D {
 	var out bson.D
 	for _, e := range d {
 		if contains(keys, e.Key) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// omit returns the entries of d whose keys are not listed.
+func omit(d bson.D, keys ...string) bson.D {
+	var out bson.D
+	for _, e := range d {
+		if !contains(keys, e.Key) {
 			out = append(out, e)
 		}
 	}

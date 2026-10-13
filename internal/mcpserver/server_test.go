@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +23,8 @@ import (
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/testutil"
 )
+
+var updateSurface = flag.Bool("update-surface", false, "rewrite testdata/sql_surface.golden")
 
 func connect(t *testing.T) *mcp.ClientSession {
 	s, _ := connectSvc(t)
@@ -194,5 +198,39 @@ func TestSchemaWithoutArgumentsAndNoConnections(t *testing.T) {
 	}
 	if out, isErr := call(t, s, "schema", map[string]any{}); isErr || !strings.HasPrefix(out, "-- no connections") {
 		t.Fatalf("no connections: %q (isError %v)", out, isErr)
+	}
+}
+
+// TestSQLSurfaceUnchanged pins the tool definitions and instructions a
+// workspace with only SQL connections sees: every byte is paid on every
+// model turn, and the benchmark margin over dbhub depends on them.
+func TestSQLSurfaceUnchanged(t *testing.T) {
+	s := connect(t)
+	tools, err := s.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.MarshalIndent(struct {
+		Instructions string
+		Tools        any
+	}{s.InitializeResult().Instructions, tools.Tools}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join("testdata", "sql_surface.golden")
+	if *updateSurface {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(want) != string(b) {
+		t.Fatalf("SQL-only tool surface changed:\n%s", b)
 	}
 }

@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// PGMaxConns is the store's pool size.
+const PGMaxConns = pgMaxConns
+
 // SetPGOpenRetry shortens how long OpenPostgres retries, for one test.
 func SetPGOpenRetry(t *testing.T, d time.Duration) {
 	old := pgOpenRetry

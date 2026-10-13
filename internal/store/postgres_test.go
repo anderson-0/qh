@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -402,13 +403,15 @@ func killOthers(t *testing.T, admin *sql.DB) {
 	}
 }
 
-func adminDB(t *testing.T, dsn string) *sql.DB {
+// adminDB opens a pool of conns connections to dsn. killOthers needs 1;
+// killInFlight needs 2 (one holds the lock, one watches).
+func adminDB(t *testing.T, dsn string, conns int) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(conns)
 	t.Cleanup(func() { db.Close() })
 	if err := db.Ping(); err != nil {
 		t.Fatal(err)
@@ -416,12 +419,88 @@ func adminDB(t *testing.T, dsn string) *sql.DB {
 	return db
 }
 
-// After the server ends a pooled connection (a restart, a failover, an
-// administrator), the next read must still succeed.
+// killInFlight runs call while admin holds an ACCESS EXCLUSIVE lock on table,
+// so call's statement (matching the LIKE pattern query) waits for it on a live
+// session; it terminates that session up to kills times, each time waiting for
+// the next attempt to queue, then releases the lock. It returns call's error
+// and how many sessions it terminated. No pool ping can step in between: each
+// statement is already running when its session ends.
+func killInFlight(t *testing.T, admin *sql.DB, table, query string, kills int, call func() error) (error, int) {
+	t.Helper()
+	tx, err := admin.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`LOCK TABLE ` + table + ` IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	killed := 0
+	for killed < kills {
+		var pid int64
+		for deadline := time.Now().Add(10 * time.Second); ; {
+			select {
+			case err := <-done: // call gave up before all the kills
+				return err, killed
+			default:
+			}
+			err := admin.QueryRow(`SELECT pid FROM pg_stat_activity WHERE datname = current_database()
+				AND wait_event_type = 'Lock' AND query LIKE $1`, query).Scan(&pid)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				t.Fatal(err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no statement like %q waits for %s", query, table)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if _, err := admin.Exec(`SELECT pg_terminate_backend($1)`, pid); err != nil {
+			t.Fatal(err)
+		}
+		// Wait until it is gone, so releasing the lock cannot let it finish.
+		for deadline := time.Now().Add(5 * time.Second); ; {
+			var n int
+			if err := admin.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("session %d survived pg_terminate_backend", pid)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		killed++
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		return err, killed
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call did not return after the lock was released")
+		return nil, killed
+	}
+}
+
+func isAdminShutdown(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "57P01"
+}
+
+// When the server ends the session a read is running on (a restart, a
+// failover, an administrator), the read is retried and succeeds.
 func TestPostgresReadsSurviveTerminatedConnections(t *testing.T) {
 	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
 	s := openPG(t, dsn)
-	admin := adminDB(t, dsn)
+	admin := adminDB(t, dsn, 2)
 	ctx := context.Background()
 	c := &store.Connection{ID: store.NewID(), WorkspaceID: store.DefaultWorkspace, Name: "x", Engine: "postgres",
 		Secret: []byte{1}, SecretKeyID: 1, Mode: "ro", MaxRows: 1, TimeoutMS: 1, PoolSize: 1}
@@ -429,39 +508,56 @@ func TestPostgresReadsSurviveTerminatedConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range []struct {
-		name string
-		fn   func() error
+		name, table string
+		fn          func() error
 	}{
-		{"Ping", func() error { return s.Ping(ctx) }},
-		{"GetConnection", func() error { _, err := s.GetConnection(ctx, store.DefaultWorkspace, "x"); return err }},
-		{"ListConnections", func() error { _, err := s.ListConnections(ctx, store.DefaultWorkspace); return err }},
-		{"ListWorkspaces", func() error { _, err := s.ListWorkspaces(ctx); return err }},
-		{"GetKeyByPrefix", func() error {
+		{"GetConnection", "qh.connections", func() error { _, err := s.GetConnection(ctx, store.DefaultWorkspace, "x"); return err }},
+		{"ListConnections", "qh.connections", func() error { _, err := s.ListConnections(ctx, store.DefaultWorkspace); return err }},
+		{"ListWorkspaces", "qh.workspaces", func() error { _, err := s.ListWorkspaces(ctx); return err }},
+		{"GetKeyByPrefix", "qh.api_keys", func() error {
 			_, err := s.GetKeyByPrefix(ctx, "qh_none")
 			if errors.Is(err, store.ErrNotFound) {
 				return nil
 			}
 			return err
 		}},
-		{"ListKeys", func() error { _, err := s.ListKeys(ctx, store.DefaultWorkspace); return err }},
-		{"ListAllKeys", func() error { _, err := s.ListAllKeys(ctx); return err }},
-		{"CountKeys", func() error { _, err := s.CountKeys(ctx); return err }},
-		{"ListQueryLog", func() error {
+		{"ListKeys", "qh.api_keys", func() error { _, err := s.ListKeys(ctx, store.DefaultWorkspace); return err }},
+		{"ListAllKeys", "qh.api_keys", func() error { _, err := s.ListAllKeys(ctx); return err }},
+		{"CountKeys", "qh.api_keys", func() error { _, err := s.CountKeys(ctx); return err }},
+		{"ListQueryLog", "qh.query_log", func() error {
 			_, err := s.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: store.DefaultWorkspace})
 			return err
 		}},
 	} {
-		// Two reads leave one pooled connection used just now, so database/sql
-		// reuses it without a ping (pgx pings only connections idle over 1s).
-		for range 2 {
-			if _, err := s.CountKeys(ctx); err != nil {
-				t.Fatal(err)
+		t.Run(r.name, func(t *testing.T) {
+			if err, _ := killInFlight(t, admin, r.table, "SELECT %"+r.table+"%", 1, r.fn); err != nil {
+				t.Fatalf("after its session was terminated: %v", err)
 			}
+		})
+	}
+	// Ping takes no lock: end every pooled session instead.
+	t.Run("Ping", func(t *testing.T) {
+		killOthers(t, adminDB(t, dsn, 1))
+		if err := s.Ping(ctx); err != nil {
+			t.Fatal(err)
 		}
-		killOthers(t, admin)
-		if err := r.fn(); err != nil {
-			t.Errorf("%s after the connection was terminated: %v", r.name, err)
-		}
+	})
+}
+
+// After a restart several pooled connections may be dead: the read keeps
+// trying, one attempt per pooled connection plus a fresh one, and no more.
+func TestPostgresReadsSurviveSeveralDeadConnections(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	s := openPG(t, dsn)
+	admin := adminDB(t, dsn, 2)
+	ctx := context.Background()
+	count := func() error { _, err := s.CountKeys(ctx); return err }
+	if err, n := killInFlight(t, admin, "qh.api_keys", "SELECT %qh.api_keys%", 4, count); err != nil || n != 4 {
+		t.Fatalf("after %d dead sessions: %v", n, err)
+	}
+	err, n := killInFlight(t, admin, "qh.api_keys", "SELECT %qh.api_keys%", store.PGMaxConns+2, count)
+	if !isAdminShutdown(err) || n != store.PGMaxConns+1 {
+		t.Fatalf("a read retried %d times and returned %v; want %d attempts, then 57P01", n, err, store.PGMaxConns+1)
 	}
 }
 
@@ -469,26 +565,22 @@ func TestPostgresReadsSurviveTerminatedConnections(t *testing.T) {
 func TestPostgresWritesAreNotRetried(t *testing.T) {
 	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
 	s := openPG(t, dsn)
-	admin := adminDB(t, dsn)
+	admin := adminDB(t, dsn, 2)
 	ctx := context.Background()
-	for range 2 {
-		if _, err := s.CountKeys(ctx); err != nil {
-			t.Fatal(err)
-		}
+	err, _ := killInFlight(t, admin, "qh.workspaces", "INSERT INTO qh.workspaces%", 1, func() error {
+		_, err := s.CreateWorkspace(ctx, "w1")
+		return err
+	})
+	if !isAdminShutdown(err) {
+		t.Fatalf("a write whose session was terminated returned %v, want 57P01", err)
 	}
-	killOthers(t, admin)
-	if _, err := s.CreateWorkspace(ctx, "w1"); err == nil {
-		t.Fatal("a write on a terminated connection succeeded: it was retried")
-	}
-	// The write never reached a live session, so it did not happen; the store
-	// works again and the caller can retry it.
 	ws, err := s.ListWorkspaces(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, w := range ws {
 		if w.ID == "w1" {
-			t.Fatal("the failed write was applied")
+			t.Fatal("the failed write was applied (retried)")
 		}
 	}
 	if _, err := s.CreateWorkspace(ctx, "w1"); err != nil {
@@ -498,13 +590,15 @@ func TestPostgresWritesAreNotRetried(t *testing.T) {
 
 // tcpProxy forwards TCP connections to a target. freeze makes the open
 // connections drop all traffic both ways without closing (a half-open link);
-// refuse makes new connections close at once; kill closes the open ones.
+// refuse makes new connections close at once (refused counts them); kill
+// closes the open ones.
 type tcpProxy struct {
-	ln     net.Listener
-	target string
-	refuse atomic.Bool
-	mu     sync.Mutex
-	links  []*proxyLink
+	ln      net.Listener
+	target  string
+	refuse  atomic.Bool
+	refused atomic.Int64
+	mu      sync.Mutex
+	links   []*proxyLink
 }
 
 type proxyLink struct {
@@ -542,6 +636,7 @@ func (p *tcpProxy) serve() {
 		}
 		if p.refuse.Load() {
 			c.Close()
+			p.refused.Add(1)
 			continue
 		}
 		s, err := net.Dial("tcp", p.target)
@@ -619,7 +714,7 @@ func TestPostgresQuietListenerStaysConnected(t *testing.T) {
 	store.SetListenTiming(t, 200*time.Millisecond, 2*time.Second)
 	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
 	a, b := openPG(t, dsn), openPG(t, dsn)
-	admin := adminDB(t, dsn)
+	admin := adminDB(t, dsn, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch, err := a.Invalidations(ctx)
@@ -722,7 +817,21 @@ func TestPostgresListenerLogsReconnectFailures(t *testing.T) {
 	}
 	px.refuse.Store(true)
 	px.kill()
-	time.Sleep(2500 * time.Millisecond) // attempts at about 0.5s and 1.5s fail
+	// Let at least two reconnects fail. Other dials reach the proxy too (pgx
+	// sends a cancel request for the lost connection), so count refusals only
+	// after the first failure is logged: the next one is the second attempt.
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(15 * time.Second); !cond(); {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s:\n%s", what, buf.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor("the first failed reconnect", func() bool { return strings.Contains(buf.String(), `"attempt":1`) })
+	after := px.refused.Load()
+	waitFor("a second failed reconnect", func() bool { return px.refused.Load() > after })
 	px.refuse.Store(false)
 	if got := recvWithin(t, ch, 10*time.Second); got != "" {
 		t.Fatalf("got %q, want \"\"", got)

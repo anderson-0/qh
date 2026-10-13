@@ -24,6 +24,9 @@ import (
 // database, so instances can start before it.
 var pgOpenRetry = 30 * time.Second
 
+// pgMaxConns bounds the store's connection pool.
+const pgMaxConns = 10
+
 // migrateLock is the advisory-lock key that serialises schema migrations.
 const migrateLock = 7_212_011_970
 
@@ -133,8 +136,8 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		cfg.Password = strings.TrimRight(string(b), "\r\n")
 	}
 	db := stdlib.OpenDB(*cfg)
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(pgMaxConns)
+	db.SetMaxIdleConns(pgMaxConns)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := pingUntil(ctx, db, time.Now().Add(pgOpenRetry)); err != nil {
 		db.Close()
@@ -246,13 +249,18 @@ func pgCode(err error, code string) bool {
 func isPGUnique(err error) bool     { return pgCode(err, "23505") }
 func isPGForeignKey(err error) bool { return pgCode(err, "23503") }
 
-// read runs the read fn, and runs it once more when it failed because the
-// server ended the connection (a restart, a failover, an administrator): the
-// pool then dials a fresh one. Writes never go through read, since their
-// first attempt may have committed. fn must reset anything it fills.
+// read runs the read fn, and runs it again while it fails because the server
+// ended the connection (a restart, a failover, an administrator). After a
+// restart every pooled connection may be dead; each failed attempt discards
+// one, so pgMaxConns+1 attempts always reach a fresh one. Writes never go
+// through read, since their first attempt may have committed. fn must reset
+// anything it fills.
 func (p *Postgres) read(ctx context.Context, fn func() error) error {
 	err := fn()
-	if err != nil && ctx.Err() == nil && connDied(err) {
+	for range pgMaxConns {
+		if err == nil || ctx.Err() != nil || !connDied(err) {
+			break
+		}
 		err = fn()
 	}
 	return err
@@ -266,6 +274,11 @@ func connDied(err error) bool {
 	}
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) {
+		// The server ends the session after any FATAL error (57P05
+		// idle_session_timeout, 25P03 idle_in_transaction_session_timeout, ...).
+		if pe.SeverityUnlocalized == "FATAL" || pe.Severity == "FATAL" {
+			return true
+		}
 		switch pe.Code {
 		case "57P01", "57P02", "57P03": // admin_shutdown, crash_shutdown, cannot_connect_now
 			return true
@@ -769,15 +782,21 @@ const (
 )
 
 // The LISTEN connection mostly sits idle, so a link that dies silently (a
-// half-open TCP connection after a failover or a NAT timeout) would leave it
-// waiting for hours. It therefore pings the server after listenIdle without a
-// notice, giving the ping listenPingTimeout, and asks the OS to probe the
-// socket every listenKeepAlive. Variables so tests can shorten them.
+// half-open TCP connection after a failover or a NAT timeout) could leave it
+// waiting until the OS gives up on the socket. It therefore pings the server
+// after listenIdle without a notice, giving the ping listenPingTimeout; that
+// ping is what detects a dead link. TCP keepalive (listenKeepAlive, the same
+// as Go's default) is kept on as a second, OS-level probe. Variables so tests
+// can shorten them.
+//
+// A server idle_session_timeout shorter than listenIdle ends the quiet
+// listener's session every cycle; it then reconnects (and drops the cached
+// schemas) each time. listenLog keeps that from flooding the log.
 var (
 	listenIdle        = 30 * time.Second
 	listenPingTimeout = 5 * time.Second
 	listenKeepAlive   = 15 * time.Second
-	// listenLogEvery limits repeated "cannot reconnect" warnings.
+	// listenLogEvery limits the listener's outage logs.
 	listenLogEvery = time.Minute
 )
 
@@ -884,38 +903,62 @@ func (p *Postgres) relisten(ctx context.Context, logs *listenLog) *pgx.Conn {
 	}
 }
 
-// listenLog reports the listener's outages: the loss, the first failed
-// reconnect and then at most one failure per every, and the recovery. Errors
-// are logged without the store password. A nil logger logs nothing.
+// listenLog reports the listener's outages without flooding the log when the
+// link flaps. An outage is reported (its loss and its recovery) unless another
+// was reported within every; skipped outages are counted in the next report.
+// The first failed reconnect of a reported outage is logged at once; other
+// failures at most once per every. Errors are logged without the store
+// password. A nil logger logs nothing.
 type listenLog struct {
 	log      func() *slog.Logger
 	password string
 	every    time.Duration
 	now      func() time.Time
-	lastFail time.Time // when a failed attempt was last logged; zero: none this outage
+
+	lastOutage time.Time // when an outage was last reported
+	lastFail   time.Time // when a failed reconnect was last logged
+	skipped    int       // outages not reported since lastOutage
+	reported   bool      // the current outage's loss was logged
+	failLogged bool      // a failure was logged during the current outage
 }
 
 func (l *listenLog) lost(err error) {
+	now := l.now()
+	l.failLogged = false
+	if !l.lastOutage.IsZero() && now.Sub(l.lastOutage) < l.every {
+		l.reported = false
+		l.skipped++
+		return
+	}
+	l.lastOutage, l.reported = now, true
+	args := []any{"error", redactErr(err, l.password)}
+	if l.skipped > 0 {
+		args = append(args, "unreported_outages", l.skipped)
+		l.skipped = 0
+	}
 	if lg := l.log(); lg != nil {
-		lg.Warn("store: lost the connection that listens for schema invalidations; reconnecting",
-			"error", redactErr(err, l.password))
+		lg.Warn("store: lost the connection that listens for schema invalidations; reconnecting", args...)
 	}
 }
 
 func (l *listenLog) failed(attempt int, err error) {
 	now := l.now()
-	if !l.lastFail.IsZero() && now.Sub(l.lastFail) < l.every {
+	first := l.reported && !l.failLogged
+	if !first && !l.lastFail.IsZero() && now.Sub(l.lastFail) < l.every {
 		return
 	}
-	l.lastFail = now
+	l.lastFail, l.failLogged = now, true
 	if lg := l.log(); lg != nil {
 		lg.Warn("store: cannot reconnect the schema invalidation listener; cached schemas may be stale until it does",
 			"attempt", attempt, "error", redactErr(err, l.password))
 	}
 }
 
+// reconnected logs the recovery when the outage's loss or a failure was logged.
 func (l *listenLog) reconnected(attempts int) {
-	l.lastFail = time.Time{}
+	if !l.reported && !l.failLogged {
+		return
+	}
 	if lg := l.log(); lg != nil {
 		lg.Info("store: reconnected the schema invalidation listener; dropping cached schemas", "attempts", attempts)
 	}
@@ -932,7 +975,7 @@ func (p *Postgres) fromNotice(payload string) (id string, own bool) {
 }
 
 // listen opens a connection that listens on qh_catalog, with TCP keepalive
-// probes every listenKeepAlive; each attempt is bounded by listenTimeout.
+// set to listenKeepAlive; each attempt is bounded by listenTimeout.
 func (p *Postgres) listen(ctx context.Context) (*pgx.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, listenTimeout)
 	defer cancel()
@@ -956,7 +999,9 @@ func closeConn(conn *pgx.Conn) {
 }
 
 // keepAliveDial wraps dial (which honours connect_timeout and any other dial
-// settings) so TCP connections it opens send keepalive probes every period.
+// settings) so TCP connections it opens use keepalive probes every period.
+// pgx's default dialer already has Go's 15s default; this pins the value
+// whatever dialer is configured. The listener's ping is the real detector.
 func keepAliveDial(dial pgconn.DialFunc, period time.Duration) pgconn.DialFunc {
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext

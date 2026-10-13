@@ -16,6 +16,10 @@ type Question struct {
 	Question string `json:"question"`
 	SQL      string `json:"sql"`
 	Ordered  bool   `json:"ordered,omitempty"`
+	// Mongo is the twin of SQL on a document dataset:
+	// {"collection": "...", "pipeline": [...]} in relaxed Extended JSON. Its
+	// result must equal SQL's on the Postgres dataset the documents came from.
+	Mongo json.RawMessage `json:"mongo,omitempty"`
 }
 
 // LoadQuestions returns the questions for a dataset.

@@ -8,7 +8,7 @@ import (
 
 func TestQuestionFiles(t *testing.T) {
 	kinds := map[string]bool{"lookup": true, "join": true, "enum": true, "aggregate": true, "large": true, "misspell": true}
-	for _, ds := range []string{"pagila", "sakila", "chinook", "lendco"} {
+	for _, ds := range []string{"pagila", "sakila", "chinook", "lendco", "pagila-docs", "lendco-docs"} {
 		qs, err := LoadQuestions(ds)
 		if err != nil {
 			t.Fatal(err)

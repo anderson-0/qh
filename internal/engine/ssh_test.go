@@ -3,6 +3,7 @@ package engine
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/pem"
 	"strings"
 	"testing"
@@ -115,8 +116,9 @@ func TestSSHValidateServer(t *testing.T) {
 		"not a PEM private key":     {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
 		"larger than 16 KiB":        {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
 		"KDF uses 2048 rounds":      {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.KeyWithRounds(2048), Passphrase: "pp"},
-		"8704-bit RSA key":          {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704},
+		"RSA key of 8704 bits":      {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704},
 		"DSA keys are not accepted": {Host: "b", User: "u", HostKey: fp, PrivateKey: dsaKey},
+		"DSA keys are not":          {Host: "b", User: "u", HostKey: fp, PrivateKey: encryptedPEM(t, dsaKey, "pp"), Passphrase: "pp"},
 		"ssh.user is required":      {Host: "b", HostKey: fp, Password: "pw"},
 		"passphrase applies only":   {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
 	} {
@@ -135,4 +137,19 @@ func TestSSHValidateServer(t *testing.T) {
 	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: dsaKey}).Validate(); err != nil {
 		t.Errorf("local DSA key: %v", err)
 	}
+}
+
+// encryptedPEM re-encrypts an unencrypted PEM key in the legacy
+// "Proc-Type: 4,ENCRYPTED" format, which x/crypto still reads.
+func encryptedPEM(t *testing.T, key, pass string) string {
+	t.Helper()
+	b, _ := pem.Decode([]byte(key))
+	if b == nil {
+		t.Fatal("not PEM")
+	}
+	enc, err := x509.EncryptPEMBlock(rand.Reader, b.Type, b.Bytes, []byte(pass), x509.PEMCipherAES256) //nolint:staticcheck // the legacy format is what is being tested
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(enc))
 }

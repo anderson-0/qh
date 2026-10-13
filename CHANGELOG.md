@@ -4,20 +4,21 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 ## [1.0.1] - 2026-10-13
 
-Hardening for the shared store, SSH tunnels and MongoDB, with no change to how you use qh.
+Hardening for the shared store, SSH tunnels and MongoDB. Nothing changes for local use; in server mode some tenant SSH keys are now refused, and a wrong passphrase is found later (see SSH tunnels).
 
 ### Shared store
 
 - **Reads survive restarts and failovers.** When the shared Postgres store restarts, fails over or drops a connection, the next read succeeds instead of failing. A read retries past every dead pooled connection, but not when a new connection cannot be made at all, so an outage does not trigger a burst of dials. Writes are never retried.
 - **The listener detects silent connections.** The connection that carries schema-change notices pings the server when it is quiet. A dead link is replaced and cached schemas are dropped, so changes still reach agents.
 - **Outage logs.** `qh serve` and `qh mcp` warn when the listener loses its connection or cannot reconnect, and log when it is back. A flapping link is counted rather than logged each time, so it cannot flood the log.
+- **`qh mcp` writes warnings to stderr.** They are JSON lines; stdout stays the MCP protocol. Besides listener outages, this includes dropped query-log entries and failures to share schema changes, which were silently dropped before.
 
 ### SSH tunnels
 
 - **Key parsing has a bounded cost.**
   - A private key larger than 16 KiB is refused.
-  - In server mode, an encrypted OpenSSH key that asks for more than 128 bcrypt rounds is refused before it is run, an RSA key over 8192 bits is refused, and DSA keys are refused. A local user's own key is never refused for its round count or type.
-- **A key is decrypted once.** In server mode, creating or testing a connection no longer decrypts the key twice. A wrong passphrase reads "ssh: the passphrase does not decrypt the private key".
+  - In server mode, an encrypted OpenSSH key that asks for more than 128 bcrypt rounds is refused before it is run, an RSA key over 8192 bits is refused, and DSA keys are refused. qh adds no round or type limit for local use.
+- **A key is decrypted once.** In server mode, creating or testing a connection no longer decrypts the key twice. As a result, saving a connection without a test no longer checks the passphrase: a wrong one is reported by the connection test, or when the connection is first used, as "ssh: the passphrase does not decrypt the private key".
 - **`--deny-ssh` is checked first.** A refused tenant can no longer make qh parse or decrypt a key before being refused.
 - **Empty references are refused.** A `private_key_ref` or `password_ref` that resolves to an empty value is an error, not a silent fall back to an empty password.
 - **The host-key hint names the type.** The hint for an unknown host key says which type the bastion presented (`ed25519`, `ecdsa` or `rsa`), so the `ssh-keyscan -t` command it suggests fetches the right key.

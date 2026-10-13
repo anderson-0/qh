@@ -73,7 +73,7 @@ func CheckParsed(key any, maxRSABits int, refuseDSA bool) error {
 			return nil
 		}
 		if n := k.N.BitLen(); n > maxRSABits {
-			return fmt.Errorf("the private key is an %d-bit RSA key; this server accepts at most %d bits", n, maxRSABits)
+			return fmt.Errorf("the private key is an RSA key of %d bits; this server accepts at most %d bits", n, maxRSABits)
 		}
 	}
 	return nil

@@ -271,7 +271,7 @@ func TestServerModeCapsKeyKDFRounds(t *testing.T) {
 	t.Setenv("QH_TEST_HUGE_KEY", sshtest.RSA8704)
 	spec.SSH.Passphrase = ""
 	_, err = OpenConn(context.Background(), spec)
-	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), "ssh: the private key is an 8704-bit RSA key; this server accepts at most 8192 bits") {
+	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), "ssh: the private key is an RSA key of 8704 bits; this server accepts at most 8192 bits") {
 		t.Fatalf("server, big RSA key: %v", err)
 	}
 	spec.Server, spec.Dial, spec.CheckTarget = false, nil, nil

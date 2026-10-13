@@ -101,7 +101,7 @@ func TestWrongPassphrase(t *testing.T) {
 // x/crypto caps OpenSSH-format RSA keys there but not PKCS#1 or PKCS#8 ones.
 func TestRSAKeySizeCappedInServerMode(t *testing.T) {
 	_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: sshtest.RSA8704, MaxKDFRounds: serverRounds, MaxRSABits: 8192})
-	wantKeyErr(t, err, "ssh: the private key is an 8704-bit RSA key; this server accepts at most 8192 bits")
+	wantKeyErr(t, err, "ssh: the private key is an RSA key of 8704 bits; this server accepts at most 8192 bits")
 	tun, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: sshtest.RSA8704})
 	if err != nil {
 		t.Fatalf("local mode: %v", err)

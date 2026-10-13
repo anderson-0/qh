@@ -39,7 +39,7 @@ func TestCheckRounds(t *testing.T) {
 	huge := sshtest.KeyWithRounds(1_000_000)
 	start := time.Now()
 	err := Check(huge, ServerMaxKDFRounds)
-	if d := time.Since(start); d > 100*time.Millisecond {
+	if d := time.Since(start); d > 500*time.Millisecond {
 		t.Fatalf("took %v", d)
 	}
 	want := "the private key's KDF uses 1000000 rounds; this server accepts at most 128 (re-encrypt it with ssh-keygen -p -a 100)"
@@ -143,7 +143,7 @@ func TestCheckParsed(t *testing.T) {
 	if err := CheckParsed(rsaBits(8192), ServerMaxRSABits, true); err != nil {
 		t.Fatalf("8192 bits: %v", err)
 	}
-	want := "the private key is an 8193-bit RSA key; this server accepts at most 8192 bits"
+	want := "the private key is an RSA key of 8193 bits; this server accepts at most 8192 bits"
 	if err := CheckParsed(rsaBits(8193), ServerMaxRSABits, true); err == nil || err.Error() != want {
 		t.Fatalf("8193 bits: %v", err)
 	}

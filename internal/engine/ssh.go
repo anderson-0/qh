@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -133,6 +134,11 @@ func checkKey(key, pass string, passRef, server bool) error {
 		}
 		return nil
 	case errors.As(err, &missing):
+		// An encrypted key is only decrypted when connecting, but its type
+		// is known now: refuse DSA here rather than at the first use.
+		if server && isDSA(key, missing) {
+			return qerr.New(qerr.Invalid, "ssh: DSA keys are not accepted; use an Ed25519, ECDSA or RSA key")
+		}
 		if passRef {
 			return nil
 		}
@@ -179,4 +185,14 @@ func (s *SSH) RefStrings() []string {
 		}
 	}
 	return out
+}
+
+// isDSA reports whether an encrypted private key is a DSA key: a legacy
+// "DSA PRIVATE KEY" PEM block, or an OpenSSH key whose unencrypted public
+// part is ssh-dss.
+func isDSA(key string, missing *ssh.PassphraseMissingError) bool {
+	if b, _ := pem.Decode([]byte(key)); b != nil && b.Type == "DSA PRIVATE KEY" {
+		return true
+	}
+	return missing.PublicKey != nil && missing.PublicKey.Type() == ssh.KeyAlgoDSA //nolint:staticcheck // recognised only to refuse it
 }

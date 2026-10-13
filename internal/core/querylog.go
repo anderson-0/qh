@@ -119,8 +119,9 @@ func (s *Service) flushLog() {
 	<-f
 }
 
-// closeWait bounds how long Close waits for pending entries.
-const closeWait = 10 * time.Second
+// closeWait bounds how long Close waits for pending entries (a variable so
+// tests can wait for a full queue on a slow, race-instrumented runner).
+var closeWait = 10 * time.Second
 
 // Close writes the pending query-log entries, waiting at most closeWait. The
 // Service must not be used afterwards.

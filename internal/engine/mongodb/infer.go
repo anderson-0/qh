@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -17,6 +18,7 @@ const (
 	maxEnumValues = 8
 	minEnumDocs   = 50
 	refSamples    = 5
+	maxEnumLen    = 40 // a longer sampled value means free text, not a set of values
 )
 
 // inferred is what sampling found about one collection.
@@ -28,10 +30,12 @@ type inferred struct {
 }
 
 type pathStat struct {
-	types   map[string]int
+	types   map[string]int  // per document; an array counts as "array"
+	elems   map[string]int  // element types of the path's arrays, across documents
 	present int             // documents where the path holds a non-null value
 	strs    map[string]bool // distinct strings, up to maxEnumValues+1
 	nonStr  bool
+	long    bool // a string longer than maxEnumLen was seen
 	samples []bson.RawValue
 	seen    map[string]bool // sample dedup by raw bytes
 }
@@ -46,7 +50,7 @@ func infer(docs []bson.Raw) *inferred {
 	stat := func(p string) *pathStat {
 		s := stats[p]
 		if s == nil {
-			s = &pathStat{types: map[string]int{}, strs: map[string]bool{}, seen: map[string]bool{}}
+			s = &pathStat{types: map[string]int{}, elems: map[string]int{}, strs: map[string]bool{}, seen: map[string]bool{}}
 			stats[p] = s
 			order = append(order, p)
 		}
@@ -66,12 +70,13 @@ func infer(docs []bson.Raw) *inferred {
 			break
 		}
 		s := stats[p]
-		typ := union(s.types)
+		types := s.rendered()
+		typ := union(types)
 		if typ == "" {
 			typ = "null"
 		}
 		f := engine.Field{Name: p, Type: typ, Nullable: s.present < len(docs), Inferred: true}
-		if !s.nonStr && s.types["string"] > 0 && s.present >= minEnumDocs && len(s.strs) <= maxEnumValues {
+		if !s.nonStr && !s.long && s.types["string"] > 0 && s.present >= minEnumDocs && len(s.strs) <= maxEnumValues {
 			for v := range s.strs {
 				f.Enum = append(f.Enum, v)
 			}
@@ -80,8 +85,24 @@ func infer(docs []bson.Raw) *inferred {
 		}
 		out.fields = append(out.fields, f)
 		out.samples[p] = s.samples
-		out.types[p] = dominant(s.types)
+		out.types[p] = dominant(types)
 	}
+	return out
+}
+
+// rendered returns the path's types with "array" spelled out as
+// array<element union>, or plain "array" when no element was ever seen.
+func (s *pathStat) rendered() map[string]int {
+	n, ok := s.types["array"]
+	if !ok || len(s.elems) == 0 {
+		return s.types
+	}
+	out := make(map[string]int, len(s.types))
+	for t, c := range s.types {
+		out[t] = c
+	}
+	delete(out, "array")
+	out["array<"+union(s.elems)+">"] = n
 	return out
 }
 
@@ -95,10 +116,24 @@ func walk(d bson.Raw, prefix string, depth int, stat func(string) *pathStat, pre
 			continue
 		}
 		present[p] = true
-		s.types[typeName(v)]++
+		if v.Type == bson.TypeArray {
+			s.types["array"]++
+			vals, _ := v.Array().Values()
+			for _, x := range vals {
+				if x.Type != bson.TypeNull && x.Type != bson.TypeUndefined {
+					s.elems[typeName(x)]++
+				}
+			}
+		} else {
+			s.types[typeName(v)]++
+		}
 		if v.Type == bson.TypeString {
+			str := v.StringValue()
+			if utf8.RuneCountInString(str) > maxEnumLen {
+				s.long = true
+			}
 			if len(s.strs) <= maxEnumValues {
-				s.strs[v.StringValue()] = true
+				s.strs[str] = true
 			}
 		} else {
 			s.nonStr = true

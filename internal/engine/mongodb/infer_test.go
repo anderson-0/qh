@@ -120,3 +120,111 @@ func TestPickTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestInferenceArrayTypes(t *testing.T) {
+	docs := []bson.Raw{
+		rawDoc(t, bson.D{{Key: "a", Value: bson.A{"x"}}, {Key: "e", Value: bson.A{}}, {Key: "m", Value: int32(1)}}),
+		rawDoc(t, bson.D{{Key: "a", Value: bson.A{int32(1)}}, {Key: "e", Value: bson.A{}}, {Key: "m", Value: int32(2)}}),
+		rawDoc(t, bson.D{{Key: "a", Value: bson.A{}}, {Key: "e", Value: bson.A{nil}}, {Key: "m", Value: bson.A{"s", "t"}}}),
+	}
+	f := fieldMap(infer(docs).fields)
+	for path, want := range map[string]string{"a": "array<int|string>", "e": "array", "m": "int|array<string>"} {
+		if f[path].Type != want {
+			t.Errorf("%s: type %q, want %q", path, f[path].Type, want)
+		}
+	}
+}
+
+func TestInferencePresenceAndNesting(t *testing.T) {
+	var docs []bson.Raw
+	for i := 0; i < 20; i++ {
+		items := bson.A{bson.D{{Key: "k", Value: "a"}}, bson.D{{Key: "k", Value: "b"}}, bson.D{{Key: "k", Value: "a"}}}
+		d := bson.D{{Key: "_id", Value: int32(i)}, {Key: "items", Value: items}}
+		if i%2 == 0 {
+			d = append(d, bson.E{Key: "addr", Value: bson.D{{Key: "city", Value: "x"}}})
+		}
+		docs = append(docs, rawDoc(t, d))
+	}
+	f := fieldMap(infer(docs).fields)
+	// 60 values in 20 documents: presence counts documents, so no values
+	// (under 50) and not nullable.
+	if k := f["items[].k"]; k.Enum != nil || k.Nullable {
+		t.Errorf("items[].k: enum %v nullable %v", k.Enum, k.Nullable)
+	}
+	if !f["addr.city"].Nullable {
+		t.Error("addr.city under a parent missing from half the documents is not nullable")
+	}
+}
+
+func TestInferenceEnumLimits(t *testing.T) {
+	long := strings.Repeat("x", 41)
+	var docs []bson.Raw
+	for i := 0; i < 60; i++ {
+		ok := []string{"a", "b"}[i%2]
+		if i == 7 {
+			ok = long[:40]
+		}
+		docs = append(docs, rawDoc(t, bson.D{{Key: "nine", Value: fmt.Sprint("v", i%9)}, {Key: "long", Value: []string{"a", long}[i%2]},
+			{Key: "ok", Value: ok}}))
+	}
+	f := fieldMap(infer(docs).fields)
+	if f["nine"].Enum != nil {
+		t.Errorf("9 distinct values gave %v", f["nine"].Enum)
+	}
+	if f["long"].Enum != nil {
+		t.Errorf("a value over 40 characters gave %v", f["long"].Enum)
+	}
+	if len(f["ok"].Enum) != 4 {
+		t.Errorf("40-character value: %v", f["ok"].Enum)
+	}
+}
+
+func TestSameIDType(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{{"int", "long", true}, {"double", "decimal", true}, {"int", "string", false}, {"objectId", "objectId", true},
+		{"string", "objectId", false}, {"", "", false}} {
+		if got := sameIDType(c.a, c.b); got != c.want {
+			t.Errorf("sameIDType(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}
+
+func TestRefKeyComparesNumbersByValue(t *testing.T) {
+	val := func(v any) bson.RawValue { return rawDoc(t, bson.D{{Key: "v", Value: v}}).Lookup("v") }
+	one := refKey(val(int32(1)))
+	if refKey(val(int64(1))) != one || refKey(val(1.0)) != one {
+		t.Error("1 as int, long and double differ")
+	}
+	if refKey(val("1")) == one || refKey(val(1.5)) == one {
+		t.Error("\"1\" or 1.5 equals 1")
+	}
+}
+
+func TestEnoughFound(t *testing.T) {
+	for _, c := range []struct {
+		found, total int
+		want         bool
+	}{{3, 5, false}, {4, 5, true}, {5, 5, true}, {2, 2, true}, {1, 2, false}, {0, 0, false}} {
+		if got := enoughFound(c.found, c.total); got != c.want {
+			t.Errorf("enoughFound(%d, %d) = %v", c.found, c.total, got)
+		}
+	}
+}
+
+func TestCollectNamespacesSkipsFailedDatabase(t *testing.T) {
+	build := func(db string) (engine.Namespace, error) {
+		if db == "b" {
+			return engine.Namespace{}, fmt.Errorf("unauthorized")
+		}
+		return engine.Namespace{Name: db, Objects: []*engine.Object{{Name: "x"}}}, nil
+	}
+	got, err := collectNamespaces([]string{"a", "b", "c"}, build)
+	if err != nil || len(got) != 3 || got[1].Name != "b" || len(got[1].Objects) != 0 || len(got[2].Objects) != 1 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := collectNamespaces([]string{"b"}, build); err == nil {
+		t.Error("every database failed but no error")
+	}
+}

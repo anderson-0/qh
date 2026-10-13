@@ -2,7 +2,9 @@ package mongodb
 
 import (
 	"context"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,22 +40,46 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 		}
 		sort.Strings(dbs)
 	}
-	cat := &engine.Catalog{}
+	var allowed []string
 	for _, db := range dbs {
-		if !c.allowed(db) {
-			continue
+		if c.allowed(db) {
+			allowed = append(allowed, db)
 		}
-		ns, err := c.namespace(ctx, db)
-		if err != nil {
-			return nil, c.err(err)
-		}
-		cat.Namespaces = append(cat.Namespaces, ns)
 	}
-	if err := ctx.Err(); err != nil {
+	nss, err := collectNamespaces(allowed, func(db string) (engine.Namespace, error) { return c.namespace(ctx, db) })
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
 		return nil, c.err(err)
 	}
+	cat := &engine.Catalog{Namespaces: nss}
 	cat.Link()
 	return cat, nil
+}
+
+// collectNamespaces builds one namespace per database. A database whose
+// collections cannot be listed becomes an empty namespace, so the others
+// still build; only when every database fails is the first error returned.
+func collectNamespaces(dbs []string, build func(string) (engine.Namespace, error)) ([]engine.Namespace, error) {
+	var out []engine.Namespace
+	var first error
+	failed := 0
+	for _, db := range dbs {
+		ns, err := build(db)
+		if err != nil {
+			if first == nil {
+				first = err
+			}
+			failed++
+			ns = engine.Namespace{Name: db}
+		}
+		out = append(out, ns)
+	}
+	if failed > 0 && failed == len(dbs) {
+		return nil, first
+	}
+	return out, nil
 }
 
 type collInfo struct {
@@ -69,7 +95,11 @@ type sampled struct {
 
 func (c *conn) namespace(ctx context.Context, db string) (engine.Namespace, error) {
 	d := c.client.Database(db)
-	cur, err := d.RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "authorizedCollections", Value: true}})
+	// authorizedCollections takes effect only with nameOnly; together they
+	// let a user with collection-level privileges list what it may read.
+	// type is still returned.
+	cur, err := d.RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "nameOnly", Value: true},
+		{Key: "authorizedCollections", Value: true}})
 	if err != nil {
 		return engine.Namespace{}, err
 	}
@@ -77,7 +107,7 @@ func (c *conn) namespace(ctx context.Context, db string) (engine.Namespace, erro
 	for cur.Next(ctx) {
 		name, _ := cur.Current.Lookup("name").StringValueOK()
 		typ, _ := cur.Current.Lookup("type").StringValueOK()
-		if name == "" || strings.HasPrefix(name, "system.") {
+		if name == "" || systemName(cur.Current) {
 			continue
 		}
 		colls = append(colls, collInfo{name: name, view: typ == "view"})
@@ -110,20 +140,27 @@ func (c *conn) namespace(ctx context.Context, db string) (engine.Namespace, erro
 	return ns, nil
 }
 
-// describe counts, lists the indexes of, and samples one collection. Each
-// step that fails leaves its part empty; the catalog still builds.
+// describe counts, lists the indexes of, and samples one collection, with
+// the index listing running alongside the count and the sample. Each step
+// that fails leaves its part empty; the catalog still builds.
 func (c *conn) describe(ctx context.Context, d *mongo.Database, db string, ci collInfo) sampled {
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
 	obj := &engine.Object{Namespace: db, Name: ci.name, Kind: engine.KindCollection, RowEstimate: -1, PrimaryKey: []string{"_id"}}
+	var idx []engine.Index
+	listed := make(chan struct{})
 	if ci.view {
 		obj.Kind, obj.PrimaryKey = engine.KindView, nil
+		close(listed)
 	} else {
+		go func() {
+			defer close(listed)
+			idx = indexes(ctx, d, ci.name)
+		}()
 		// count with no query reads the collection's metadata.
 		if reply, err := d.RunCommand(ctx, bson.D{{Key: "count", Value: ci.name}}).Raw(); err == nil {
 			obj.RowEstimate = asInt(reply.Lookup("n"))
 		}
-		obj.Indexes = indexes(ctx, d, ci.name)
 	}
 	// The driver derives maxTimeMS from ctx's deadline; adding it here
 	// would duplicate the field.
@@ -147,6 +184,8 @@ func (c *conn) describe(ctx context.Context, d *mongo.Database, db string, ci co
 	}
 	inf := infer(docs)
 	obj.Fields, obj.Comment = inf.fields, inf.comment
+	<-listed
+	obj.Indexes = idx
 	if ci.view {
 		for i := range obj.Fields {
 			obj.Fields[i].Nullable = true
@@ -205,14 +244,26 @@ func indexes(ctx context.Context, d *mongo.Database, coll string) []engine.Index
 // collection's _id (spec §5.3 plus ruling R1).
 var refSuffixes = []string{"_id", "Id", "_key", "_ref"}
 
+// refCandidate is a field whose name and type point at a target
+// collection's _id; it becomes a reference when its samples are found there.
+type refCandidate struct {
+	src    sampled
+	field  string
+	target string
+}
+
 // addReferences infers and verifies references between the collections of
 // one database. Views are sources too (a view's user_id points at users),
-// never targets.
+// never targets. Verification runs one _id lookup per target collection,
+// sampleParallel at a time.
 func (c *conn) addReferences(ctx context.Context, d *mongo.Database, db string, colls []sampled) {
 	byName := map[string]sampled{}
 	for _, s := range colls {
 		byName[strings.ToLower(s.obj.Name)] = s
 	}
+	var cands []refCandidate
+	byTarget := map[string][]int{}
+	var targets []string
 	for _, s := range colls {
 		for _, f := range s.obj.Fields {
 			last := f.Name[strings.LastIndexAny(f.Name, ".]")+1:]
@@ -230,18 +281,64 @@ func (c *conn) addReferences(ctx context.Context, d *mongo.Database, db string, 
 				continue
 			}
 			target, ok := pickTarget(byName, base)
-			if !ok || target.obj == s.obj {
+			if !ok || target.obj == s.obj || !sameIDType(s.inf.types[f.Name], target.inf.types["_id"]) ||
+				len(s.inf.samples[f.Name]) == 0 {
 				continue
 			}
-			if s.inf.types[f.Name] == "" || s.inf.types[f.Name] != target.inf.types["_id"] {
-				continue
+			name := target.obj.Name
+			if _, seen := byTarget[name]; !seen {
+				targets = append(targets, name)
 			}
-			if verified(ctx, d, target.obj.Name, s.inf.samples[f.Name]) {
-				s.obj.ForeignKeys = append(s.obj.ForeignKeys, engine.ForeignKey{Namespace: db, Object: s.obj.Name, Columns: []string{f.Name},
-					RefNamespace: db, RefObject: target.obj.Name, RefColumns: []string{"_id"}})
-			}
+			byTarget[name] = append(byTarget[name], len(cands))
+			cands = append(cands, refCandidate{src: s, field: f.Name, target: name})
 		}
 	}
+	found := make([]map[string]bool, len(targets))
+	sem := make(chan struct{}, sampleParallel)
+	var wg sync.WaitGroup
+	for i, name := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			var values []bson.RawValue
+			for _, ci := range byTarget[name] {
+				values = append(values, cands[ci].src.inf.samples[cands[ci].field]...)
+			}
+			found[i] = foundIDs(ctx, d, name, values)
+		}()
+	}
+	wg.Wait()
+	ok := make([]bool, len(cands))
+	for i, name := range targets {
+		for _, ci := range byTarget[name] {
+			n, samples := 0, cands[ci].src.inf.samples[cands[ci].field]
+			for _, v := range samples {
+				if found[i][refKey(v)] {
+					n++
+				}
+			}
+			ok[ci] = enoughFound(n, len(samples))
+		}
+	}
+	for i, cand := range cands {
+		if ok[i] {
+			cand.src.obj.ForeignKeys = append(cand.src.obj.ForeignKeys, engine.ForeignKey{Namespace: db, Object: cand.src.obj.Name,
+				Columns: []string{cand.field}, RefNamespace: db, RefObject: cand.target, RefColumns: []string{"_id"}})
+		}
+	}
+}
+
+// numericTypes compare as one class: an int field can reference a long _id.
+var numericTypes = map[string]bool{"int": true, "long": true, "double": true, "decimal": true}
+
+// sameIDType reports whether a field of type a can reference an _id of type b.
+func sameIDType(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || numericTypes[a] && numericTypes[b]
 }
 
 // pickTarget finds the collection a field base name points at: base, then
@@ -272,35 +369,64 @@ func pickTarget(byName map[string]sampled, base string) (sampled, bool) {
 	return sampled{}, false
 }
 
-// verified reports whether at least 4 of 5 sampled values (all of them, if
-// fewer) exist as _id values in coll.
-func verified(ctx context.Context, d *mongo.Database, coll string, values []bson.RawValue) bool {
-	if len(values) == 0 {
-		return false
-	}
+// foundIDs looks up values as _id in coll and returns the refKeys of those
+// that exist; nil when the lookup fails.
+func foundIDs(ctx context.Context, d *mongo.Database, coll string, values []bson.RawValue) map[string]bool {
 	in := bson.A{}
+	seen := map[string]bool{}
 	for _, v := range values {
-		in = append(in, v)
+		if k := refKey(v); !seen[k] {
+			seen[k] = true
+			in = append(in, v)
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
 	cmd := bson.D{{Key: "find", Value: coll}, {Key: "filter", Value: bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: in}}}}},
-		{Key: "projection", Value: bson.D{{Key: "_id", Value: 1}}}, {Key: "limit", Value: len(values)}, {Key: "batchSize", Value: len(values)}}
+		{Key: "projection", Value: bson.D{{Key: "_id", Value: 1}}}, {Key: "limit", Value: len(in)}, {Key: "batchSize", Value: len(in)}}
 	cur, err := d.RunCommandCursor(ctx, cmd)
 	if err != nil {
-		return false
+		return nil
 	}
 	defer closeCursor(ctx, cur)
-	found := 0
+	found := map[string]bool{}
 	for cur.Next(ctx) {
-		found++
+		found[refKey(cur.Current.Lookup("_id"))] = true
 	}
 	if cur.Err() != nil {
-		return false
+		return nil
 	}
-	need := len(values)
-	if need == refSamples {
-		need = refSamples - 1
+	return found
+}
+
+// enoughFound reports whether found of total sampled values verify a
+// reference: 4 of 5, or all of them when there are fewer than 5.
+func enoughFound(found, total int) bool {
+	return total > 0 && found >= min(total, refSamples-1)
+}
+
+// refKey identifies a value for matching sampled values against _id values
+// the server returns. Numbers compare by value, as the server does, so an
+// int 1 matches a long or double 1.
+func refKey(v bson.RawValue) string {
+	switch v.Type {
+	case bson.TypeInt32:
+		return "n:" + strconv.FormatInt(int64(v.Int32()), 10)
+	case bson.TypeInt64:
+		return "n:" + strconv.FormatInt(v.Int64(), 10)
+	case bson.TypeDouble:
+		return numKey(v.Double())
+	case bson.TypeDecimal128:
+		if f, err := strconv.ParseFloat(v.Decimal128().String(), 64); err == nil {
+			return numKey(f)
+		}
 	}
-	return found >= need
+	return strconv.Itoa(int(v.Type)) + ":" + string(v.Value)
+}
+
+func numKey(f float64) string {
+	if f == math.Trunc(f) && math.Abs(f) < 1<<53 {
+		return "n:" + strconv.FormatInt(int64(f), 10)
+	}
+	return "n:" + strconv.FormatFloat(f, 'g', -1, 64)
 }

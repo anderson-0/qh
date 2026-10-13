@@ -124,9 +124,19 @@ func columnList(o *engine.Object) string {
 		names[f.Name] = true
 	}
 	children := map[string][]string{}
+	// childRefs holds "→target" for a child that is itself a referencing
+	// field, such as product_id in items[].product_id.
+	childRefs := map[string]string{}
 	for _, f := range o.Fields {
-		if p, c, ok := childOf(f.Name); ok && names[p] && !contains(children[p], c) {
+		p, c, ok := childOf(f.Name)
+		if !ok || !names[p] {
+			continue
+		}
+		if !contains(children[p], c) {
 			children[p] = append(children[p], c)
+		}
+		if fk, ok := fks[f.Name]; ok && (f.Name == p+"."+c || f.Name == p+"[]."+c) {
+			childRefs[p+"\x00"+c] = arrow(o.Namespace, f.Name, fk)
 		}
 	}
 	var cols []string
@@ -136,20 +146,13 @@ func columnList(o *engine.Object) string {
 		}
 		s := f.Name
 		if kids := children[f.Name]; len(kids) > 0 {
-			shown := kids
-			if len(shown) > 2 {
-				shown = append(append([]string{}, kids[:2]...), "…")
-			}
-			s += "{" + strings.Join(shown, ",") + "}"
+			s += "{" + strings.Join(foldChildren(kids, func(c string) string { return childRefs[f.Name+"\x00"+c] }), ",") + "}"
 		}
 		if pk[f.Name] {
 			s += " PK"
 		}
 		if fk, ok := fks[f.Name]; ok {
-			s += "→" + target(o.Namespace, fk.RefNamespace, fk.RefObject)
-			if fk.RefColumns[0] != f.Name && fk.RefColumns[0] != "_id" {
-				s += "." + fk.RefColumns[0]
-			}
+			s += arrow(o.Namespace, f.Name, fk)
 		}
 		if len(f.Enum) > 0 && len(f.Enum) <= 10 {
 			s += " [" + strings.Join(f.Enum, "|") + "]"
@@ -157,6 +160,49 @@ func columnList(o *engine.Object) string {
 		cols = append(cols, s)
 	}
 	return strings.Join(cols, ", ")
+}
+
+// arrow renders a single-column reference as →table, →table.column when the
+// names differ, or →collection for a reference to _id.
+func arrow(from, col string, fk engine.ForeignKey) string {
+	s := "→" + target(from, fk.RefNamespace, fk.RefObject)
+	if fk.RefColumns[0] != col && fk.RefColumns[0] != "_id" {
+		s += "." + fk.RefColumns[0]
+	}
+	return s
+}
+
+// foldChildren shows up to two child names, then "…". Children that
+// reference another collection carry their arrow and, when the cut would
+// hide them, move to the front.
+func foldChildren(kids []string, ref func(string) string) []string {
+	order := kids
+	if len(kids) > 2 {
+		var refs, rest []string
+		for _, k := range kids {
+			if ref(k) != "" {
+				refs = append(refs, k)
+			} else {
+				rest = append(rest, k)
+			}
+		}
+		hidden := false
+		for _, k := range kids[2:] {
+			hidden = hidden || ref(k) != ""
+		}
+		if hidden {
+			order = append(refs, rest...)
+		}
+	}
+	var out []string
+	for i, k := range order {
+		if i == 2 {
+			out = append(out, "…")
+			break
+		}
+		out = append(out, k+ref(k))
+	}
+	return out
 }
 
 func contains(list []string, s string) bool {

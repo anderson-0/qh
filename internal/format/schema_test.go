@@ -198,12 +198,20 @@ func TestOverviewFoldsNestedFields(t *testing.T) {
 	c := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "shop", Objects: []*engine.Object{
 		{Namespace: "shop", Name: "customers", Kind: engine.KindCollection, RowEstimate: 599, PrimaryKey: []string{"_id"},
 			Fields: []engine.Field{{Name: "_id"}, {Name: "name"}, {Name: "address"}, {Name: "address.city"},
-				{Name: "address.country"}, {Name: "address.zip"}, {Name: "items"}, {Name: "items[].sku"}, {Name: "store_id"}},
-			ForeignKeys: []engine.ForeignKey{{Namespace: "shop", Object: "customers", Columns: []string{"store_id"},
-				RefNamespace: "shop", RefObject: "stores", RefColumns: []string{"_id"}}}},
+				{Name: "address.country"}, {Name: "address.zip"}, {Name: "items"}, {Name: "items[].product_id"}, {Name: "items[].qty"},
+				{Name: "cast"}, {Name: "cast[].given_nm"}, {Name: "cast[].family_nm"}, {Name: "cast[].performer_key"},
+				{Name: "store_id"}},
+			ForeignKeys: []engine.ForeignKey{
+				{Namespace: "shop", Object: "customers", Columns: []string{"store_id"},
+					RefNamespace: "shop", RefObject: "stores", RefColumns: []string{"_id"}},
+				{Namespace: "shop", Object: "customers", Columns: []string{"items[].product_id"},
+					RefNamespace: "shop", RefObject: "products", RefColumns: []string{"_id"}},
+				{Namespace: "shop", Object: "customers", Columns: []string{"cast[].performer_key"},
+					RefNamespace: "shop", RefObject: "performer", RefColumns: []string{"_id"}}}},
 	}}}}
 	out, _ := Schema(c, SchemaOpts{})
-	want := "shop: 1 collection\n  customers ~599: _id PK, name, address{city,country,…}, items{sku}, store_id→stores\n"
+	want := "shop: 1 collection\n  customers ~599: _id PK, name, address{city,country,…}, items{product_id→products,qty}, " +
+		"cast{performer_key→performer,given_nm,…}, store_id→stores\n"
 	if out != want {
 		t.Errorf("got\n%s\nwant\n%s", out, want)
 	}

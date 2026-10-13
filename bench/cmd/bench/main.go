@@ -1,4 +1,4 @@
-// Command bench runs the qh vs dbhub benchmark (spec §9.2).
+// Command bench runs the qh benchmark against dbhub or mongodb-mcp-server (spec §9.2).
 package main
 
 import (
@@ -17,12 +17,13 @@ import (
 
 func main() {
 	var cfg harness.Config
-	var datasets, servers, out string
+	var datasets, servers, out, rival, rivalVersion string
 	flag.StringVar(&cfg.Model, "model", harness.DefaultModel, "Claude model id")
 	flag.StringVar(&cfg.Effort, "effort", harness.DefaultEffort, "output_config effort sent with every request (low, medium, high, xhigh, max)")
-	flag.StringVar(&cfg.DBHubVersion, "dbhub-version", harness.DefaultDBHubVersion, "dbhub npm version")
-	flag.StringVar(&datasets, "datasets", "pagila,sakila,chinook,lendco", "datasets to run")
-	flag.StringVar(&servers, "servers", "qh,dbhub", "servers to compare")
+	flag.StringVar(&rival, "rival", "dbhub", "server qh is compared with: dbhub (SQL datasets) or mongodb-mcp (MongoDB datasets)")
+	flag.StringVar(&rivalVersion, "rival-version", "", "the rival's npm version (default: the pinned one)")
+	flag.StringVar(&datasets, "datasets", "", "datasets to run (default: pagila,sakila,chinook,lendco for dbhub; pagila-docs,lendco-docs for mongodb-mcp)")
+	flag.StringVar(&servers, "servers", "", "servers to compare (default: qh and the rival)")
 	flag.IntVar(&cfg.Runs, "runs", 3, "runs per question")
 	flag.IntVar(&cfg.Limit, "limit", 0, "questions per dataset (0 = all)")
 	flag.IntVar(&cfg.Parallel, "parallel", 4, "concurrent model conversations per server")
@@ -33,11 +34,31 @@ func main() {
 	flag.BoolVar(&cfg.SkipMicro, "skip-micro", false, "skip the micro-benchmarks")
 	flag.StringVar(&out, "out", "results", "results directory")
 	flag.Parse()
+	sqlSets, docSets := []string{"pagila", "sakila", "chinook", "lendco"}, []string{"pagila-docs", "lendco-docs"}
+	allowed := sqlSets
+	switch rival {
+	case "dbhub":
+		cfg.RivalVersion = harness.DefaultDBHubVersion
+	case "mongodb-mcp":
+		cfg.RivalVersion, allowed = harness.DefaultMongoMCPVersion, docSets
+	default:
+		usage(fmt.Errorf("-rival: unknown value %q (use dbhub or mongodb-mcp)", rival))
+	}
+	cfg.Rival = rival
+	if rivalVersion != "" {
+		cfg.RivalVersion = rivalVersion
+	}
+	if datasets == "" {
+		datasets = strings.Join(allowed, ",")
+	}
+	if servers == "" {
+		servers = "qh," + rival
+	}
 	var err error
-	if cfg.Datasets, err = parseList("datasets", datasets, "pagila", "sakila", "chinook", "lendco"); err != nil {
+	if cfg.Datasets, err = parseList("datasets", datasets, allowed...); err != nil {
 		usage(err)
 	}
-	if cfg.Servers, err = parseList("servers", servers, "qh", "dbhub"); err != nil {
+	if cfg.Servers, err = parseList("servers", servers, "qh", rival); err != nil {
 		usage(err)
 	}
 	switch cfg.Effort {

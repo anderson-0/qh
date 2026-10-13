@@ -253,13 +253,26 @@ func TestRunnerNotesBudgetAndTimeoutFailures(t *testing.T) {
 		{Server: "dbhub", Error: "run timed out after 10m"},
 		{Server: "qh", Error: "token budget exceeded (1)", Aborted: true},
 	}}
-	notes := failureNotes(rep.Results)
+	notes := failureNotes(rep.Results, "dbhub")
 	got := strings.Join(notes, "\n")
 	if !strings.Contains(got, "1 qh and 2 dbhub runs failed with \"token budget exceeded\"") ||
 		!strings.Contains(got, "0 qh and 1 dbhub runs failed with \"run timed out\"") {
 		t.Fatalf("%q", got)
 	}
-	if n := failureNotes([]Result{{Server: "qh"}}); len(n) != 0 {
+	if n := failureNotes([]Result{{Server: "qh"}}, "dbhub"); len(n) != 0 {
 		t.Fatalf("%v", n)
+	}
+}
+
+func TestRivalDefaultsToDBHub(t *testing.T) {
+	if (Config{}).rival() != "dbhub" || (Config{Rival: "mongodb-mcp"}).rival() != "mongodb-mcp" {
+		t.Fatal("Config.rival")
+	}
+	if (&Report{}).rival() != "dbhub" || (&Report{Rival: "mongodb-mcp"}).rival() != "mongodb-mcp" {
+		t.Fatal("Report.rival")
+	}
+	got := strings.Join(failureNotes([]Result{{Server: "mongodb-mcp", Error: "run timed out after 10m"}, {Server: "dbhub", Error: "run timed out after 10m"}}, "mongodb-mcp"), "\n")
+	if !strings.Contains(got, "0 qh and 1 mongodb-mcp runs failed") {
+		t.Fatalf("%q", got)
 	}
 }

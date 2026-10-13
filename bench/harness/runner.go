@@ -13,7 +13,8 @@ import (
 
 // Config selects what a benchmark run does.
 type Config struct {
-	Model, Effort, DBHubVersion      string
+	Model, Effort                    string
+	Rival, RivalVersion              string // "dbhub" (default) or "mongodb-mcp"
 	Datasets, Servers                []string
 	Runs, Limit, Parallel, MaxTurns  int
 	TokenBudget                      int64 // input+output tokens one run may spend; 0 = no ceiling
@@ -22,6 +23,14 @@ type Config struct {
 	RunTimeout                       time.Duration // wall-time limit of one conversation; 0 means DefaultRunTimeout
 	Raw                              io.Writer     // one JSON Result per line, written as each run finishes
 	Log                              io.Writer     // progress; may be nil
+}
+
+// rival returns cfg.Rival, defaulting to dbhub.
+func (cfg Config) rival() string {
+	if cfg.Rival == "" {
+		return "dbhub"
+	}
+	return cfg.Rival
 }
 
 // Deps are the parts tests replace.
@@ -74,7 +83,7 @@ func (t *errTap) Continue(ctx context.Context, results []ToolResult) (*Reply, er
 
 // failureNotes counts, per server, the failed runs that hit the token budget
 // or the run timeout; there is no note when there are none.
-func failureNotes(results []Result) []string {
+func failureNotes(results []Result, rival string) []string {
 	var notes []string
 	for _, kind := range []string{"token budget exceeded", "run timed out"} {
 		var qh, db int
@@ -84,12 +93,12 @@ func failureNotes(results []Result) []string {
 			}
 			if r.Server == "qh" {
 				qh++
-			} else if r.Server == "dbhub" {
+			} else if r.Server == rival {
 				db++
 			}
 		}
 		if qh+db > 0 {
-			notes = append(notes, fmt.Sprintf("%d qh and %d dbhub runs failed with %q (they count against their server)", qh, db, kind))
+			notes = append(notes, fmt.Sprintf("%d qh and %d %s runs failed with %q (they count against their server)", qh, db, rival, kind))
 		}
 	}
 	return notes
@@ -121,10 +130,15 @@ func DefaultDeps(cfg Config, qhBin string) Deps {
 		Models:       NewAnthropic(cfg.APIKey, cfg.Model, cfg.Effort),
 		StartDataset: StartDataset,
 		StartServer: func(ctx context.Context, server string, conns []Conn) (Server, error) {
-			if server == "qh" {
+			switch server {
+			case "qh":
 				return StartQH(ctx, qhBin, conns)
+			case "dbhub":
+				return StartDBHub(ctx, cfg.RivalVersion, conns)
+			case "mongodb-mcp":
+				return StartMongoMCP(ctx, cfg.RivalVersion, conns)
 			}
-			return StartDBHub(ctx, cfg.DBHubVersion, conns)
+			return nil, fmt.Errorf("unknown server %q", server)
 		},
 		CountTokens: func(ctx context.Context, tools []ToolDef, instructions string) (int64, error) {
 			return CountToolTokens(ctx, cfg.APIKey, cfg.Model, tools, instructions)
@@ -143,7 +157,7 @@ func (cfg Config) logf(format string, a ...any) {
 // micro-benchmarks, as configured. Failures of one server or phase are
 // recorded and the rest continues.
 func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
-	rep := &Report{Date: time.Now().Format("2006-01-02"), Model: cfg.Model, Effort: cfg.Effort, Runs: cfg.Runs, DBHubVersion: cfg.DBHubVersion,
+	rep := &Report{Date: time.Now().Format("2006-01-02"), Model: cfg.Model, Effort: cfg.Effort, Runs: cfg.Runs, Rival: cfg.rival(), RivalVersion: cfg.RivalVersion,
 		ToolTokens: map[string][]int64{}, ColdSchema: map[string]time.Duration{},
 		LatencyP50: map[string]time.Duration{}, LatencyP95: map[string]time.Duration{}}
 	var mu sync.Mutex
@@ -187,10 +201,10 @@ func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
 		}
 	}
 	if len(aborted) > 0 {
-		rep.Notes = append(rep.Notes, fmt.Sprintf("%d qh and %d dbhub runs were aborted (server start or model API failures) and are excluded from every figure",
-			aborted["qh"], aborted["dbhub"]))
+		rep.Notes = append(rep.Notes, fmt.Sprintf("%d qh and %d %s runs were aborted (server start or model API failures) and are excluded from every figure",
+			aborted["qh"], aborted[cfg.rival()], cfg.rival()))
 	}
-	rep.Notes = append(rep.Notes, failureNotes(rep.Results)...)
+	rep.Notes = append(rep.Notes, failureNotes(rep.Results, cfg.rival())...)
 	if ctx.Err() != nil {
 		rep.Notes = append(rep.Notes, "interrupted; results are partial")
 	}
@@ -269,19 +283,30 @@ func runDataset(ctx context.Context, cfg Config, deps Deps, name string, record 
 	return nil
 }
 
-// toolTokens measures tool-definition tokens with Chinook registered 1..5 times.
+// toolTokens measures tool-definition tokens with Chinook (Pagila as
+// documents for mongodb-mcp) registered 1..5 times. mongodb-mcp-server serves
+// one connection per process, so it is measured with one.
 func toolTokens(ctx context.Context, cfg Config, deps Deps, rep *Report) error {
-	ds, stop, err := deps.StartDataset(ctx, "chinook")
+	dsName, maxConns := "chinook", 5
+	if cfg.rival() == "mongodb-mcp" {
+		dsName, maxConns = "pagila-docs", 1
+		rep.Notes = append(rep.Notes, "mongodb-mcp-server serves one connection per process; its tool tokens are measured with one")
+	}
+	ds, stop, err := deps.StartDataset(ctx, dsName)
 	if err != nil {
 		return err
 	}
 	defer stop()
 	for _, server := range cfg.Servers {
-		for k := 1; k <= 5 && ctx.Err() == nil; k++ {
+		kmax := maxConns
+		if server == "qh" {
+			kmax = 5
+		}
+		for k := 1; k <= kmax && ctx.Err() == nil; k++ {
 			var conns []Conn
 			for i := 1; i <= k; i++ {
 				c := ConnFor(ds)
-				c.Name = fmt.Sprintf("chinook%d", i)
+				c.Name = fmt.Sprintf("%s%d", strings.ReplaceAll(dsName, "-", "_"), i)
 				conns = append(conns, c)
 			}
 			srv, err := deps.StartServer(ctx, server, conns)
@@ -306,12 +331,17 @@ const coldRuns = 3
 
 // micro runs the cold-schema and query-latency measurements.
 func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
-	gen, stop, err := StartGenerated(ctx, 1000)
+	docs := cfg.rival() == "mongodb-mcp"
+	startGen, latencyDS := StartGenerated, "pagila"
+	if docs {
+		startGen, latencyDS = StartGeneratedMongo, "pagila-docs"
+	}
+	gen, stop, err := startGen(ctx, 1000)
 	if err != nil {
 		rep.Notes = append(rep.Notes, "cold schema: "+err.Error())
 	} else {
 		for _, server := range cfg.Servers {
-			prefix, args := SchemaCall(server, gen.Name)
+			prefix, args := SchemaCall(server, gen)
 			var runs []time.Duration
 			for i := 0; i < coldRuns; i++ {
 				d, err := ColdSchema(ctx, func(ctx context.Context) (Server, error) {
@@ -330,21 +360,28 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 		}
 		stop()
 		if len(rep.ColdSchema) > 0 {
-			rep.Notes = append(rep.Notes,
-				"Cold schema: qh's overview lists the first 200 of 1,000 tables with a pattern hint (it builds the full catalogue); dbhub's search_objects (summary, limit 1000) lists all 1,000.",
+			note := "Cold schema: qh's overview lists the first 200 of 1,000 tables with a pattern hint (it builds the full catalogue); dbhub's search_objects (summary, limit 1000) lists all 1,000."
+			if docs {
+				note = "Cold schema: qh samples 100 documents from each of 1,000 collections and infers fields and references; mongodb-mcp-server's list-collections returns names only."
+			}
+			rep.Notes = append(rep.Notes, note,
 				"Cold schema is the first schema call after process start; it includes any database connection the server makes lazily (qh connects on first use).")
 		}
 	}
-	ds, stopP, err := deps.StartDataset(ctx, "pagila")
+	ds, stopP, err := deps.StartDataset(ctx, latencyDS)
 	if err != nil {
 		rep.Notes = append(rep.Notes, "query latency: "+err.Error())
 		return
 	}
 	defer stopP()
-	qs, _ := LoadQuestions("pagila")
+	qs, _ := LoadQuestions(latencyDS)
 	var queries []string
 	for _, q := range qs {
-		queries = append(queries, q.SQL)
+		if docs {
+			queries = append(queries, string(q.Mongo))
+		} else {
+			queries = append(queries, q.SQL)
+		}
 	}
 	for _, server := range cfg.Servers {
 		srv, err := deps.StartServer(ctx, server, []Conn{ConnFor(ds)})
@@ -352,7 +389,7 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("query latency, %s: %v", server, err))
 			continue
 		}
-		prefix, argsFor := QueryCall(server, ds.Name)
+		prefix, argsFor := QueryCall(server, ds)
 		p50, p95, err := QueryLatency(ctx, srv, FindTool(srv.Tools(), prefix), argsFor, queries, 2, 20)
 		srv.Close()
 		if err != nil {

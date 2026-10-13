@@ -103,8 +103,15 @@ func (s *mcpServer) Close() error {
 	return err
 }
 
-// FindTool returns the first tool whose name starts with prefix, or "".
+// FindTool returns the tool named exactly prefix, else the first tool whose
+// name starts with it, else "". The exact match matters for mongodb-mcp-server,
+// which has both aggregate and aggregate-db.
 func FindTool(tools []*mcp.Tool, prefix string) string {
+	for _, t := range tools {
+		if t.Name == prefix {
+			return t.Name
+		}
+	}
 	for _, t := range tools {
 		if strings.HasPrefix(t.Name, prefix) {
 			return t.Name
@@ -185,10 +192,12 @@ func dbhubDSN(c Conn) string {
 	return c.DSN
 }
 
-// dbhubEnv keeps only what npx and node need from env. dbhub reads its
+// nodeEnv keeps only what npx and node need from env. dbhub reads its
 // configuration from the environment too (DSN, TRANSPORT, READONLY, ...), so a
-// stray variable of the user's must not change what is benchmarked.
-func dbhubEnv(env []string) []string {
+// stray variable of the user's must not change what is benchmarked. It drops
+// MDB_MCP_* variables too, so a stray setting cannot change mongodb-mcp-server
+// either.
+func nodeEnv(env []string) []string {
 	var out []string
 	for _, kv := range env {
 		name, _, ok := strings.Cut(kv, "=")
@@ -239,6 +248,24 @@ func StartDBHub(ctx context.Context, version string, conns []Conn) (Server, erro
 	}
 	cmd := exec.Command("npx", "-y", "@bytebase/dbhub@"+version, "--transport", "stdio", "--config", path)
 	cmd.Dir = dir
-	cmd.Env = dbhubEnv(os.Environ())
+	cmd.Env = nodeEnv(os.Environ())
 	return connect(ctx, "dbhub", cmd, cleanup)
+}
+
+// DefaultMongoMCPVersion is the mongodb-mcp-server npm version benchmarked.
+const DefaultMongoMCPVersion = "3.0.5"
+
+// StartMongoMCP serves MongoDB's official MCP server over stdio through npx:
+// read-only, telemetry off, with the connection string in its environment.
+// It serves one connection per process.
+func StartMongoMCP(ctx context.Context, version string, conns []Conn) (Server, error) {
+	if len(conns) != 1 || conns[0].Engine != "mongodb" {
+		return nil, errors.New("start mongodb-mcp-server: it takes exactly one MongoDB connection per process")
+	}
+	if _, err := exec.LookPath("npx"); err != nil {
+		return nil, errors.New("start mongodb-mcp-server: npx is not installed")
+	}
+	cmd := exec.Command("npx", "-y", "mongodb-mcp-server@"+version, "--readOnly", "--telemetry", "disabled")
+	cmd.Env = append(nodeEnv(os.Environ()), "MDB_MCP_CONNECTION_STRING="+conns[0].DSN)
+	return connect(ctx, "mongodb-mcp", cmd, func() {})
 }

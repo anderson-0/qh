@@ -24,14 +24,28 @@ const (
 	ModeRW Mode = "rw"
 )
 
+// Access is what a query needs from the database.
+type Access = sqlx.Access
+
+// The access classes.
+const (
+	Read  = sqlx.Read
+	Write = sqlx.Write
+	DDL   = sqlx.DDL
+)
+
 // ConnSpec is everything an engine needs to open a connection.
 type ConnSpec struct {
-	ID       string // stable connection id
-	Version  int64  // increases on every change to the connection
-	Engine   string
-	DSN      string // plaintext connection string; never log it
-	Mode     Mode
-	PoolSize int
+	ID      string // stable connection id
+	Version int64  // increases on every change to the connection
+	Engine  string
+	DSN     string // plaintext connection string; never log it
+	Mode    Mode
+	// Namespaces are the connection's allowed namespaces; empty allows all.
+	// Engines whose queries can name another namespace (MongoDB's
+	// getSiblingDB) refuse the rest.
+	Namespaces []string
+	PoolSize   int
 	// Dial, when set, opens every network connection to the database. Server
 	// mode passes the netguard policy here. Nil uses the engine's default.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -101,10 +115,21 @@ type DSNInfo struct {
 // Engine is a database type.
 type Engine interface {
 	Name() string
-	Dialect() sqlx.Dialect
 	// Inspect parses dsn without connecting.
 	Inspect(dsn string) (DSNInfo, error)
 	Open(ctx context.Context, spec ConnSpec) (Conn, error)
+	// Classify returns what q needs from the database, without connecting.
+	// Its errors are *qerr.Error values (category invalid).
+	Classify(q string) (Access, error)
+	// ReferencedObjects names the tables or collections q reads, for
+	// did-you-mean hints on unknown columns.
+	ReferencedObjects(q string) []string
+}
+
+// SQLEngine is implemented by engines whose query language is SQL.
+type SQLEngine interface {
+	Engine
+	Dialect() sqlx.Dialect
 }
 
 // ServerDSNChecker is implemented by engines that restrict what a connection

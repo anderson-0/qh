@@ -33,8 +33,10 @@ var slotWait = 10 * time.Second
 // Engine is the SQLite engine.
 type Engine struct{}
 
-func (Engine) Name() string          { return "sqlite" }
-func (Engine) Dialect() sqlx.Dialect { return sqlx.SQLite }
+func (Engine) Name() string                             { return "sqlite" }
+func (Engine) Dialect() sqlx.Dialect                    { return sqlx.SQLite }
+func (Engine) Classify(q string) (engine.Access, error) { return sqlx.Classify(q, sqlx.SQLite) }
+func (Engine) ReferencedObjects(q string) []string      { return sqlx.ReferencedTables(q, sqlx.SQLite) }
 
 // BuildDSN implements engine.DSNBuilder: a SQLite database is a file path.
 func (Engine) BuildDSN(f engine.DSNFields) (string, error) {

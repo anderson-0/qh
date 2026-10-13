@@ -10,8 +10,12 @@ import (
 
 type fakeEngine struct{ name string }
 
-func (f fakeEngine) Name() string                                 { return f.name }
-func (f fakeEngine) Dialect() sqlx.Dialect                        { return sqlx.Postgres }
+func (f fakeEngine) Name() string                      { return f.name }
+func (f fakeEngine) Dialect() sqlx.Dialect             { return sqlx.Postgres }
+func (f fakeEngine) Classify(q string) (Access, error) { return sqlx.Classify(q, sqlx.Postgres) }
+func (f fakeEngine) ReferencedObjects(q string) []string {
+	return sqlx.ReferencedTables(q, sqlx.Postgres)
+}
 func (f fakeEngine) Inspect(string) (DSNInfo, error)              { return DSNInfo{}, nil }
 func (f fakeEngine) Open(context.Context, ConnSpec) (Conn, error) { return nil, nil }
 

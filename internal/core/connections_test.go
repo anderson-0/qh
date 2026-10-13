@@ -17,8 +17,12 @@ import (
 // leakyEngine puts its connection string and password into every error.
 type leakyEngine struct{}
 
-func (leakyEngine) Name() string          { return "leaky" }
-func (leakyEngine) Dialect() sqlx.Dialect { return sqlx.Postgres }
+func (leakyEngine) Name() string                             { return "leaky" }
+func (leakyEngine) Dialect() sqlx.Dialect                    { return sqlx.Postgres }
+func (leakyEngine) Classify(q string) (engine.Access, error) { return sqlx.Classify(q, sqlx.Postgres) }
+func (leakyEngine) ReferencedObjects(q string) []string {
+	return sqlx.ReferencedTables(q, sqlx.Postgres)
+}
 func (leakyEngine) Inspect(dsn string) (engine.DSNInfo, error) {
 	u, err := url.Parse(dsn)
 	if err != nil || u.User == nil {

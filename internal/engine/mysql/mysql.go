@@ -27,7 +27,9 @@ func (e Engine) Name() string {
 	return e.name
 }
 
-func (Engine) Dialect() sqlx.Dialect { return sqlx.MySQL }
+func (Engine) Dialect() sqlx.Dialect                    { return sqlx.MySQL }
+func (Engine) Classify(q string) (engine.Access, error) { return sqlx.Classify(q, sqlx.MySQL) }
+func (Engine) ReferencedObjects(q string) []string      { return sqlx.ReferencedTables(q, sqlx.MySQL) }
 
 // BuildDSN implements engine.DSNBuilder.
 func (Engine) BuildDSN(f engine.DSNFields) (string, error) { return engine.BuildURL("mysql", f) }

@@ -37,6 +37,9 @@ type Config struct {
 	// MaxRSABits refuses an RSA key with a larger modulus (server mode:
 	// signing with a huge key is slow). 0 means no limit.
 	MaxRSABits int
+	// RefuseDSA refuses DSA keys (server mode: x/crypto does not bound
+	// their size).
+	RefuseDSA bool
 	// DialBastion opens the TCP connection to the bastion (server mode: the
 	// netguard policy). Nil uses a plain dialer.
 	DialBastion func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -125,7 +128,7 @@ func New(cfg Config) (*Tunnel, error) {
 			}
 			return nil, qerr.New(qerr.ConnectionFailed, "ssh: the private key cannot be read (wrong passphrase or not a PEM private key)")
 		}
-		if err := sshkey.CheckParsed(key, cfg.MaxRSABits); err != nil {
+		if err := sshkey.CheckParsed(key, cfg.MaxRSABits, cfg.RefuseDSA); err != nil {
 			return nil, qerr.New(qerr.ConnectionFailed, "ssh: "+err.Error())
 		}
 		signer, err := ssh.NewSignerFromKey(key)

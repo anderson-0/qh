@@ -96,7 +96,7 @@ func TestSSHInfoAndRefs(t *testing.T) {
 // ValidateServer checks a tenant's key without decrypting it (the tunnel
 // decrypts it once, when connecting) and applies server mode's limits.
 func TestSSHValidateServer(t *testing.T) {
-	key, enc := keyPEM(t, ""), keyPEM(t, "pp")
+	key, enc, dsaKey := keyPEM(t, ""), keyPEM(t, "pp"), sshtest.DSAKey(t)
 	for i, s := range []SSH{
 		{Host: "b", User: "u", HostKey: fp, PrivateKey: key},
 		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "pp"},
@@ -110,14 +110,15 @@ func TestSSHValidateServer(t *testing.T) {
 		}
 	}
 	for want, s := range map[string]SSH{
-		"is encrypted":            {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
-		"is not encrypted":        {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
-		"not a PEM private key":   {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
-		"larger than 16 KiB":      {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
-		"KDF uses 2048 rounds":    {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.KeyWithRounds(2048), Passphrase: "pp"},
-		"8704-bit RSA key":        {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704},
-		"ssh.user is required":    {Host: "b", HostKey: fp, Password: "pw"},
-		"passphrase applies only": {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
+		"is encrypted":              {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
+		"is not encrypted":          {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
+		"not a PEM private key":     {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
+		"larger than 16 KiB":        {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
+		"KDF uses 2048 rounds":      {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.KeyWithRounds(2048), Passphrase: "pp"},
+		"8704-bit RSA key":          {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704},
+		"DSA keys are not accepted": {Host: "b", User: "u", HostKey: fp, PrivateKey: dsaKey},
+		"ssh.user is required":      {Host: "b", HostKey: fp, Password: "pw"},
+		"passphrase applies only":   {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
 	} {
 		err := s.ValidateServer()
 		if err == nil || !strings.Contains(err.Error(), want) {
@@ -130,5 +131,8 @@ func TestSSHValidateServer(t *testing.T) {
 	}
 	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704}).Validate(); err != nil {
 		t.Errorf("local big RSA key: %v", err)
+	}
+	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: dsaKey}).Validate(); err != nil {
+		t.Errorf("local DSA key: %v", err)
 	}
 }

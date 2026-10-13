@@ -128,7 +128,7 @@ func checkKey(key, pass string, passRef, server bool) error {
 		if pass != "" {
 			return sshInvalid("ssh.passphrase is set but the private key is not encrypted")
 		}
-		if err := sshkey.CheckParsed(k, rsaBits); err != nil {
+		if err := sshkey.CheckParsed(k, rsaBits, server); err != nil {
 			return qerr.New(qerr.Invalid, "ssh: "+err.Error())
 		}
 		return nil

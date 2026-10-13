@@ -4,15 +4,18 @@ package sshtest
 
 import (
 	"crypto"
+	"crypto/dsa" //nolint:staticcheck // tests that DSA keys are refused
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	_ "embed"
+	"encoding/asn1"
 	"encoding/binary"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"strconv"
 	"sync"
@@ -71,6 +74,27 @@ func Key(t testing.TB, passphrase string) (string, ssh.PublicKey) {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(b)), sp
+}
+
+// DSAKey returns a new 1024-bit DSA private key as unencrypted PEM, in the
+// OpenSSL format x/crypto parses.
+func DSAKey(t testing.TB) string {
+	t.Helper()
+	var k dsa.PrivateKey
+	if err := dsa.GenerateParameters(&k.Parameters, rand.Reader, dsa.L1024N160); err != nil {
+		t.Fatal(err)
+	}
+	if err := dsa.GenerateKey(&k, rand.Reader); err != nil {
+		t.Fatal(err)
+	}
+	der, err := asn1.Marshal(struct {
+		Version       int
+		P, Q, G, Y, X *big.Int
+	}{0, k.P, k.Q, k.G, k.Y, k.X})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "DSA PRIVATE KEY", Bytes: der}))
 }
 
 // RSA8704 is an 8704-bit RSA private key in PKCS#1 PEM, unencrypted. It

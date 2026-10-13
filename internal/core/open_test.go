@@ -324,17 +324,47 @@ func TestServerModeWrongPassphraseFoundWhenConnecting(t *testing.T) {
 	}
 }
 
-// A private_key_ref that resolves to nothing is an error, not a silent
-// fall back to password authentication with an empty password.
-func TestEmptyPrivateKeyRef(t *testing.T) {
-	empty := filepath.Join(t.TempDir(), "key")
+// A private_key_ref or password_ref that resolves to nothing is an error,
+// not a silent attempt at password authentication with an empty password.
+func TestEmptySSHRefs(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "empty")
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := OpenConn(context.Background(), engine.ConnSpec{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app",
-		Resolve: secretref.NewSet(false, nil).Resolve,
-		SSH:     &engine.SSH{Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKeyRef: "file:" + empty}})
-	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), "ssh: private_key_ref resolved to an empty value") {
-		t.Fatalf("%v", err)
+	for want, s := range map[string]*engine.SSH{
+		"ssh: private_key_ref resolved to an empty value": {Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKeyRef: "file:" + empty},
+		"ssh: password_ref resolved to an empty value":    {Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PasswordRef: "file:" + empty},
+	} {
+		_, err := OpenConn(context.Background(), engine.ConnSpec{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app",
+			Resolve: secretref.NewSet(false, nil).Resolve, SSH: s})
+		if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+	}
+}
+
+// In server mode a DSA key is refused, given inline (on input) or by
+// reference (when the tunnel is built).
+func TestServerModeRefusesDSAKeys(t *testing.T) {
+	const want = "ssh: DSA keys are not accepted; use an Ed25519, ECDSA or RSA key"
+	key := sshtest.DSAKey(t)
+	allow := func(netip.Addr) bool { return true }
+	var d net.Dialer
+	svc := newServiceWith(t, openStore(t), Options{Dial: d.DialContext, CheckTarget: allow})
+	_, err := svc.TestInput(context.Background(), ws, ConnInput{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app",
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKey: key}})
+	if qerr.From(err).Category != qerr.Invalid || !strings.Contains(err.Error(), want) {
+		t.Fatalf("inline: %v", err)
+	}
+	t.Setenv("QH_TEST_DSA_KEY", key)
+	spec := engine.ConnSpec{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app", Resolve: secretref.NewSet(false, nil).Resolve,
+		Server: true, Dial: d.DialContext, CheckTarget: allow,
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKeyRef: "env:QH_TEST_DSA_KEY"}}
+	if _, err := OpenConn(context.Background(), spec); qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ref: %v", err)
+	}
+	spec.Server, spec.Dial, spec.CheckTarget = false, nil, nil
+	if _, err := OpenConn(context.Background(), spec); err == nil || strings.Contains(err.Error(), "DSA") {
+		t.Fatalf("local: %v", err)
 	}
 }

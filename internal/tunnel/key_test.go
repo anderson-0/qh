@@ -109,6 +109,20 @@ func TestRSAKeySizeCappedInServerMode(t *testing.T) {
 	tun.Close()
 }
 
+// DSA keys are refused in server mode: x/crypto does not check a DSA
+// private key's parameters, so a huge one would be slow to sign with.
+// Local mode still accepts them.
+func TestDSAKeyRefusedInServerMode(t *testing.T) {
+	key := sshtest.DSAKey(t)
+	_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: key, MaxKDFRounds: serverRounds, MaxRSABits: 8192, RefuseDSA: true})
+	wantKeyErr(t, err, "ssh: DSA keys are not accepted; use an Ed25519, ECDSA or RSA key")
+	tun, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: key})
+	if err != nil {
+		t.Fatalf("local mode: %v", err)
+	}
+	tun.Close()
+}
+
 // Keys written by OpenSSH's ssh-keygen: one within the cap works in server
 // mode; one above it is refused there, and only there. (Decrypting it in
 // local mode is slow under the race detector, so that case stops at the

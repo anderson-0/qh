@@ -6,6 +6,7 @@ package sshkey
 
 import (
 	"bytes"
+	"crypto/dsa" //nolint:staticcheck // only to recognise and refuse DSA keys
 	"crypto/rsa"
 	"encoding/binary"
 	"encoding/pem"
@@ -57,14 +58,23 @@ func Check(pemText string, maxRounds int) error {
 }
 
 // CheckParsed refuses a parsed private key that costs too much to sign
-// with: an RSA key whose modulus exceeds maxRSABits (0 means no limit).
-func CheckParsed(key any, maxRSABits int) error {
-	k, ok := key.(*rsa.PrivateKey)
-	if !ok || maxRSABits <= 0 || k.N == nil {
-		return nil
-	}
-	if n := k.N.BitLen(); n > maxRSABits {
-		return fmt.Errorf("the private key is an %d-bit RSA key; this server accepts at most %d bits", n, maxRSABits)
+// with: an RSA key whose modulus exceeds maxRSABits (0 means no limit) and,
+// when refuseDSA is set, any DSA key. x/crypto never checks a DSA private
+// key's parameters, so P and Q can be arbitrarily large; OpenSSH dropped
+// DSA in 2024.
+func CheckParsed(key any, maxRSABits int, refuseDSA bool) error {
+	switch k := key.(type) {
+	case *dsa.PrivateKey:
+		if refuseDSA {
+			return errors.New("DSA keys are not accepted; use an Ed25519, ECDSA or RSA key")
+		}
+	case *rsa.PrivateKey:
+		if maxRSABits <= 0 || k.N == nil {
+			return nil
+		}
+		if n := k.N.BitLen(); n > maxRSABits {
+			return fmt.Errorf("the private key is an %d-bit RSA key; this server accepts at most %d bits", n, maxRSABits)
+		}
 	}
 	return nil
 }

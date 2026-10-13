@@ -1,6 +1,7 @@
 package sshkey
 
 import (
+	"crypto/dsa" //nolint:staticcheck // tests that DSA keys are refused
 	"crypto/ed25519"
 	"crypto/rsa"
 	"encoding/binary"
@@ -139,20 +140,27 @@ func TestCheckParsed(t *testing.T) {
 		n := new(big.Int).Lsh(big.NewInt(1), bits-1)
 		return &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: n, E: 65537}}
 	}
-	if err := CheckParsed(rsaBits(8192), ServerMaxRSABits); err != nil {
+	if err := CheckParsed(rsaBits(8192), ServerMaxRSABits, true); err != nil {
 		t.Fatalf("8192 bits: %v", err)
 	}
 	want := "the private key is an 8193-bit RSA key; this server accepts at most 8192 bits"
-	if err := CheckParsed(rsaBits(8193), ServerMaxRSABits); err == nil || err.Error() != want {
+	if err := CheckParsed(rsaBits(8193), ServerMaxRSABits, true); err == nil || err.Error() != want {
 		t.Fatalf("8193 bits: %v", err)
 	}
-	if err := CheckParsed(rsaBits(16384), 0); err != nil {
+	if err := CheckParsed(rsaBits(16384), 0, false); err != nil {
 		t.Fatalf("no cap: %v", err)
 	}
 	_, ed, _ := ed25519.GenerateKey(nil)
 	for _, k := range []any{ed, &ed, nil} {
-		if err := CheckParsed(k, ServerMaxRSABits); err != nil {
+		if err := CheckParsed(k, ServerMaxRSABits, true); err != nil {
 			t.Fatalf("%T: %v", k, err)
 		}
+	}
+	dsaKey := &dsa.PrivateKey{}
+	if err := CheckParsed(dsaKey, ServerMaxRSABits, true); err == nil || err.Error() != "DSA keys are not accepted; use an Ed25519, ECDSA or RSA key" {
+		t.Fatalf("DSA, refused: %v", err)
+	}
+	if err := CheckParsed(dsaKey, 0, false); err != nil {
+		t.Fatalf("DSA, allowed: %v", err)
 	}
 }

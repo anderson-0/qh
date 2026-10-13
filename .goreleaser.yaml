@@ -1,0 +1,63 @@
+# Release builds: `goreleaser release --snapshot --clean` builds everything
+# locally without publishing; the release workflow publishes on a v* tag.
+version: 2
+project_name: qh
+
+builds:
+  - id: qh
+    main: ./cmd/qh
+    binary: qh
+    env:
+      - CGO_ENABLED=0 # the SQLite driver is pure Go, so every build is static
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+
+# Release notes come from CHANGELOG.md (the workflow passes --release-notes).
+changelog:
+  disable: true
+
+dockers_v2:
+  - id: qh
+    ids: [qh]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/anderson-0/qh
+    tags:
+      - "{{ .Version }}"
+      - "{{ .Major }}.{{ .Minor }}"
+      - "{{ .Major }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: qh
+      org.opencontainers.image.description: Token-efficient database server for AI agents
+      org.opencontainers.image.source: https://github.com/anderson-0/qh
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: MIT
+
+release:
+  github:
+    owner: anderson-0
+    name: qh

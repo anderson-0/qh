@@ -88,9 +88,11 @@ func newRoot(version string) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "qh",
 		Short:         "Token-efficient database server for AI agents",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	root.SetVersionTemplate("{{.Version}}\n") // as `qh version` prints it
 	pf := root.PersistentFlags()
 	pf.StringVar(&home, "home", "", "data directory (default $QH_HOME, else $XDG_CONFIG_HOME/qh or ~/.config/qh)")
 	pf.String("workspace", store.DefaultWorkspace, "workspace to act on (default $QH_WORKSPACE, else default)")

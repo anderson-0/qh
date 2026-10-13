@@ -13,6 +13,24 @@ Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+, SQLite and MongoDB 
 
 ## Install
 
+Download a binary for Linux, macOS or Windows (amd64 or arm64) from the
+[releases page](https://github.com/anderson-0/qh/releases), unpack it and put `qh` on your `PATH`.
+Each release lists SHA-256 checksums in `checksums.txt`.
+
+Or run the server image, which starts server mode on port 8765 and keeps its store in the `/data` volume:
+
+```bash
+docker run -d --name qh -p 8765:8765 -v qh-data:/data \
+  -e QH_MASTER_KEY="$(openssl rand -base64 32)" ghcr.io/anderson-0/qh:1
+docker logs qh   # shows the admin API key once, on first start
+```
+
+Keep the master key: it decrypts the stored connection strings (see Server mode). Inside the container,
+`localhost` is the container itself; reach a database on the Docker host as `host.docker.internal` (Docker
+Desktop) or the bridge gateway address. Arguments after the image name replace the default `serve --http :8765`.
+
+Or build it with Go:
+
 ```bash
 go install github.com/anderson-0/qh/cmd/qh@latest
 ```
@@ -283,3 +301,7 @@ make test        # needs Docker for the Postgres, MySQL/MariaDB and MongoDB test
 make test-short  # skips Docker tests
 make build       # static binary in bin/qh
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

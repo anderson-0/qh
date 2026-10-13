@@ -15,6 +15,10 @@ func TestVersion(t *testing.T) {
 	if out.String() != "1.2.3\n" {
 		t.Fatalf("stdout %q", out.String())
 	}
+	out.Reset()
+	if code := Execute("1.2.3", []string{"--version"}, strings.NewReader(""), &out, &errOut); code != 0 || out.String() != "1.2.3\n" {
+		t.Fatalf("--version: exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
+	}
 }
 
 func TestUnknownCommandFails(t *testing.T) {

@@ -31,9 +31,9 @@ archives:
 checksum:
   name_template: checksums.txt
 
-# Release notes come from CHANGELOG.md (the workflow passes --release-notes).
-changelog:
-  disable: true
+# Release notes come from CHANGELOG.md: the workflow passes --release-notes,
+# which replaces the generated changelog. (changelog.disable would drop the
+# notes too, which left v1.0.0 with an empty body.)
 
 dockers_v2:
   - id: qh

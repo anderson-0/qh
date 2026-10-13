@@ -4,6 +4,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,9 @@ type Config struct {
 	// for more rounds, before any are run (server mode: the key is a
 	// tenant's). 0 means no limit.
 	MaxKDFRounds int
+	// MaxRSABits refuses an RSA key with a larger modulus (server mode:
+	// signing with a huge key is slow). 0 means no limit.
+	MaxRSABits int
 	// DialBastion opens the TCP connection to the bastion (server mode: the
 	// netguard policy). Nil uses a plain dialer.
 	DialBastion func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -116,7 +120,13 @@ func New(cfg Config) (*Tunnel, error) {
 			if errors.As(err, &pm) {
 				return nil, qerr.New(qerr.ConnectionFailed, "ssh: the private key is encrypted; give a passphrase")
 			}
+			if errors.Is(err, x509.IncorrectPasswordError) {
+				return nil, qerr.New(qerr.ConnectionFailed, "ssh: the passphrase does not decrypt the private key")
+			}
 			return nil, qerr.New(qerr.ConnectionFailed, "ssh: the private key cannot be read (wrong passphrase or not a PEM private key)")
+		}
+		if err := sshkey.CheckParsed(key, cfg.MaxRSABits); err != nil {
+			return nil, qerr.New(qerr.ConnectionFailed, "ssh: "+err.Error())
 		}
 		signer, err := ssh.NewSignerFromKey(key)
 		if err != nil {

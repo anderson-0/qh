@@ -9,6 +9,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	_ "embed"
 	"encoding/binary"
 	"encoding/pem"
 	"io"
@@ -71,6 +72,13 @@ func Key(t testing.TB, passphrase string) (string, ssh.PublicKey) {
 	}
 	return string(pem.EncodeToMemory(b)), sp
 }
+
+// RSA8704 is an 8704-bit RSA private key in PKCS#1 PEM, unencrypted. It
+// exists only for tests (generating one takes tens of seconds) and is
+// larger than the 8192 bits server mode accepts.
+//
+//go:embed testdata/rsa8704-test-only.pem
+var RSA8704 string
 
 // KeyWithRounds returns an encrypted OpenSSH-format private key whose
 // header asks for rounds bcrypt_pbkdf rounds. Only the header is valid: the

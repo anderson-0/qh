@@ -5,11 +5,12 @@
 package sshkey
 
 import (
+	"bytes"
+	"crypto/rsa"
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // MaxSize is the largest PEM text accepted. A 16384-bit RSA key in OpenSSH
@@ -19,6 +20,11 @@ const MaxSize = 16 << 10
 // ServerMaxKDFRounds is the bcrypt round cap in server mode. ssh-keygen
 // writes 16 by default, and guides commonly recommend -a 100.
 const ServerMaxKDFRounds = 128
+
+// ServerMaxRSABits is the largest RSA modulus accepted in server mode, as
+// x/crypto's OpenSSH-format parser enforces (its PKCS#1 and PKCS#8 paths
+// do not). Signing cost grows roughly with the cube of the size.
+const ServerMaxRSABits = 8192
 
 const opensshMagic = "openssh-key-v1\x00"
 
@@ -50,11 +56,24 @@ func Check(pemText string, maxRounds int) error {
 	return nil
 }
 
+// CheckParsed refuses a parsed private key that costs too much to sign
+// with: an RSA key whose modulus exceeds maxRSABits (0 means no limit).
+func CheckParsed(key any, maxRSABits int) error {
+	k, ok := key.(*rsa.PrivateKey)
+	if !ok || maxRSABits <= 0 || k.N == nil {
+		return nil
+	}
+	if n := k.N.BitLen(); n > maxRSABits {
+		return fmt.Errorf("the private key is an %d-bit RSA key; this server accepts at most %d bits", n, maxRSABits)
+	}
+	return nil
+}
+
 // kdfRounds decodes the header of an openssh-key-v1 key: the magic, then
 // the strings ciphername, kdfname and kdfoptions, in SSH wire format. For
 // bcrypt, kdfoptions holds the string salt and the uint32 rounds.
 func kdfRounds(b []byte) (kdf string, rounds uint32, err error) {
-	if !strings.HasPrefix(string(b), opensshMagic) {
+	if !bytes.HasPrefix(b, []byte(opensshMagic)) {
 		return "", 0, errMalformed
 	}
 	b = b[len(opensshMagic):]

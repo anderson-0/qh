@@ -23,7 +23,6 @@ import (
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secret"
 	"github.com/anderson-0/qh/internal/secretref"
-	"github.com/anderson-0/qh/internal/sshkey"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/suggest"
 )
@@ -141,6 +140,12 @@ func (s *Service) checkInput(in ConnInput) error {
 			return err
 		}
 	}
+	return s.denySSH(in)
+}
+
+// denySSH refuses SSH settings on a --deny-ssh server. Callers run it
+// before normalize, which parses the key.
+func (s *Service) denySSH(in ConnInput) error {
 	if in.SSH != nil && s.opts.DenySSH {
 		return qerr.New(qerr.Forbidden, "SSH tunnels are disabled on this server").
 			WithHint("The operator turned them off with qh serve --deny-ssh")
@@ -148,14 +153,8 @@ func (s *Service) checkInput(in ConnInput) error {
 	return nil
 }
 
-// maxKDFRounds caps the bcrypt rounds of a tenant's encrypted SSH key in
-// server mode; a local user's own key is not limited.
-func (s *Service) maxKDFRounds() int {
-	if s.opts.Dial != nil {
-		return sshkey.ServerMaxKDFRounds
-	}
-	return 0
-}
+// server reports server mode, where connection settings come from tenants.
+func (s *Service) server() bool { return s.opts.Dial != nil }
 
 // allowEngine refuses engines this server does not permit.
 func (s *Service) allowEngine(name string) error {

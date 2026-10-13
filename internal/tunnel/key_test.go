@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,15 +43,19 @@ func TestOversizeKeyRefused(t *testing.T) {
 // A tenant's key whose KDF asks for a huge round count is refused before
 // x/crypto starts on it.
 func TestKDFRoundsCappedInServerMode(t *testing.T) {
-	huge := sshtest.KeyWithRounds(1_000_000)
-	for _, pp := range []string{"", "pp"} {
-		start := time.Now()
-		_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: huge, Passphrase: pp, MaxKDFRounds: serverRounds})
-		if d := time.Since(start); d > 500*time.Millisecond {
-			t.Fatalf("refusing took %v", d)
+	// x/crypto itself refuses more than 2048 rounds at once, so 2048 (which
+	// it would run, for seconds) is what shows qh's own cap at work.
+	for _, rounds := range []uint32{2048, 1_000_000} {
+		for _, pp := range []string{"", "pp"} {
+			start := time.Now()
+			_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: sshtest.KeyWithRounds(rounds), Passphrase: pp, MaxKDFRounds: serverRounds})
+			if d := time.Since(start); d > 500*time.Millisecond {
+				t.Fatalf("%d rounds: refusing took %v", rounds, d)
+			}
+			wantKeyErr(t, err, fmt.Sprintf("ssh: the private key's KDF uses %d rounds; this server accepts at most 128 (re-encrypt it with ssh-keygen -p -a 100)", rounds))
 		}
-		wantKeyErr(t, err, "ssh: the private key's KDF uses 1000000 rounds; this server accepts at most 128 (re-encrypt it with ssh-keygen -p -a 100)")
 	}
+	huge := sshtest.KeyWithRounds(1_000_000)
 	// Without a cap (local mode) qh does not refuse it for its round count;
 	// x/crypto then fails on it as it would on any unreadable key.
 	_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: huge, Passphrase: "pp"})
@@ -77,6 +82,31 @@ func TestEncryptedKeyWithNormalRoundsWorks(t *testing.T) {
 		roundTrip(t, c)
 		tun.Close()
 	}
+}
+
+// A wrong passphrase is named as such, in both modes. (In server mode it is
+// first found here: input validation does not decrypt.)
+func TestWrongPassphrase(t *testing.T) {
+	enc, _ := sshtest.Key(t, "pp")
+	for _, rounds := range []int{0, serverRounds} {
+		_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: enc, Passphrase: "wrong", MaxKDFRounds: rounds})
+		wantKeyErr(t, err, "ssh: the passphrase does not decrypt the private key")
+		if strings.Contains(err.Error(), "wrong") {
+			t.Fatalf("passphrase leaked: %v", err)
+		}
+	}
+}
+
+// In server mode an RSA key larger than 8192 bits is refused once parsed:
+// x/crypto caps OpenSSH-format RSA keys there but not PKCS#1 or PKCS#8 ones.
+func TestRSAKeySizeCappedInServerMode(t *testing.T) {
+	_, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: sshtest.RSA8704, MaxKDFRounds: serverRounds, MaxRSABits: 8192})
+	wantKeyErr(t, err, "ssh: the private key is an 8704-bit RSA key; this server accepts at most 8192 bits")
+	tun, err := New(Config{Addr: "127.0.0.1:22", User: "u", PrivateKey: sshtest.RSA8704})
+	if err != nil {
+		t.Fatalf("local mode: %v", err)
+	}
+	tun.Close()
 }
 
 // Keys written by OpenSSH's ssh-keygen: one within the cap works in server

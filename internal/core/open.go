@@ -69,8 +69,8 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 			PrivateKey: s.PrivateKey, Passphrase: s.Passphrase, Password: s.Password,
 			DialBastion: spec.Dial, CheckTarget: spec.CheckTarget}
 		if spec.Server {
-			// The key is a tenant's: bound what parsing it may cost.
-			cfg.MaxKDFRounds = sshkey.ServerMaxKDFRounds
+			// The key is a tenant's: bound what parsing and signing cost.
+			cfg.MaxKDFRounds, cfg.MaxRSABits = sshkey.ServerMaxKDFRounds, sshkey.ServerMaxRSABits
 		}
 		for _, f := range []struct {
 			ref string
@@ -82,6 +82,10 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 			if *f.dst, err = resolve(f.ref); err != nil {
 				return fail(err)
 			}
+		}
+		if s.PrivateKeyRef != "" && cfg.PrivateKey == "" {
+			// Never fall back to password authentication with no password.
+			return fail(qerr.New(qerr.ConnectionFailed, "ssh: private_key_ref resolved to an empty value"))
 		}
 		secrets = append(secrets, cfg.Password, cfg.Passphrase)
 		if tun, err = tunnel.New(cfg); err != nil {

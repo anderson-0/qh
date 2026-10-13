@@ -12,7 +12,6 @@ import (
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secretref"
-	"github.com/anderson-0/qh/internal/sshkey"
 	"github.com/anderson-0/qh/internal/store"
 )
 
@@ -109,9 +108,10 @@ func bounded(field string, v, def, maxV int) (int, error) {
 	return v, nil
 }
 
-// normalize validates in. maxKDFRounds caps the bcrypt rounds of an inline
-// encrypted SSH key (server mode; 0 means no cap).
-func normalize(in ConnInput, maxKDFRounds int) (ConnInput, error) {
+// normalize validates in. In server mode, SSH settings are validated with
+// the server's key limits and an inline key is not decrypted (the tunnel
+// does that once, when connecting).
+func normalize(in ConnInput, server bool) (ConnInput, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	if !nameRe.MatchString(in.Name) {
 		return in, qerr.New(qerr.Invalid, fmt.Sprintf("invalid connection name %q", in.Name)).
@@ -146,11 +146,11 @@ func normalize(in ConnInput, maxKDFRounds int) (ConnInput, error) {
 		if s.Port == 0 {
 			s.Port = 22
 		}
-		// Validate decrypts an inline key, so its cost is bounded first.
-		if err := sshkey.Check(s.PrivateKey, maxKDFRounds); err != nil {
-			return in, qerr.New(qerr.Invalid, "ssh: "+err.Error())
+		validate := s.Validate
+		if server {
+			validate = s.ValidateServer
 		}
-		if err := s.Validate(); err != nil {
+		if err := validate(); err != nil {
 			return in, err
 		}
 		in.SSH = &s
@@ -356,7 +356,10 @@ func toInfo(rec *store.Connection, info engine.DSNInfo) *ConnInfo {
 
 // CreateConnection validates, optionally tests, seals and stores a connection.
 func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput, test bool) (*ConnInfo, *TestResult, error) {
-	in, err := normalize(in, s.maxKDFRounds())
+	if err := s.denySSH(in); err != nil {
+		return nil, nil, err
+	}
+	in, err := normalize(in, s.server())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -460,7 +463,10 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	if p.TLS != nil {
 		in.TLS = p.TLS
 	}
-	if in, err = normalize(in, s.maxKDFRounds()); err != nil {
+	if err := s.denySSH(in); err != nil {
+		return nil, nil, err
+	}
+	if in, err = normalize(in, s.server()); err != nil {
 		return nil, nil, err
 	}
 	if err := s.allowEngine(in.Engine); err != nil {
@@ -592,7 +598,10 @@ func (s *Service) TestInput(ctx context.Context, ws string, in ConnInput) (*Test
 	if strings.TrimSpace(in.Name) == "" {
 		in.Name = "test"
 	}
-	in, err := normalize(in, s.maxKDFRounds())
+	if err := s.denySSH(in); err != nil {
+		return nil, err
+	}
+	in, err := normalize(in, s.server())
 	if err != nil {
 		return nil, err
 	}

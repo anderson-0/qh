@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/anderson-0/qh/internal/tunnel/sshtest"
 )
 
 func keyPEM(t *testing.T, passphrase string) string {
@@ -88,5 +90,45 @@ func TestSSHInfoAndRefs(t *testing.T) {
 	}
 	if (&SSH{Host: "b", User: "u", Password: "x"}).Info().Auth != "password" {
 		t.Fatal("password auth")
+	}
+}
+
+// ValidateServer checks a tenant's key without decrypting it (the tunnel
+// decrypts it once, when connecting) and applies server mode's limits.
+func TestSSHValidateServer(t *testing.T) {
+	key, enc := keyPEM(t, ""), keyPEM(t, "pp")
+	for i, s := range []SSH{
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: key},
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "pp"},
+		// Not decrypted here, so a wrong passphrase is found when connecting.
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"},
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, PassphraseRef: "env:P"},
+		{Host: "b", User: "u", HostKey: fp, Password: "pw"},
+	} {
+		if err := s.ValidateServer(); err != nil {
+			t.Errorf("ok[%d]: %v", i, err)
+		}
+	}
+	for want, s := range map[string]SSH{
+		"is encrypted":            {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
+		"is not encrypted":        {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
+		"not a PEM private key":   {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
+		"larger than 16 KiB":      {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
+		"KDF uses 2048 rounds":    {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.KeyWithRounds(2048), Passphrase: "pp"},
+		"8704-bit RSA key":        {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704},
+		"ssh.user is required":    {Host: "b", HostKey: fp, Password: "pw"},
+		"passphrase applies only": {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
+	} {
+		err := s.ValidateServer()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", want, err)
+		}
+	}
+	// Local mode still decrypts early, and accepts what server mode caps.
+	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"}).Validate(); err == nil || !strings.Contains(err.Error(), "does not decrypt") {
+		t.Errorf("local wrong passphrase: %v", err)
+	}
+	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704}).Validate(); err != nil {
+		t.Errorf("local big RSA key: %v", err)
 	}
 }

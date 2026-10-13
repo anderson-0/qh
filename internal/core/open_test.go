@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,18 +238,103 @@ func TestServerModeCapsKeyKDFRounds(t *testing.T) {
 
 	t.Setenv("QH_TEST_HUGE_KEY", huge)
 	spec := engine.ConnSpec{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app", Resolve: secretref.NewSet(false, nil).Resolve,
-		SSH: &engine.SSH{Host: "127.0.0.1", User: "u", HostKey: fp, PrivateKeyRef: "env:QH_TEST_HUGE_KEY", Passphrase: "pp"}}
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKeyRef: "env:QH_TEST_HUGE_KEY", Passphrase: "pp"}}
 	_, err = OpenConn(context.Background(), spec)
 	if err == nil || strings.Contains(err.Error(), "this server accepts") {
 		t.Fatalf("local, ref: %v", err)
 	}
 	spec.Server, spec.Dial, spec.CheckTarget = true, d.DialContext, func(netip.Addr) bool { return true }
-	start = time.Now()
-	_, err = OpenConn(context.Background(), spec)
-	if d := time.Since(start); d > 500*time.Millisecond {
-		t.Fatalf("refusing took %v", d)
+	// x/crypto refuses more than 2048 rounds itself, at once; 2048 it would
+	// run (for seconds), so that case shows qh's cap at work.
+	for _, rounds := range []uint32{2048, 1_000_000} {
+		t.Setenv("QH_TEST_HUGE_KEY", sshtest.KeyWithRounds(rounds))
+		want := fmt.Sprintf("ssh: the private key's KDF uses %d rounds; this server accepts at most 128", rounds)
+		start = time.Now()
+		_, err = OpenConn(context.Background(), spec)
+		if d := time.Since(start); d > 500*time.Millisecond {
+			t.Fatalf("%d rounds, ref: refusing took %v", rounds, d)
+		}
+		if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
+			t.Fatalf("server, ref: %v", err)
+		}
+		inline.SSH.PrivateKey = sshtest.KeyWithRounds(rounds)
+		start = time.Now()
+		_, err = server.TestInput(context.Background(), ws, inline)
+		if d := time.Since(start); d > 500*time.Millisecond {
+			t.Fatalf("%d rounds, inline: refusing took %v", rounds, d)
+		}
+		if qerr.From(err).Category != qerr.Invalid || !strings.Contains(err.Error(), want) {
+			t.Fatalf("server, inline: %v", err)
+		}
 	}
-	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
-		t.Fatalf("server, ref: %v", err)
+	// An RSA key over 8192 bits is refused in server mode only.
+	t.Setenv("QH_TEST_HUGE_KEY", sshtest.RSA8704)
+	spec.SSH.Passphrase = ""
+	_, err = OpenConn(context.Background(), spec)
+	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), "ssh: the private key is an 8704-bit RSA key; this server accepts at most 8192 bits") {
+		t.Fatalf("server, big RSA key: %v", err)
+	}
+	spec.Server, spec.Dial, spec.CheckTarget = false, nil, nil
+	if _, err = OpenConn(context.Background(), spec); err == nil || strings.Contains(err.Error(), "RSA key") {
+		t.Fatalf("local, big RSA key: %v", err)
+	}
+}
+
+// On a --deny-ssh server, SSH settings are refused before the key is
+// parsed or decrypted: a junk key gets forbidden, not invalid.
+func TestDenySSHRefusesBeforeKeyWork(t *testing.T) {
+	ctx := context.Background()
+	svc := newServiceWith(t, openStore(t), Options{Dial: dialNowhere, CheckTarget: func(netip.Addr) bool { return true }, DenySSH: true})
+	junk := &engine.SSH{Host: "10.0.0.2", User: "u", HostKey: fp, PrivateKey: "junk", Passphrase: "pp"}
+	in := ConnInput{Name: "pg", Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app", SSH: junk}
+	_, err := svc.TestInput(ctx, ws, in)
+	if qerr.From(err).Category != qerr.Forbidden {
+		t.Fatalf("test input: %v", err)
+	}
+	if _, _, err := svc.CreateConnection(ctx, ws, in, false); qerr.From(err).Category != qerr.Forbidden {
+		t.Fatalf("create: %v", err)
+	}
+	in.SSH = nil
+	if _, _, err := svc.CreateConnection(ctx, ws, in, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.UpdateConnection(ctx, ws, "pg", ConnPatch{SSH: junk}, false); qerr.From(err).Category != qerr.Forbidden {
+		t.Fatalf("update: %v", err)
+	}
+}
+
+// In server mode an inline key is decrypted once, by the tunnel: a wrong
+// passphrase is not found on input but when connecting, and named there.
+func TestServerModeWrongPassphraseFoundWhenConnecting(t *testing.T) {
+	ctx := context.Background()
+	enc, _ := sshtest.Key(t, "pp")
+	var d net.Dialer
+	svc := newServiceWith(t, openStore(t), Options{Dial: d.DialContext, CheckTarget: func(netip.Addr) bool { return true }})
+	in := ConnInput{Name: "pg", Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app",
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"}}
+	const want = "ssh: the passphrase does not decrypt the private key"
+	if _, err := svc.TestInput(ctx, ws, in); qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
+		t.Fatalf("test input: %v", err)
+	}
+	if _, _, err := svc.CreateConnection(ctx, ws, in, false); err != nil {
+		t.Fatalf("create without a test: %v", err)
+	}
+	if _, err := svc.TestConnection(ctx, ws, "pg"); qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), want) {
+		t.Fatalf("test connection: %v", err)
+	}
+}
+
+// A private_key_ref that resolves to nothing is an error, not a silent
+// fall back to password authentication with an empty password.
+func TestEmptyPrivateKeyRef(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := OpenConn(context.Background(), engine.ConnSpec{Engine: "postgres", DSN: "postgres://u:dbpw@10.0.0.1:5432/app",
+		Resolve: secretref.NewSet(false, nil).Resolve,
+		SSH:     &engine.SSH{Host: "127.0.0.1", Port: 1, User: "u", HostKey: fp, PrivateKeyRef: "file:" + empty}})
+	if qerr.From(err).Category != qerr.ConnectionFailed || !strings.Contains(err.Error(), "ssh: private_key_ref resolved to an empty value") {
+		t.Fatalf("%v", err)
 	}
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -111,6 +112,10 @@ func openAppWith(ctx context.Context, home string, opts core.Options, oldKeys ..
 	st, err := store.Open(ctx, storeDSN(), home)
 	if err != nil {
 		return nil, storeOpenError(err, storeDSN() != "")
+	}
+	// A shared store reports its invalidation listener's outages here.
+	if l, ok := st.(interface{ SetLogger(*slog.Logger) }); ok && opts.Logger != nil {
+		l.SetLogger(opts.Logger)
 	}
 	pools := pool.New(core.OpenConn, pool.Options{})
 	return &app{svc: core.New(st, keys, pools, catalog.New(10*time.Minute), opts), pools: pools, st: st, keys: keys}, nil

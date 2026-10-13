@@ -1,9 +1,14 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -371,5 +376,385 @@ func TestPostgresInvalidations(t *testing.T) {
 	for range chA { // must close
 	}
 	for range chB {
+	}
+}
+
+// killOthers terminates every other client session on dsn's database and
+// waits until they are gone. admin must hold a single connection.
+func killOthers(t *testing.T, admin *sql.DB) {
+	t.Helper()
+	const others = `FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND backend_type = 'client backend'`
+	if _, err := admin.Exec(`SELECT pg_terminate_backend(pid) ` + others); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		var n int
+		if err := admin.QueryRow(`SELECT count(*) ` + others).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions survived pg_terminate_backend", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func adminDB(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+// After the server ends a pooled connection (a restart, a failover, an
+// administrator), the next read must still succeed.
+func TestPostgresReadsSurviveTerminatedConnections(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	s := openPG(t, dsn)
+	admin := adminDB(t, dsn)
+	ctx := context.Background()
+	c := &store.Connection{ID: store.NewID(), WorkspaceID: store.DefaultWorkspace, Name: "x", Engine: "postgres",
+		Secret: []byte{1}, SecretKeyID: 1, Mode: "ro", MaxRows: 1, TimeoutMS: 1, PoolSize: 1}
+	if err := s.CreateConnection(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"Ping", func() error { return s.Ping(ctx) }},
+		{"GetConnection", func() error { _, err := s.GetConnection(ctx, store.DefaultWorkspace, "x"); return err }},
+		{"ListConnections", func() error { _, err := s.ListConnections(ctx, store.DefaultWorkspace); return err }},
+		{"ListWorkspaces", func() error { _, err := s.ListWorkspaces(ctx); return err }},
+		{"GetKeyByPrefix", func() error {
+			_, err := s.GetKeyByPrefix(ctx, "qh_none")
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}},
+		{"ListKeys", func() error { _, err := s.ListKeys(ctx, store.DefaultWorkspace); return err }},
+		{"ListAllKeys", func() error { _, err := s.ListAllKeys(ctx); return err }},
+		{"CountKeys", func() error { _, err := s.CountKeys(ctx); return err }},
+		{"ListQueryLog", func() error {
+			_, err := s.ListQueryLog(ctx, store.QueryLogFilter{WorkspaceID: store.DefaultWorkspace})
+			return err
+		}},
+	} {
+		// Two reads leave one pooled connection used just now, so database/sql
+		// reuses it without a ping (pgx pings only connections idle over 1s).
+		for range 2 {
+			if _, err := s.CountKeys(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		killOthers(t, admin)
+		if err := r.fn(); err != nil {
+			t.Errorf("%s after the connection was terminated: %v", r.name, err)
+		}
+	}
+}
+
+// A write is never retried: its first attempt may have committed.
+func TestPostgresWritesAreNotRetried(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	s := openPG(t, dsn)
+	admin := adminDB(t, dsn)
+	ctx := context.Background()
+	for range 2 {
+		if _, err := s.CountKeys(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	killOthers(t, admin)
+	if _, err := s.CreateWorkspace(ctx, "w1"); err == nil {
+		t.Fatal("a write on a terminated connection succeeded: it was retried")
+	}
+	// The write never reached a live session, so it did not happen; the store
+	// works again and the caller can retry it.
+	ws, err := s.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range ws {
+		if w.ID == "w1" {
+			t.Fatal("the failed write was applied")
+		}
+	}
+	if _, err := s.CreateWorkspace(ctx, "w1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tcpProxy forwards TCP connections to a target. freeze makes the open
+// connections drop all traffic both ways without closing (a half-open link);
+// refuse makes new connections close at once; kill closes the open ones.
+type tcpProxy struct {
+	ln     net.Listener
+	target string
+	refuse atomic.Bool
+	mu     sync.Mutex
+	links  []*proxyLink
+}
+
+type proxyLink struct {
+	client, server net.Conn
+	frozen         atomic.Bool
+}
+
+func startProxy(t *testing.T, target string) *tcpProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &tcpProxy{ln: ln, target: target}
+	go p.serve()
+	t.Cleanup(func() {
+		ln.Close()
+		p.kill()
+	})
+	return p
+}
+
+// via returns dsn pointed at the proxy.
+func (p *tcpProxy) via(dsn string) string {
+	u, _ := url.Parse(dsn)
+	u.Host = p.ln.Addr().String()
+	return u.String()
+}
+
+func (p *tcpProxy) serve() {
+	for {
+		c, err := p.ln.Accept()
+		if err != nil {
+			return
+		}
+		if p.refuse.Load() {
+			c.Close()
+			continue
+		}
+		s, err := net.Dial("tcp", p.target)
+		if err != nil {
+			c.Close()
+			continue
+		}
+		l := &proxyLink{client: c, server: s}
+		p.mu.Lock()
+		p.links = append(p.links, l)
+		p.mu.Unlock()
+		go l.pipe(s, c)
+		go l.pipe(c, s)
+	}
+}
+
+func (l *proxyLink) pipe(dst, src net.Conn) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := src.Read(buf)
+		if l.frozen.Load() {
+			if err != nil {
+				return // a frozen link never passes on a close either
+			}
+			continue
+		}
+		if n > 0 {
+			if _, err := dst.Write(buf[:n]); err != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	dst.Close()
+	src.Close()
+}
+
+func (p *tcpProxy) freeze() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, l := range p.links {
+		l.frozen.Store(true)
+	}
+}
+
+func (p *tcpProxy) kill() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, l := range p.links {
+		l.client.Close()
+		l.server.Close()
+	}
+	p.links = nil
+}
+
+func recvWithin(t *testing.T, ch <-chan string, d time.Duration) string {
+	t.Helper()
+	select {
+	case id, ok := <-ch:
+		if !ok {
+			t.Fatal("the invalidation channel closed")
+		}
+		return id
+	case <-time.After(d):
+		t.Fatal("no notification")
+		return ""
+	}
+}
+
+// A listener with nothing to hear pings its connection after each quiet
+// interval; it keeps that connection and sends no "drop everything".
+func TestPostgresQuietListenerStaysConnected(t *testing.T) {
+	store.SetListenTiming(t, 200*time.Millisecond, 2*time.Second)
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	a, b := openPG(t, dsn), openPG(t, dsn)
+	admin := adminDB(t, dsn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := a.Invalidations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := func() (pid int64, query string) {
+		t.Helper()
+		if err := admin.QueryRow(`SELECT pid, query FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+			AND datname = current_database() AND (query LIKE 'LISTEN%' OR query LIKE '-- ping%')`).Scan(&pid, &query); err != nil {
+			t.Fatal(err)
+		}
+		return pid, query
+	}
+	before, _ := listener()
+	select {
+	case id := <-ch:
+		t.Fatalf("a quiet listener sent %q", id)
+	case <-time.After(1500 * time.Millisecond): // about seven quiet intervals
+	}
+	after, query := listener()
+	if after != before {
+		t.Fatalf("the listener reconnected (backend %d, then %d)", before, after)
+	}
+	if !strings.HasPrefix(query, "-- ping") {
+		t.Fatalf("the listener's last statement is %q, want its ping", query)
+	}
+	if err := b.Invalidate(ctx, "conn-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := recvWithin(t, ch, 10*time.Second); got != "conn-1" {
+		t.Fatalf("got %q", got)
+	}
+	// A terminated listener still reconnects and drops everything.
+	killOthers(t, admin)
+	if got := recvWithin(t, ch, 10*time.Second); got != "" {
+		t.Fatalf("after reconnect got %q, want \"\"", got)
+	}
+}
+
+// A connection that silently stops answering (a half-open TCP link) fails the
+// ping; the listener reconnects and drops everything.
+func TestPostgresListenerDetectsHalfOpenConnection(t *testing.T) {
+	store.SetListenTiming(t, 200*time.Millisecond, 500*time.Millisecond)
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	u, _ := url.Parse(dsn)
+	px := startProxy(t, u.Host)
+	a, b := openPG(t, px.via(dsn)), openPG(t, dsn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := a.Invalidations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	px.freeze()
+	if got := recvWithin(t, ch, 10*time.Second); got != "" {
+		t.Fatalf("got %q, want \"\"", got)
+	}
+	if err := b.Invalidate(ctx, "conn-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := recvWithin(t, ch, 10*time.Second); got != "conn-1" {
+		t.Fatalf("after reconnect got %q", got)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger and a test to share.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// A listener that cannot reconnect says so once (not once per attempt), never
+// with the password, and says when it is back.
+func TestPostgresListenerLogsReconnectFailures(t *testing.T) {
+	dsn := freshDB(t, pgServer(t, "postgres:17-alpine"))
+	u, _ := url.Parse(dsn)
+	pw, _ := u.User.Password()
+	px := startProxy(t, u.Host)
+	a := openPG(t, px.via(dsn))
+	var buf syncBuffer
+	a.SetLogger(slog.New(slog.NewJSONHandler(&buf, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := a.Invalidations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	px.refuse.Store(true)
+	px.kill()
+	time.Sleep(2500 * time.Millisecond) // attempts at about 0.5s and 1.5s fail
+	px.refuse.Store(false)
+	if got := recvWithin(t, ch, 10*time.Second); got != "" {
+		t.Fatalf("got %q, want \"\"", got)
+	}
+	out := buf.String()
+	if strings.Contains(out, pw) {
+		t.Fatalf("the password was logged:\n%s", out)
+	}
+	var lost, failed, back int
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		var r struct {
+			Level    string
+			Msg      string
+			Attempt  int
+			Attempts int
+			Error    string
+		}
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		switch {
+		case r.Level == "WARN" && r.Attempt == 0 && r.Error != "":
+			lost++
+		case r.Level == "WARN" && r.Attempt > 0 && r.Error != "":
+			failed++
+		case r.Level == "INFO" && r.Attempts >= 3:
+			back++
+		default:
+			t.Errorf("unexpected record %s", line)
+		}
+	}
+	if lost != 1 || failed != 1 || back != 1 {
+		t.Fatalf("logged %d losses, %d failed attempts, %d reconnects; want 1 each:\n%s", lost, failed, back, out)
 	}
 }

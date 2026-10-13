@@ -3,11 +3,16 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -104,7 +109,12 @@ type Postgres struct {
 	// origin tags this process's invalidation notices so its own listener
 	// skips them (NOTIFY is delivered to the sender too).
 	origin string
+	logger atomic.Pointer[slog.Logger] // nil: the listener logs nothing
 }
+
+// SetLogger makes the invalidation listener report losing and regaining its
+// connection to l. Call it before Invalidations.
+func (p *Postgres) SetLogger(l *slog.Logger) { p.logger.Store(l) }
 
 // OpenPostgres connects to dsn, waiting up to pgOpenRetry for the database,
 // and migrates the qh schema. QH_STORE_PASSWORD_FILE, when set, supplies the
@@ -236,8 +246,43 @@ func pgCode(err error, code string) bool {
 func isPGUnique(err error) bool     { return pgCode(err, "23505") }
 func isPGForeignKey(err error) bool { return pgCode(err, "23503") }
 
-func (p *Postgres) Close() error                   { return p.db.Close() }
-func (p *Postgres) Ping(ctx context.Context) error { return p.db.PingContext(ctx) }
+// read runs the read fn, and runs it once more when it failed because the
+// server ended the connection (a restart, a failover, an administrator): the
+// pool then dials a fresh one. Writes never go through read, since their
+// first attempt may have committed. fn must reset anything it fills.
+func (p *Postgres) read(ctx context.Context, fn func() error) error {
+	err := fn()
+	if err != nil && ctx.Err() == nil && connDied(err) {
+		err = fn()
+	}
+	return err
+}
+
+// connDied reports whether err means the connection itself is gone, rather
+// than that the statement failed.
+func connDied(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case "57P01", "57P02", "57P03": // admin_shutdown, crash_shutdown, cannot_connect_now
+			return true
+		}
+		return strings.HasPrefix(pe.Code, "08") // connection_exception
+	}
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
+}
+
+func (p *Postgres) Close() error { return p.db.Close() }
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.read(ctx, func() error { return p.db.PingContext(ctx) })
+}
 
 func scanPGConnection(r scanner) (*Connection, error) {
 	var c Connection
@@ -338,8 +383,12 @@ func (p *Postgres) DeleteConnection(ctx context.Context, workspaceID, name strin
 }
 
 func (p *Postgres) GetConnection(ctx context.Context, workspaceID, name string) (*Connection, error) {
-	c, err := scanPGConnection(p.db.QueryRowContext(ctx, `SELECT `+connColumns+` FROM qh.connections
-		WHERE workspace_id = $1 AND name = $2`, workspaceID, name))
+	var c *Connection
+	err := p.read(ctx, func() (err error) {
+		c, err = scanPGConnection(p.db.QueryRowContext(ctx, `SELECT `+connColumns+` FROM qh.connections
+			WHERE workspace_id = $1 AND name = $2`, workspaceID, name))
+		return err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -363,8 +412,13 @@ func (p *Postgres) listConnections(ctx context.Context, q *sql.Rows, err error) 
 }
 
 func (p *Postgres) ListConnections(ctx context.Context, workspaceID string) ([]*Connection, error) {
-	rows, err := p.db.QueryContext(ctx, `SELECT `+connColumns+` FROM qh.connections WHERE workspace_id = $1 ORDER BY name`, workspaceID)
-	return p.listConnections(ctx, rows, err)
+	var out []*Connection
+	err := p.read(ctx, func() error {
+		rows, err := p.db.QueryContext(ctx, `SELECT `+connColumns+` FROM qh.connections WHERE workspace_id = $1 ORDER BY name`, workspaceID)
+		out, err = p.listConnections(ctx, rows, err)
+		return err
+	})
+	return out, err
 }
 
 func (p *Postgres) CreateWorkspace(ctx context.Context, id string) (*Workspace, error) {
@@ -386,6 +440,15 @@ func (p *Postgres) ImportWorkspace(ctx context.Context, w *Workspace) error {
 }
 
 func (p *Postgres) ListWorkspaces(ctx context.Context) ([]*Workspace, error) {
+	var out []*Workspace
+	err := p.read(ctx, func() (err error) {
+		out, err = p.listWorkspaces(ctx)
+		return err
+	})
+	return out, err
+}
+
+func (p *Postgres) listWorkspaces(ctx context.Context) ([]*Workspace, error) {
 	rows, err := p.db.QueryContext(ctx, `SELECT id, created_at FROM qh.workspaces ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -532,7 +595,11 @@ func scanPGKey(r scanner) (*APIKey, error) {
 }
 
 func (p *Postgres) GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error) {
-	k, err := scanPGKey(p.db.QueryRowContext(ctx, `SELECT `+keyColumns+` FROM qh.api_keys WHERE prefix = $1`, prefix))
+	var k *APIKey
+	err := p.read(ctx, func() (err error) {
+		k, err = scanPGKey(p.db.QueryRowContext(ctx, `SELECT `+keyColumns+` FROM qh.api_keys WHERE prefix = $1`, prefix))
+		return err
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -540,6 +607,15 @@ func (p *Postgres) GetKeyByPrefix(ctx context.Context, prefix string) (*APIKey, 
 }
 
 func (p *Postgres) listKeys(ctx context.Context, where string, args ...any) ([]*APIKey, error) {
+	var out []*APIKey
+	err := p.read(ctx, func() (err error) {
+		out, err = p.queryKeys(ctx, where, args...)
+		return err
+	})
+	return out, err
+}
+
+func (p *Postgres) queryKeys(ctx context.Context, where string, args ...any) ([]*APIKey, error) {
 	rows, err := p.db.QueryContext(ctx, `SELECT `+keyColumns+` FROM qh.api_keys `+where+` ORDER BY created_at, id`, args...)
 	if err != nil {
 		return nil, err
@@ -583,7 +659,9 @@ func (p *Postgres) TouchKey(ctx context.Context, id string, at time.Time) error 
 
 func (p *Postgres) CountKeys(ctx context.Context) (int, error) {
 	var n int
-	err := p.db.QueryRowContext(ctx, `SELECT count(*) FROM qh.api_keys`).Scan(&n)
+	err := p.read(ctx, func() error {
+		return p.db.QueryRowContext(ctx, `SELECT count(*) FROM qh.api_keys`).Scan(&n)
+	})
 	return n, err
 }
 
@@ -615,6 +693,15 @@ func (p *Postgres) ListQueryLog(ctx context.Context, f QueryLogFilter) ([]*Query
 		args = append(args, f.Limit)
 		q += fmt.Sprintf(` LIMIT $%d`, len(args))
 	}
+	var out []*QueryLogEntry
+	err := p.read(ctx, func() (err error) {
+		out, err = p.queryLog(ctx, q, args)
+		return err
+	})
+	return out, err
+}
+
+func (p *Postgres) queryLog(ctx context.Context, q string, args []any) ([]*QueryLogEntry, error) {
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -681,6 +768,19 @@ const (
 	closeTimeout  = 2 * time.Second  // bounds closing the LISTEN connection
 )
 
+// The LISTEN connection mostly sits idle, so a link that dies silently (a
+// half-open TCP connection after a failover or a NAT timeout) would leave it
+// waiting for hours. It therefore pings the server after listenIdle without a
+// notice, giving the ping listenPingTimeout, and asks the OS to probe the
+// socket every listenKeepAlive. Variables so tests can shorten them.
+var (
+	listenIdle        = 30 * time.Second
+	listenPingTimeout = 5 * time.Second
+	listenKeepAlive   = 15 * time.Second
+	// listenLogEvery limits repeated "cannot reconnect" warnings.
+	listenLogEvery = time.Minute
+)
+
 // Invalidate tells every other instance listening on the store that id's
 // schema is stale.
 func (p *Postgres) Invalidate(ctx context.Context, id string) error {
@@ -697,11 +797,11 @@ func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 		return nil, fmt.Errorf("store: listen: %s", redactErr(err, p.cfg.Password))
 	}
 	out := make(chan string, 64)
+	logs := &listenLog{log: p.logger.Load, password: p.cfg.Password, every: listenLogEvery, now: time.Now}
 	go func() {
 		defer close(out)
-		backoff := 500 * time.Millisecond
 		for {
-			n, err := conn.WaitForNotification(ctx)
+			n, err := p.waitForNotice(ctx, conn)
 			if err == nil {
 				id, own := p.fromNotice(n.Payload)
 				if own {
@@ -717,17 +817,9 @@ func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 			if ctx.Err() != nil {
 				return
 			}
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				if conn, err = p.listen(ctx); err == nil {
-					backoff = 500 * time.Millisecond
-					break
-				}
-				backoff = min(backoff*2, 30*time.Second)
+			logs.lost(err)
+			if conn = p.relisten(ctx, logs); conn == nil {
+				return
 			}
 			select {
 			case out <- "":
@@ -740,6 +832,95 @@ func (p *Postgres) Invalidations(ctx context.Context) (<-chan string, error) {
 	return out, nil
 }
 
+// waitForNotice waits for the next notice on conn. When none comes within
+// listenIdle it pings the server and, if that works, keeps waiting; an error
+// means the connection is lost.
+//
+// A context deadline does not break a pgx connection: pgconn's default
+// context watcher sets a read deadline on the socket, the read fails with a
+// timeout, which pgconn treats as non-fatal (it closes the connection on any
+// other read error), and the deadline is cleared again. A message cut off by
+// the deadline stays buffered and is completed by the next read. So a quiet
+// interval costs one round trip, not a reconnect and a cache drop.
+func (p *Postgres) waitForNotice(ctx context.Context, conn *pgx.Conn) (*pgconn.Notification, error) {
+	for {
+		wctx, cancel := context.WithTimeout(ctx, listenIdle)
+		n, err := conn.WaitForNotification(wctx)
+		cancel()
+		if err == nil || ctx.Err() != nil || !pgconn.Timeout(err) || conn.IsClosed() {
+			return n, err
+		}
+		pctx, cancel := context.WithTimeout(ctx, listenPingTimeout)
+		err = conn.Ping(pctx)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		// A notice that arrived during the ping is queued on conn; the next
+		// WaitForNotification returns it at once.
+	}
+}
+
+// relisten reconnects with backoff until it succeeds or ctx ends (then it
+// returns nil).
+func (p *Postgres) relisten(ctx context.Context, logs *listenLog) *pgx.Conn {
+	backoff := 500 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		conn, err := p.listen(ctx)
+		if err == nil {
+			logs.reconnected(attempt)
+			return conn
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		logs.failed(attempt, err)
+		backoff = min(backoff*2, 30*time.Second)
+	}
+}
+
+// listenLog reports the listener's outages: the loss, the first failed
+// reconnect and then at most one failure per every, and the recovery. Errors
+// are logged without the store password. A nil logger logs nothing.
+type listenLog struct {
+	log      func() *slog.Logger
+	password string
+	every    time.Duration
+	now      func() time.Time
+	lastFail time.Time // when a failed attempt was last logged; zero: none this outage
+}
+
+func (l *listenLog) lost(err error) {
+	if lg := l.log(); lg != nil {
+		lg.Warn("store: lost the connection that listens for schema invalidations; reconnecting",
+			"error", redactErr(err, l.password))
+	}
+}
+
+func (l *listenLog) failed(attempt int, err error) {
+	now := l.now()
+	if !l.lastFail.IsZero() && now.Sub(l.lastFail) < l.every {
+		return
+	}
+	l.lastFail = now
+	if lg := l.log(); lg != nil {
+		lg.Warn("store: cannot reconnect the schema invalidation listener; cached schemas may be stale until it does",
+			"attempt", attempt, "error", redactErr(err, l.password))
+	}
+}
+
+func (l *listenLog) reconnected(attempts int) {
+	l.lastFail = time.Time{}
+	if lg := l.log(); lg != nil {
+		lg.Info("store: reconnected the schema invalidation listener; dropping cached schemas", "attempts", attempts)
+	}
+}
+
 // fromNotice splits a notice payload into the connection ID and whether this
 // process sent it. A payload without an origin prefix is forwarded as is.
 func (p *Postgres) fromNotice(payload string) (id string, own bool) {
@@ -750,12 +931,14 @@ func (p *Postgres) fromNotice(payload string) (id string, own bool) {
 	return id, origin == p.origin
 }
 
-// listen opens a connection that listens on qh_catalog; each attempt is
-// bounded by listenTimeout.
+// listen opens a connection that listens on qh_catalog, with TCP keepalive
+// probes every listenKeepAlive; each attempt is bounded by listenTimeout.
 func (p *Postgres) listen(ctx context.Context) (*pgx.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, listenTimeout)
 	defer cancel()
-	conn, err := pgx.ConnectConfig(ctx, p.cfg.Copy())
+	cfg := p.cfg.Copy()
+	cfg.DialFunc = keepAliveDial(cfg.DialFunc, listenKeepAlive)
+	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -770,4 +953,19 @@ func closeConn(conn *pgx.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
 	conn.Close(ctx)
+}
+
+// keepAliveDial wraps dial (which honours connect_timeout and any other dial
+// settings) so TCP connections it opens send keepalive probes every period.
+func keepAliveDial(dial pgconn.DialFunc, period time.Duration) pgconn.DialFunc {
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dial(ctx, network, addr)
+		if tc, ok := c.(*net.TCPConn); ok && err == nil {
+			_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: period, Interval: period})
+		}
+		return c, err
+	}
 }

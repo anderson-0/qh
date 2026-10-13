@@ -17,6 +17,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/catalog"
 	"github.com/anderson-0/qh/internal/core"
+	_ "github.com/anderson-0/qh/internal/engine/mongodb"
 	_ "github.com/anderson-0/qh/internal/engine/sqlite"
 	"github.com/anderson-0/qh/internal/pool"
 	"github.com/anderson-0/qh/internal/secret"
@@ -232,5 +233,33 @@ func TestSQLSurfaceUnchanged(t *testing.T) {
 	}
 	if string(want) != string(b) {
 		t.Fatalf("SQL-only tool surface changed:\n%s", b)
+	}
+}
+
+func TestInstructionsMentionMongoshOnlyWithMongo(t *testing.T) {
+	s, svc := connectSvc(t)
+	if strings.Contains(s.InitializeResult().Instructions, "mongosh") {
+		t.Fatal("SQL-only workspace got the mongosh sentence")
+	}
+	for _, name := range []string{"events", "logs"} {
+		if _, _, err := svc.CreateConnection(context.Background(), store.DefaultWorkspace, core.ConnInput{
+			Name: name, Engine: "mongodb", DSN: "mongodb://127.0.0.1:1/" + name,
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := New(svc, func(context.Context) string { return store.DefaultWorkspace }, "test")
+	serverT, clientT := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), serverT, nil); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(context.Background(), clientT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	in := s2.InitializeResult().Instructions
+	if strings.Count(in, mongoHint) != 1 || !strings.HasSuffix(in, mongoHint) {
+		t.Fatalf("instructions: %q", in)
 	}
 }

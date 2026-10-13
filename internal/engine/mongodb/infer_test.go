@@ -228,3 +228,18 @@ func TestCollectNamespacesSkipsFailedDatabase(t *testing.T) {
 		t.Error("every database failed but no error")
 	}
 }
+
+func TestLegacyUUIDIsBinData(t *testing.T) {
+	data := make([]byte, 16)
+	if got := typeName(bson.RawValue{Type: bson.TypeBinary, Value: rawBinary(t, 3, data)}); got != "binData" {
+		t.Errorf("subtype 3: %q", got)
+	}
+	if got := typeName(bson.RawValue{Type: bson.TypeBinary, Value: rawBinary(t, 4, data)}); got != "uuid" {
+		t.Errorf("subtype 4: %q", got)
+	}
+}
+
+func rawBinary(t *testing.T, sub byte, data []byte) []byte {
+	t.Helper()
+	return rawDoc(t, bson.D{{Key: "v", Value: bson.Binary{Subtype: sub, Data: data}}}).Lookup("v").Value
+}

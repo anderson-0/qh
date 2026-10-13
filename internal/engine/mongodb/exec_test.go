@@ -366,3 +366,51 @@ func TestNamespaceGuardCoversStagesThatNameADatabase(t *testing.T) {
 		t.Errorf("unrestricted: %v", err)
 	}
 }
+
+func TestWriteErrorTimeout(t *testing.T) {
+	reply := rawDoc(t, bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 2}, {Key: "nModified", Value: 2},
+		{Key: "writeErrors", Value: bson.A{bson.D{{Key: "index", Value: 0}, {Key: "code", Value: 50}, {Key: "errmsg", Value: "operation exceeded time limit"}}}}})
+	err := writeError(reply, &Op{Kind: kUpdate})
+	if e := qerr.From(err); err == nil || e.Category != qerr.Timeout || !strings.Contains(e.Message, "2 documents were changed") {
+		t.Errorf("code 50: %v", err)
+	}
+	reply = rawDoc(t, bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: 0},
+		{Key: "writeErrors", Value: bson.A{bson.D{{Key: "index", Value: 0}, {Key: "code", Value: 11000}, {Key: "errmsg", Value: "E11000"}}}}})
+	if e := qerr.From(writeError(reply, &Op{Kind: kInsert, IDs: []any{1}})); e.Category != qerr.QueryError {
+		t.Errorf("code 11000: %v", e)
+	}
+}
+
+func TestInsertManyReturnsAtMostMaxRowsIDs(t *testing.T) {
+	op := &Op{Kind: kInsert, IDs: []any{int32(1), int32(2), int32(3)}}
+	reply := rawDoc(t, bson.D{{Key: "ok", Value: 1}, {Key: "n", Value: int32(3)}})
+	r := insertResult(reply, op, 2)
+	if len(r.Rows) != 2 || !r.Truncated || r.RowsAffected != 3 || r.Rows[1][0].Text != "2" {
+		t.Errorf("%+v", r)
+	}
+	if r = insertResult(reply, op, 3); len(r.Rows) != 3 || r.Truncated {
+		t.Errorf("%+v", r)
+	}
+}
+
+func TestReadStopsAtByteBudget(t *testing.T) {
+	spec := fixtureSpec(t, mongo8, engine.ModeRO)
+	client, err := mongo.Connect(options.Client().ApplyURI(spec.DSN))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Disconnect(context.Background())
+	var docs []any
+	for i := 0; i < 18; i++ {
+		docs = append(docs, bson.D{{Key: "_id", Value: int32(i)}, {Key: "s", Value: strings.Repeat("x", 1<<20)}})
+	}
+	db := spec.DSN[strings.LastIndex(spec.DSN, "/")+1 : strings.Index(spec.DSN, "?")]
+	if _, err := client.Database(db).Collection("mib").InsertMany(context.Background(), docs); err != nil {
+		t.Fatal(err)
+	}
+	ro := openSpec(t, spec)
+	r, err := ro.Query(context.Background(), `db.mib.find().sort({_id: 1})`, engine.QueryOpts{MaxRows: 100, ReadOnly: true, Timeout: 30 * time.Second})
+	if err != nil || len(r.Rows) == 0 || len(r.Rows) >= 17 || !r.Truncated {
+		t.Fatalf("rows %d truncated %v err %v", len(r.Rows), r != nil && r.Truncated, err)
+	}
+}

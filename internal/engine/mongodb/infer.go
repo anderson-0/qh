@@ -182,7 +182,7 @@ func typeName(v bson.RawValue) string {
 	case bson.TypeEmbeddedDocument:
 		return "object"
 	case bson.TypeBinary:
-		if sub, data := v.Binary(); (sub == 4 || sub == 3) && len(data) == 16 {
+		if sub, data := v.Binary(); sub == 4 && len(data) == 16 {
 			return "uuid"
 		}
 		return "binData"

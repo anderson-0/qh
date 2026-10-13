@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -242,5 +243,48 @@ func TestIntrospectCollectionPrivileges(t *testing.T) {
 	objs := cat.Namespaces[0].Objects
 	if len(objs) != 1 || objs[0].Name != "orders" || len(objs[0].Fields) == 0 {
 		t.Fatalf("objects: %+v", objs)
+	}
+}
+
+func TestDescribeAfterTimeLimit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := &conn{}
+	s := c.describe(ctx, nil, "db", collInfo{name: "late"})
+	if s.obj.Name != "late" || len(s.obj.Fields) != 0 || s.obj.Comment != "not sampled (time limit)" || s.inf == nil {
+		t.Errorf("%+v", s.obj)
+	}
+}
+
+// When the catalog's time limit ends during sampling, the catalog still
+// builds: the collections not yet sampled are listed without fields.
+func TestIntrospectTimeLimitKeepsWhatWasBuilt(t *testing.T) {
+	uri := mongoURI(t, mongo8)
+	db := loadFixture(t, uri)
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Disconnect(context.Background())
+	slow := bson.A{bson.D{{Key: "$match", Value: bson.D{{Key: "$expr", Value: bson.D{{Key: "$function", Value: bson.D{
+		{Key: "body", Value: "function() { sleep(1000); return true; }"}, {Key: "args", Value: bson.A{}}, {Key: "lang", Value: "js"}}}}}}}}}
+	if err := client.Database(db).CreateView(context.Background(), "slow_view", "orders", slow); err != nil {
+		t.Fatal(err)
+	}
+	// A pool larger than the sampling parallelism, so the slow view's
+	// connection does not hold up the others.
+	c := openSpec(t, engine.ConnSpec{Engine: "mongodb", DSN: withDB(uri, db), Mode: engine.ModeRO, PoolSize: 8})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cat, err := c.Introspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := objectNamed(t, cat, "slow_view")
+	if len(v.Fields) != 0 || v.Comment != "not sampled (time limit)" {
+		t.Errorf("slow view: %+v", v)
+	}
+	if u := objectNamed(t, cat, "users"); len(u.Fields) == 0 || u.Comment != "" {
+		t.Errorf("users: %+v", u)
 	}
 }

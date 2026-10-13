@@ -35,7 +35,10 @@ func mapErr(err error) error {
 	if isCmd && ce.Code == codeAuthFailed {
 		return qerr.Wrap(qerr.ConnectionFailed, "authentication failed", err).WithHint("Check the user name, password and authSource")
 	}
-	if errors.Is(err, context.DeadlineExceeded) || mongo.IsTimeout(err) || isCmd && ce.Code == codeMaxTimeExpired {
+	var we mongo.WriteException
+	isWrite := errors.As(err, &we)
+	if errors.Is(err, context.DeadlineExceeded) || mongo.IsTimeout(err) || isCmd && ce.Code == codeMaxTimeExpired ||
+		isWrite && we.HasErrorCode(codeMaxTimeExpired) {
 		// Server selection times out when no server answers.
 		if strings.Contains(err.Error(), "server selection error") {
 			return qerr.Wrap(qerr.ConnectionFailed, "cannot reach MongoDB: "+firstLine(err.Error()), err)
@@ -45,8 +48,7 @@ func mapErr(err error) error {
 	if isCmd {
 		return qerr.Wrap(qerr.QueryError, fmt.Sprintf("%s (%s, code %d)", ce.Message, ce.Name, ce.Code), err)
 	}
-	var we mongo.WriteException
-	if errors.As(err, &we) && len(we.WriteErrors) > 0 {
+	if isWrite && len(we.WriteErrors) > 0 {
 		w := we.WriteErrors[0]
 		return qerr.Wrap(qerr.QueryError, fmt.Sprintf("%s (code %d)", w.Message, w.Code), err)
 	}

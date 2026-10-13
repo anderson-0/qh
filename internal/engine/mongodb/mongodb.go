@@ -223,7 +223,8 @@ func (Engine) Inspect(dsn string) (engine.DSNInfo, error) {
 }
 
 // secretParams are options whose values are secrets, lowered.
-var secretParams = []string{"tlscertificatekeyfilepassword", "sslclientcertificatekeypassword"}
+// authMechanismProperties can carry AWS_SESSION_TOKEN.
+var secretParams = []string{"tlscertificatekeyfilepassword", "sslclientcertificatekeypassword", "authmechanismproperties"}
 
 // redact returns dsn (which parsed as u) with the password and the values
 // of secretParams replaced by ***, leaving every other byte as it was.
@@ -415,6 +416,7 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	}
 	c := &conn{defaultDB: u.db, pinned: u.db != "", namespaces: spec.Namespaces,
 		readOnly: spec.Mode != engine.ModeRW, password: u.password, extra: spec.Password}
+	c.setConcerns(opts)
 	if c.defaultDB == "" {
 		c.defaultDB = "test"
 	}
@@ -438,6 +440,7 @@ type conn struct {
 	pinned     bool   // the DSN names a database: it is the only namespace
 	namespaces []string
 	readOnly   bool
+	concerns
 	// password and extra are scrubbed from every error, in case the driver
 	// quotes them.
 	password, extra string

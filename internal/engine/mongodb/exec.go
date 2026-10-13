@@ -234,27 +234,27 @@ func (c *conn) opErr(err error, op *Op) error {
 }
 
 func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int) (*engine.Result, error) {
-	cmd := op.Command
+	cmd, ro := c.command(op)
 	switch op.Kind {
 	case kDocs, kNames, kAggCount:
-		cur, err := d.RunCommandCursor(ctx, cmd)
+		cur, err := d.RunCommandCursor(ctx, cmd, ro)
 		if err != nil {
 			return nil, err
 		}
 		defer closeCursor(ctx, cur)
-		var docs []bson.Raw
-		for len(docs) <= maxRows && cur.Next(ctx) {
-			if op.Kind == kNames && systemName(cur.Current) {
-				continue // system collections do not count against the row cap
-			}
-			docs = append(docs, append(bson.Raw(nil), cur.Current...))
+		var skip func(bson.Raw) bool
+		if op.Kind == kNames {
+			skip = systemName // system collections do not count against the row cap
 		}
-		if err := cur.Err(); err != nil {
+		docs, over, err := readDocs(ctx, cur, maxRows+1, maxResultBytes, skip)
+		if err != nil {
 			return nil, err
 		}
 		switch op.Kind {
 		case kNames:
-			return names(docs, maxRows), nil
+			r := names(docs, maxRows)
+			r.Truncated = r.Truncated || over
+			return r, nil
 		case kAggCount:
 			n := "0"
 			if len(docs) > 0 {
@@ -264,9 +264,11 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 			}
 			return countResult(n), nil
 		}
-		return docsResult(docs, maxRows), nil
+		r := docsResult(docs, maxRows)
+		r.Truncated = r.Truncated || over
+		return r, nil
 	}
-	reply, err := d.RunCommand(ctx, cmd).Raw()
+	reply, err := d.RunCommand(ctx, cmd, ro).Raw()
 	if err != nil {
 		// The driver turns a reply's writeErrors and writeConcernError into
 		// a WriteException but still returns the reply, which says how much
@@ -300,12 +302,7 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 		}
 		return r, nil
 	case kInsert:
-		r := &engine.Result{Columns: []engine.Column{{Name: "_id"}}, RowsAffected: asInt(reply.Lookup("n"))}
-		for _, id := range op.IDs {
-			b, _ := bson.Marshal(bson.D{{Key: "v", Value: id}})
-			r.Rows = append(r.Rows, []engine.Value{valueOf(bson.Raw(b).Lookup("v"))})
-		}
-		return r, nil
+		return insertResult(reply, op, maxRows), nil
 	case kUpdate:
 		return &engine.Result{RowsAffected: changed(reply, op)}, nil
 	case kDelete:
@@ -329,12 +326,53 @@ func (c *conn) exec(ctx context.Context, d *mongo.Database, op *Op, maxRows int)
 	return nil, fmt.Errorf("unknown operation kind %d", op.Kind)
 }
 
+// Byte budgets: a read keeps at most maxResultBytes of documents, and
+// sampling at most maxSampleBytes per collection.
+const (
+	maxResultBytes = 16 << 20
+	maxSampleBytes = 8 << 20
+)
+
+// readDocs copies up to limit documents from cur, stopping before the one
+// that would take their raw size past budget; the first document is always
+// kept. Documents skip reports count against neither. over reports that a
+// document was left for the budget.
+func readDocs(ctx context.Context, cur *mongo.Cursor, limit, budget int, skip func(bson.Raw) bool) (docs []bson.Raw, over bool, err error) {
+	size := 0
+	for len(docs) < limit && cur.Next(ctx) {
+		if skip != nil && skip(cur.Current) {
+			continue
+		}
+		if len(docs) > 0 && size+len(cur.Current) > budget {
+			over = true
+			break
+		}
+		size += len(cur.Current)
+		docs = append(docs, append(bson.Raw(nil), cur.Current...))
+	}
+	return docs, over, cur.Err()
+}
+
 // closeCursor kills the server-side cursor even when ctx is done, but never
 // waits longer than five seconds for a stalled server.
 func closeCursor(ctx context.Context, cur *mongo.Cursor) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_ = cur.Close(cctx)
+}
+
+// insertResult lists the inserted _id values, at most maxRows of them.
+func insertResult(reply bson.Raw, op *Op, maxRows int) *engine.Result {
+	r := &engine.Result{Columns: []engine.Column{{Name: "_id"}}, RowsAffected: asInt(reply.Lookup("n"))}
+	for i, id := range op.IDs {
+		if i == maxRows {
+			r.Truncated = true
+			break
+		}
+		b, _ := bson.Marshal(bson.D{{Key: "v", Value: id}})
+		r.Rows = append(r.Rows, []engine.Value{valueOf(bson.Raw(b).Lookup("v"))})
+	}
+	return r
 }
 
 func countResult(n string) *engine.Result {
@@ -406,6 +444,10 @@ func writeError(reply bson.Raw, op *Op) error {
 					msg += fmt.Sprintf("; %d documents were changed before the error", n)
 				}
 			}
+			if asInt(d.Lookup("code")) == codeMaxTimeExpired {
+				return qerr.New(qerr.Timeout, "the write timed out: "+msg).
+					WithHint("Narrow the filter, add an index, or raise the connection's timeout")
+			}
 			return qerr.New(qerr.QueryError, msg)
 		}
 	}
@@ -430,7 +472,7 @@ func changed(reply bson.Raw, op *Op) int64 {
 }
 
 func (c *conn) explain(ctx context.Context, d *mongo.Database, op *Op) (*engine.Result, error) {
-	reply, err := d.RunCommand(ctx, op.explainCommand()).Raw()
+	reply, err := d.RunCommand(ctx, op.explainCommand(), c.readOpts()).Raw()
 	if err != nil {
 		return nil, err
 	}

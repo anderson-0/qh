@@ -325,6 +325,7 @@ func TestMapErr(t *testing.T) {
 		"server selection": {fmt.Errorf("server selection error: %w, current topology: { Type: Unknown }", context.DeadlineExceeded), qerr.ConnectionFailed},
 		"deadline":         {fmt.Errorf("reading: %w", context.DeadlineExceeded), qerr.Timeout},
 		"write":            {mongo.WriteException{WriteErrors: mongo.WriteErrors{{Code: 11000, Message: "E11000 duplicate key"}}}, qerr.QueryError},
+		"write max time":   {mongo.WriteException{WriteErrors: mongo.WriteErrors{{Code: 50, Message: "operation exceeded time limit"}}}, qerr.Timeout},
 		"command":          {mongo.CommandError{Code: 2, Name: "BadValue", Message: "bad"}, qerr.QueryError},
 		"qerr":             {qerr.New(qerr.Invalid, "x"), qerr.Invalid},
 	} {
@@ -338,5 +339,13 @@ func TestMapErr(t *testing.T) {
 	}
 	if mapErr(nil) != nil {
 		t.Error("mapErr(nil) != nil")
+	}
+}
+
+func TestRedactsAuthMechanismProperties(t *testing.T) {
+	info, err := Engine{}.Inspect("mongodb://h/db?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:secret&appName=a")
+	if err != nil || strings.Contains(info.Redacted, "secret") ||
+		info.Redacted != "mongodb://h/db?authMechanism=MONGODB-AWS&authMechanismProperties=***&appName=a" {
+		t.Fatalf("%q %v", info.Redacted, err)
 	}
 }

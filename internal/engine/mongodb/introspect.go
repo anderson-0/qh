@@ -46,10 +46,9 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 			allowed = append(allowed, db)
 		}
 	}
+	// When ctx ends during sampling, the catalog keeps what was built: the
+	// collections not yet sampled are listed without fields.
 	nss, err := collectNamespaces(allowed, func(db string) (engine.Namespace, error) { return c.namespace(ctx, db) })
-	if err == nil {
-		err = ctx.Err()
-	}
 	if err != nil {
 		return nil, c.err(err)
 	}
@@ -99,7 +98,7 @@ func (c *conn) namespace(ctx context.Context, db string) (engine.Namespace, erro
 	// let a user with collection-level privileges list what it may read.
 	// type is still returned.
 	cur, err := d.RunCommandCursor(ctx, bson.D{{Key: "listCollections", Value: 1}, {Key: "nameOnly", Value: true},
-		{Key: "authorizedCollections", Value: true}})
+		{Key: "authorizedCollections", Value: true}}, c.readOpts())
 	if err != nil {
 		return engine.Namespace{}, err
 	}
@@ -140,25 +139,34 @@ func (c *conn) namespace(ctx context.Context, db string) (engine.Namespace, erro
 	return ns, nil
 }
 
+// notSampled is the comment of a collection the catalog's time limit cut.
+const notSampled = "not sampled (time limit)"
+
 // describe counts, lists the indexes of, and samples one collection, with
 // the index listing running alongside the count and the sample. Each step
 // that fails leaves its part empty; the catalog still builds.
-func (c *conn) describe(ctx context.Context, d *mongo.Database, db string, ci collInfo) sampled {
-	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
-	defer cancel()
+func (c *conn) describe(parent context.Context, d *mongo.Database, db string, ci collInfo) sampled {
 	obj := &engine.Object{Namespace: db, Name: ci.name, Kind: engine.KindCollection, RowEstimate: -1, PrimaryKey: []string{"_id"}}
+	if ci.view {
+		obj.Kind, obj.PrimaryKey = engine.KindView, nil
+	}
+	if parent.Err() != nil {
+		obj.Comment = notSampled
+		return sampled{obj: obj, inf: infer(nil)}
+	}
+	ctx, cancel := context.WithTimeout(parent, sampleTimeout)
+	defer cancel()
 	var idx []engine.Index
 	listed := make(chan struct{})
 	if ci.view {
-		obj.Kind, obj.PrimaryKey = engine.KindView, nil
 		close(listed)
 	} else {
 		go func() {
 			defer close(listed)
-			idx = indexes(ctx, d, ci.name)
+			idx = indexes(ctx, d, ci.name, c.readOpts())
 		}()
 		// count with no query reads the collection's metadata.
-		if reply, err := d.RunCommand(ctx, bson.D{{Key: "count", Value: ci.name}}).Raw(); err == nil {
+		if reply, err := d.RunCommand(ctx, c.readCmd(bson.D{{Key: "count", Value: ci.name}}), c.readOpts()).Raw(); err == nil {
 			obj.RowEstimate = asInt(reply.Lookup("n"))
 		}
 	}
@@ -173,17 +181,19 @@ func (c *conn) describe(ctx context.Context, d *mongo.Database, db string, ci co
 			{Key: "cursor", Value: bson.D{{Key: "batchSize", Value: sampleSize}}}}
 	}
 	var docs []bson.Raw
-	if cur, err := d.RunCommandCursor(ctx, cmd); err == nil {
-		for len(docs) < sampleSize && cur.Next(ctx) {
-			docs = append(docs, append(bson.Raw(nil), cur.Current...))
-		}
-		if cur.Err() != nil {
-			docs = nil
-		}
+	cur, err := d.RunCommandCursor(ctx, c.readCmd(cmd), c.readOpts())
+	if err == nil {
+		docs, _, err = readDocs(ctx, cur, sampleSize, maxSampleBytes, nil)
 		closeCursor(ctx, cur)
+	}
+	if err != nil {
+		docs = nil
 	}
 	inf := infer(docs)
 	obj.Fields, obj.Comment = inf.fields, inf.comment
+	if err != nil && parent.Err() != nil {
+		obj.Comment = notSampled
+	}
 	<-listed
 	obj.Indexes = idx
 	if ci.view {
@@ -197,8 +207,8 @@ func (c *conn) describe(ctx context.Context, d *mongo.Database, db string, ci co
 // indexes lists coll's indexes. Special kinds label their columns (ruling
 // R4): bio:text, loc:2dsphere, k:hashed, and a TTL index adds " ttl" to its
 // last column.
-func indexes(ctx context.Context, d *mongo.Database, coll string) []engine.Index {
-	cur, err := d.RunCommandCursor(ctx, bson.D{{Key: "listIndexes", Value: coll}})
+func indexes(ctx context.Context, d *mongo.Database, coll string, ro *options.RunCmdOptionsBuilder) []engine.Index {
+	cur, err := d.RunCommandCursor(ctx, bson.D{{Key: "listIndexes", Value: coll}}, ro)
 	if err != nil {
 		return nil
 	}
@@ -306,7 +316,7 @@ func (c *conn) addReferences(ctx context.Context, d *mongo.Database, db string, 
 			for _, ci := range byTarget[name] {
 				values = append(values, cands[ci].src.inf.samples[cands[ci].field]...)
 			}
-			found[i] = foundIDs(ctx, d, name, values)
+			found[i] = c.foundIDs(ctx, d, name, values)
 		}()
 	}
 	wg.Wait()
@@ -371,7 +381,7 @@ func pickTarget(byName map[string]sampled, base string) (sampled, bool) {
 
 // foundIDs looks up values as _id in coll and returns the refKeys of those
 // that exist; nil when the lookup fails.
-func foundIDs(ctx context.Context, d *mongo.Database, coll string, values []bson.RawValue) map[string]bool {
+func (c *conn) foundIDs(ctx context.Context, d *mongo.Database, coll string, values []bson.RawValue) map[string]bool {
 	in := bson.A{}
 	seen := map[string]bool{}
 	for _, v := range values {
@@ -384,7 +394,7 @@ func foundIDs(ctx context.Context, d *mongo.Database, coll string, values []bson
 	defer cancel()
 	cmd := bson.D{{Key: "find", Value: coll}, {Key: "filter", Value: bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: in}}}}},
 		{Key: "projection", Value: bson.D{{Key: "_id", Value: 1}}}, {Key: "limit", Value: len(in)}, {Key: "batchSize", Value: len(in)}}
-	cur, err := d.RunCommandCursor(ctx, cmd)
+	cur, err := d.RunCommandCursor(ctx, c.readCmd(cmd), c.readOpts())
 	if err != nil {
 		return nil
 	}

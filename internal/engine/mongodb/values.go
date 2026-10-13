@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
@@ -69,14 +70,76 @@ func formatDouble(f float64) string {
 }
 
 // relaxedJSON renders v as compact relaxed Extended JSON, the form nested
-// documents and arrays take in result cells.
+// documents and arrays take in result cells. A value larger than
+// maxJSONBytes is shortened (shortJSON): the cell shows only its first
+// format.MaxCellRunes characters anyway.
 func relaxedJSON(v bson.RawValue) string {
+	if len(v.Value) > maxJSONBytes {
+		return shortJSON(v)
+	}
 	b, err := bson.MarshalExtJSON(bson.D{{Key: "v", Value: v}}, false, false)
 	if err != nil {
 		return v.String()
 	}
 	s := strings.TrimPrefix(string(b), `{"v":`)
 	return strings.TrimSuffix(s, "}")
+}
+
+const (
+	maxJSONBytes  = 64 << 10 // larger values are shortened
+	shortJSONSize = 1 << 10  // about how much of a shortened value is rendered
+)
+
+// shortJSON renders the start of a large value: a document's or array's
+// leading elements up to about shortJSONSize bytes, then "…(+N more)"; a
+// string's first shortJSONSize bytes then "…"; any other type as a marker
+// with its size.
+func shortJSON(v bson.RawValue) string {
+	switch v.Type {
+	case bson.TypeEmbeddedDocument, bson.TypeArray:
+		isDoc := v.Type == bson.TypeEmbeddedDocument
+		var elems []bson.RawElement
+		if isDoc {
+			elems, _ = v.Document().Elements()
+		} else {
+			elems, _ = bson.Raw(v.Value).Elements()
+		}
+		var b strings.Builder
+		b.WriteString(map[bool]string{true: "{", false: "["}[isDoc])
+		for i, e := range elems {
+			if b.Len() > shortJSONSize {
+				fmt.Fprintf(&b, "…(+%d more)", len(elems)-i)
+				break
+			}
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if isDoc {
+				b.WriteString(jsonString(e.Key()) + ":")
+			}
+			b.WriteString(relaxedJSON(e.Value()))
+		}
+		b.WriteString(map[bool]string{true: "}", false: "]"}[isDoc])
+		return b.String()
+	case bson.TypeString:
+		s := v.StringValue()
+		cut := shortJSONSize
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		q := jsonString(s[:cut])
+		return q[:len(q)-1] + `…"`
+	}
+	return fmt.Sprintf(`"…(%s, %d bytes)"`, v.Type, len(v.Value))
+}
+
+// jsonString quotes s as Extended JSON quotes a string.
+func jsonString(s string) string {
+	b, err := bson.MarshalExtJSON(bson.D{{Key: "v", Value: s}}, false, false)
+	if err != nil {
+		return `""`
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(string(b), `{"v":`), "}")
 }
 
 // flatten turns documents into columns and rows: _id first, then every

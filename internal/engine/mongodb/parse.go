@@ -367,7 +367,14 @@ func (p *parser) str() (string, error) {
 			case 'v':
 				b.WriteByte('\v')
 			case '0':
+				// JavaScript reads \0 followed by a digit as an octal escape.
+				if p.pos < len(p.src) && p.src[p.pos] >= '0' && p.src[p.pos] <= '9' {
+					return "", p.errAt(p.pos-2, `unsupported escape \0 followed by a digit`)
+				}
 				b.WriteByte(0)
+			case '\n', '\r':
+				// JavaScript drops a backslash-newline (a line continuation).
+				return "", p.errAt(p.pos-2, "unsupported escape: a backslash before a line break")
 			case 'x':
 				n, ok := hexN(p.src, p.pos, 2)
 				if !ok {

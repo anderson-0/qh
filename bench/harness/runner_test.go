@@ -3,9 +3,12 @@ package harness
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -274,5 +277,130 @@ func TestRivalDefaultsToDBHub(t *testing.T) {
 	got := strings.Join(failureNotes([]Result{{Server: "mongodb-mcp", Error: "run timed out after 10m"}, {Server: "dbhub", Error: "run timed out after 10m"}}, "mongodb-mcp"), "\n")
 	if !strings.Contains(got, "0 qh and 1 mongodb-mcp runs failed") {
 		t.Fatalf("%q", got)
+	}
+}
+
+// rivalDeps are fake Deps that need no Docker: datasets are an in-memory
+// SQLite with just enough of Pagila for the first question's reference query.
+type rivalDeps struct {
+	Deps
+	mu       sync.Mutex
+	datasets []string
+	started  map[string][]int // server → number of connections of each start
+	names    map[string][]string
+}
+
+func newRivalDeps(failRival string) *rivalDeps {
+	d := &rivalDeps{started: map[string][]int{}, names: map[string][]string{}}
+	d.Deps = Deps{
+		Models: func() Model { return answerModel{} },
+		StartDataset: func(_ context.Context, name string) (*Dataset, func(), error) {
+			d.mu.Lock()
+			d.datasets = append(d.datasets, name)
+			d.mu.Unlock()
+			db, err := sql.Open("sqlite", ":memory:")
+			if err != nil {
+				return nil, nil, err
+			}
+			db.SetMaxOpenConns(1)
+			if _, err := db.Exec("CREATE TABLE film (film_id integer); INSERT INTO film VALUES (1)"); err != nil {
+				return nil, nil, err
+			}
+			return &Dataset{Name: name, Engine: "mongodb", DSN: "mongodb://x/" + name, DB: db}, func() { db.Close() }, nil
+		},
+		StartServer: func(_ context.Context, server string, conns []Conn) (Server, error) {
+			d.mu.Lock()
+			d.started[server] = append(d.started[server], len(conns))
+			for _, c := range conns {
+				d.names[server] = append(d.names[server], c.Name)
+			}
+			d.mu.Unlock()
+			if server == failRival {
+				return nil, errors.New("start " + server + ": boom")
+			}
+			return &namedServer{fakeServer: fakeServer{out: "ok"}, name: server}, nil
+		},
+		CountTokens: func(context.Context, []ToolDef, string) (int64, error) { return 123, nil },
+	}
+	return d
+}
+
+func TestToolTokensForMongoRival(t *testing.T) {
+	d := newRivalDeps("")
+	cfg := Config{Model: "fake", Rival: "mongodb-mcp", RivalVersion: "3.0.5", Datasets: []string{"pagila-docs"},
+		Servers: []string{"qh", "mongodb-mcp"}, SkipAgent: true, SkipMicro: true}
+	rep, err := RunBenchmark(context.Background(), cfg, d.Deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rep.ToolTokens["mongodb-mcp"]; len(got) != 1 {
+		t.Errorf("mongodb-mcp measured %d times, want 1", len(got))
+	}
+	if got := rep.ToolTokens["qh"]; len(got) != 5 {
+		t.Errorf("qh measured %d times, want 5", len(got))
+	}
+	if !reflect.DeepEqual(d.datasets, []string{"pagila-docs"}) {
+		t.Errorf("datasets requested: %v", d.datasets)
+	}
+	if !reflect.DeepEqual(d.started["mongodb-mcp"], []int{1}) || !reflect.DeepEqual(d.started["qh"], []int{1, 2, 3, 4, 5}) {
+		t.Errorf("starts: %v", d.started)
+	}
+	if rep.Rival != "mongodb-mcp" || rep.RivalVersion != "3.0.5" {
+		t.Errorf("report rival: %q %q", rep.Rival, rep.RivalVersion)
+	}
+	if !strings.Contains(strings.Join(rep.Notes, "\n"), "mongodb-mcp-server serves one connection per process; its tool tokens are measured with one") {
+		t.Errorf("notes: %v", rep.Notes)
+	}
+}
+
+func TestToolTokensForDBHubStayOnChinook(t *testing.T) {
+	d := newRivalDeps("")
+	cfg := Config{Model: "fake", Datasets: []string{"chinook"}, Servers: []string{"qh", "dbhub"}, SkipAgent: true, SkipMicro: true}
+	rep, err := RunBenchmark(context.Background(), cfg, d.Deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(d.datasets, []string{"chinook"}) || len(rep.ToolTokens["dbhub"]) != 5 || len(rep.ToolTokens["qh"]) != 5 {
+		t.Errorf("datasets %v, tokens %v", d.datasets, rep.ToolTokens)
+	}
+	if strings.Contains(strings.Join(rep.Notes, "\n"), "one connection per process") {
+		t.Errorf("notes: %v", rep.Notes)
+	}
+	if rep.Rival != "dbhub" {
+		t.Errorf("rival %q", rep.Rival)
+	}
+}
+
+func TestAbortedNoteNamesTheMongoRival(t *testing.T) {
+	d := newRivalDeps("mongodb-mcp")
+	cfg := Config{Model: "fake", Rival: "mongodb-mcp", Datasets: []string{"pagila-docs"}, Servers: []string{"qh", "mongodb-mcp"},
+		Runs: 2, Limit: 1, Parallel: 1, MaxTurns: 5, SkipMicro: true, SkipTokens: true}
+	rep, err := RunBenchmark(context.Background(), cfg, d.Deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(rep.Notes, "\n")
+	if !strings.Contains(notes, "0 qh and 2 mongodb-mcp runs were aborted") || strings.Contains(notes, "dbhub") {
+		t.Fatalf("notes: %v", rep.Notes)
+	}
+	for _, c := range Criteria(rep) {
+		if c.Known && (c.Name == "tokens" || c.Name == "accuracy" || c.Name == "tool calls") {
+			t.Errorf("criterion known although mongodb-mcp never ran: %+v", c)
+		}
+	}
+	if !strings.Contains(rep.Markdown(), "# qh vs mongodb-mcp benchmark") {
+		t.Error("report title does not name the rival")
+	}
+}
+
+func TestDefaultDepsDispatch(t *testing.T) {
+	deps := DefaultDeps(Config{Model: "fake"}, "/nonexistent/qh")
+	if _, err := deps.StartServer(context.Background(), "nope", nil); err == nil || !strings.Contains(err.Error(), `unknown server "nope"`) {
+		t.Fatalf("unknown server: %v", err)
+	}
+	// the rival servers are reached through their own starters, which refuse
+	// these connection lists before starting anything.
+	if _, err := deps.StartServer(context.Background(), "mongodb-mcp", nil); err == nil || !strings.Contains(err.Error(), "mongodb-mcp-server") {
+		t.Fatalf("mongodb-mcp dispatch: %v", err)
 	}
 }

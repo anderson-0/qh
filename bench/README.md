@@ -49,6 +49,8 @@ make bench ARGS="-rival mongodb-mcp"                    # pagila-docs and lendco
   - Neither server gets a dataset description, because mongodb-mcp-server has no place for one.
   - Both servers cap results at 100 rows or documents by default.
   - mongodb-mcp-server serves one connection per process, so its tool-definition tokens are measured with one connection.
+  - mongodb-mcp-server's `find` returns 10 documents unless the model passes a limit; its cap is 100.
+  - mongodb-mcp-server wraps its results in an `<untrusted-user-data>` notice. That is its real behaviour and the benchmark keeps it, so it costs that server tokens.
 - **Cost:** about 360 conversations (60 questions × 3 runs × 2 servers), roughly half a SQL run.
 
 ## Cost and time

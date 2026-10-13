@@ -126,8 +126,10 @@ func TestStartMongoMCP(t *testing.T) {
 		}
 	}
 	for _, tl := range srv.Tools() {
-		if strings.Contains(tl.Name, "insert") || strings.Contains(tl.Name, "delete") || strings.Contains(tl.Name, "update") {
-			t.Errorf("write tool %s registered despite --readOnly", tl.Name)
+		for _, w := range []string{"insert", "update", "delete", "drop", "create", "rename"} {
+			if strings.Contains(tl.Name, w) {
+				t.Errorf("write tool %s registered despite --readOnly", tl.Name)
+			}
 		}
 	}
 	name, args := SchemaCall("mongodb-mcp", gen)

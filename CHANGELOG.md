@@ -17,7 +17,7 @@ The first release.
   - MySQL 8.0.16+;
   - MariaDB 10.6+;
   - SQLite;
-  - MongoDB 7 and 8, queried in mongosh syntax. qh parses a fixed subset and never runs JavaScript.
+  - MongoDB 7 and 8, queried in mongosh syntax. qh parses a fixed subset and runs no JavaScript itself; `$where` and `$function` still run on the MongoDB server.
 - **Connections:**
   - Connections are read-only unless created with `--mode rw`.
   - Connection strings are encrypted at rest with AES-256-GCM.
@@ -25,20 +25,20 @@ The first release.
 
 ### Safety
 
-- **Read-only connections run reads only.**
+- **Read-only connections are guarded twice.** Use a database user that can only read as well; see Read-only safety in the README.
   - Each engine refuses statements that would write before they reach the database. Postgres and MySQL/MariaDB also run queries in read-only transactions, and SQLite opens the file read-only.
   - MongoDB read-only connections accept only reads. `$out` and `$merge` are detected at any depth.
 - **Unknown names give suggestions.** Errors on unknown tables, columns and collections suggest close matches.
 - **Server mode guards what a tenant can reach:**
-  - It refuses Unix sockets, and database addresses on loopback and link-local ranges, including cloud metadata. `--allow-cidr` re-allows a range.
+  - It refuses Unix sockets, and database addresses on loopback, link-local and unspecified ranges, including cloud metadata. `--allow-cidr` re-allows a range.
   - It refuses connection-string settings that would read files on the server or use its credentials.
 
 ### Server mode
 
 - **Serving:** `qh serve --http` serves MCP over Streamable HTTP and a REST API with an OpenAPI description.
 - **Access:** API keys have the scopes `query`, `manage` and `admin`, and workspaces isolate connections. Each key has a per-key concurrency limit.
-- **Remote CLI:** `qh conn`, `qh query`, `qh key` and the other commands also run against a remote server.
-- **Query log:** every `query` call is logged, with 30-day retention by default, and can be listed with `qh log` or the REST API.
+- **Remote CLI:** `qh conn`, `query`, `schema`, `log`, `workspace` and `key` also run against a remote server.
+- **Query log:** every `query` call is logged (unless `--no-query-log`), with 30-day retention by default, and can be listed with `qh log` or the REST API.
 
 ### Connections and secrets
 
@@ -54,7 +54,7 @@ The first release.
 
 ### Benchmarks
 
-- **Against dbhub** on four SQL datasets: about 40% fewer tokens per task, with equal accuracy.
+- **Against dbhub** on four SQL datasets: about 40% fewer tokens per task, with equal accuracy. These were measured before the SSH, shared-store and MongoDB work. The tool surface that SQL-only workspaces see has not changed since; a test pins it byte for byte.
 - **Against mongodb-mcp-server 3.0.5** on two document datasets: 95% fewer tokens per task, with equal accuracy.
 
-See `bench/README.md` for both.
+See [bench/README.md](https://github.com/anderson-0/qh/blob/main/bench/README.md) for both.

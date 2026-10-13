@@ -443,7 +443,7 @@ This task changes no code. It runs the paid benchmark once and reports the resul
 From the repo root:
 
 ```bash
-(set -a; . ./.env.local; set +a; ANTHROPIC_WORKSPACE_ID=$ANTHROPIC_WORKSPACE_ID make bench ARGS="-limit 2 -runs 1 -skip-micro")
+(set -a; . ./.env.local; set +a; make bench ARGS="-limit 2 -runs 1 -skip-micro")
 ```
 
 Expected:
@@ -454,7 +454,7 @@ Expected:
 - [ ] **Step 2: Full run**
 
 ```bash
-(set -a; . ./.env.local; set +a; ANTHROPIC_WORKSPACE_ID=$ANTHROPIC_WORKSPACE_ID make bench)
+(set -a; . ./.env.local; set +a; make bench)
 ```
 
 It takes about 15 minutes.

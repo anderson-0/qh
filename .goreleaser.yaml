@@ -41,11 +41,12 @@ dockers_v2:
     dockerfile: Dockerfile
     images:
       - ghcr.io/anderson-0/qh
+    # A prerelease (v1.1.0-rc1) gets only its own tag; empty tags are dropped.
     tags:
       - "{{ .Version }}"
-      - "{{ .Major }}.{{ .Minor }}"
-      - "{{ .Major }}"
-      - latest
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}{{ .Major }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
     platforms:
       - linux/amd64
       - linux/arm64
@@ -55,9 +56,11 @@ dockers_v2:
       org.opencontainers.image.source: https://github.com/anderson-0/qh
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
       org.opencontainers.image.licenses: MIT
 
 release:
   github:
     owner: anderson-0
     name: qh
+  prerelease: auto

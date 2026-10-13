@@ -3,11 +3,14 @@ package engine
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/pem"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/anderson-0/qh/internal/tunnel/sshtest"
 )
 
 func keyPEM(t *testing.T, passphrase string) string {
@@ -45,19 +48,20 @@ func TestSSHValidate(t *testing.T) {
 		}
 	}
 	bad := map[string]SSH{
-		"ssh.host is required":                 {User: "u", HostKey: fp, Password: "pw"},
-		"ssh.user is required":                 {Host: "b", HostKey: fp, Password: "pw"},
-		"ssh.port must be between 1 and 65535": {Host: "b", Port: 70000, User: "u", HostKey: fp, Password: "pw"},
-		"ssh.host_key must look like SHA256:":  {Host: "b", User: "u", HostKey: "MD5:aa", Password: "pw"},
-		"exactly one of":                       {Host: "b", User: "u", HostKey: fp},
-		"exactly one of ":                      {Host: "b", User: "u", HostKey: fp, Password: "pw", PrivateKey: key},
-		"ssh.password and ssh.password_ref":    {Host: "b", User: "u", HostKey: fp, Password: "pw", PasswordRef: "env:X"},
-		"invalid secret reference":             {Host: "b", User: "u", HostKey: fp, PasswordRef: "env:"},
-		"is encrypted":                         {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
-		"does not decrypt":                     {Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"},
-		"is not encrypted":                     {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
-		"not a PEM private key":                {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
-		"passphrase applies only":              {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
+		"ssh.host is required":                  {User: "u", HostKey: fp, Password: "pw"},
+		"ssh.user is required":                  {Host: "b", HostKey: fp, Password: "pw"},
+		"ssh.port must be between 1 and 65535":  {Host: "b", Port: 70000, User: "u", HostKey: fp, Password: "pw"},
+		"ssh.host_key must look like SHA256:":   {Host: "b", User: "u", HostKey: "MD5:aa", Password: "pw"},
+		"exactly one of":                        {Host: "b", User: "u", HostKey: fp},
+		"exactly one of ":                       {Host: "b", User: "u", HostKey: fp, Password: "pw", PrivateKey: key},
+		"ssh.password and ssh.password_ref":     {Host: "b", User: "u", HostKey: fp, Password: "pw", PasswordRef: "env:X"},
+		"invalid secret reference":              {Host: "b", User: "u", HostKey: fp, PasswordRef: "env:"},
+		"is encrypted":                          {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
+		"does not decrypt":                      {Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"},
+		"is not encrypted":                      {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
+		"not a PEM private key":                 {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
+		"the private key is larger than 16 KiB": {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
+		"passphrase applies only":               {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
 	}
 	for want, s := range bad {
 		err := s.Validate()
@@ -88,4 +92,64 @@ func TestSSHInfoAndRefs(t *testing.T) {
 	if (&SSH{Host: "b", User: "u", Password: "x"}).Info().Auth != "password" {
 		t.Fatal("password auth")
 	}
+}
+
+// ValidateServer checks a tenant's key without decrypting it (the tunnel
+// decrypts it once, when connecting) and applies server mode's limits.
+func TestSSHValidateServer(t *testing.T) {
+	key, enc, dsaKey := keyPEM(t, ""), keyPEM(t, "pp"), sshtest.DSAKey(t)
+	for i, s := range []SSH{
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: key},
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "pp"},
+		// Not decrypted here, so a wrong passphrase is found when connecting.
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"},
+		{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, PassphraseRef: "env:P"},
+		{Host: "b", User: "u", HostKey: fp, Password: "pw"},
+	} {
+		if err := s.ValidateServer(); err != nil {
+			t.Errorf("ok[%d]: %v", i, err)
+		}
+	}
+	for want, s := range map[string]SSH{
+		"is encrypted":              {Host: "b", User: "u", HostKey: fp, PrivateKey: enc},
+		"is not encrypted":          {Host: "b", User: "u", HostKey: fp, PrivateKey: key, Passphrase: "pp"},
+		"not a PEM private key":     {Host: "b", User: "u", HostKey: fp, PrivateKey: "junk"},
+		"larger than 16 KiB":        {Host: "b", User: "u", HostKey: fp, PrivateKey: key + strings.Repeat("\n", 16<<10)},
+		"KDF uses 2048 rounds":      {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.KeyWithRounds(2048), Passphrase: "pp"},
+		"RSA key of 8704 bits":      {Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704},
+		"DSA keys are not accepted": {Host: "b", User: "u", HostKey: fp, PrivateKey: dsaKey},
+		"DSA keys are not":          {Host: "b", User: "u", HostKey: fp, PrivateKey: encryptedPEM(t, dsaKey, "pp"), Passphrase: "pp"},
+		"ssh.user is required":      {Host: "b", HostKey: fp, Password: "pw"},
+		"passphrase applies only":   {Host: "b", User: "u", HostKey: fp, Password: "pw", Passphrase: "pp"},
+	} {
+		err := s.ValidateServer()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", want, err)
+		}
+	}
+	// Local mode still decrypts early, and accepts what server mode caps.
+	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: enc, Passphrase: "wrong"}).Validate(); err == nil || !strings.Contains(err.Error(), "does not decrypt") {
+		t.Errorf("local wrong passphrase: %v", err)
+	}
+	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: sshtest.RSA8704}).Validate(); err != nil {
+		t.Errorf("local big RSA key: %v", err)
+	}
+	if err := (&SSH{Host: "b", User: "u", HostKey: fp, PrivateKey: dsaKey}).Validate(); err != nil {
+		t.Errorf("local DSA key: %v", err)
+	}
+}
+
+// encryptedPEM re-encrypts an unencrypted PEM key in the legacy
+// "Proc-Type: 4,ENCRYPTED" format, which x/crypto still reads.
+func encryptedPEM(t *testing.T, key, pass string) string {
+	t.Helper()
+	b, _ := pem.Decode([]byte(key))
+	if b == nil {
+		t.Fatal("not PEM")
+	}
+	enc, err := x509.EncryptPEMBlock(rand.Reader, b.Type, b.Bytes, []byte(pass), x509.PEMCipherAES256) //nolint:staticcheck // the legacy format is what is being tested
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(enc))
 }

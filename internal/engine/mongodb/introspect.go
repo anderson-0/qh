@@ -14,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/anderson-0/qh/internal/engine"
+	"github.com/anderson-0/qh/internal/qerr"
 )
 
 const (
@@ -48,7 +49,7 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 	}
 	// When ctx ends during sampling, the catalog keeps what was built: the
 	// collections not yet sampled are listed without fields.
-	nss, err := collectNamespaces(allowed, func(db string) (engine.Namespace, error) { return c.namespace(ctx, db) })
+	nss, err := collectNamespaces(allowed, func(db string) (engine.Namespace, error) { return c.namespace(ctx, db) }, c.unlistedNote)
 	if err != nil {
 		return nil, c.err(err)
 	}
@@ -58,9 +59,11 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 }
 
 // collectNamespaces builds one namespace per database. A database whose
-// collections cannot be listed becomes an empty namespace, so the others
-// still build; only when every database fails is the first error returned.
-func collectNamespaces(dbs []string, build func(string) (engine.Namespace, error)) ([]engine.Namespace, error) {
+// collections cannot be listed becomes an empty namespace whose Note is
+// note(err), so the others still build and the overview does not mistake it
+// for an empty database; only when every database fails is the first error
+// returned.
+func collectNamespaces(dbs []string, build func(string) (engine.Namespace, error), note func(error) string) ([]engine.Namespace, error) {
 	var out []engine.Namespace
 	var first error
 	failed := 0
@@ -71,7 +74,7 @@ func collectNamespaces(dbs []string, build func(string) (engine.Namespace, error
 				first = err
 			}
 			failed++
-			ns = engine.Namespace{Name: db}
+			ns = engine.Namespace{Name: db, Note: note(err)}
 		}
 		out = append(out, ns)
 	}
@@ -79,6 +82,21 @@ func collectNamespaces(dbs []string, build func(string) (engine.Namespace, error
 		return nil, first
 	}
 	return out, nil
+}
+
+// maxNoteLen caps the reason in an unlisted database's note, in characters.
+const maxNoteLen = 100
+
+// unlistedNote is the Note of a database whose collections could not be
+// listed: "not listed: <category>: <message>", on one line, short and with
+// the password scrubbed.
+func (c *conn) unlistedNote(err error) string {
+	e := qerr.From(c.err(err))
+	msg := strings.Join(strings.Fields(e.Message), " ")
+	if r := []rune(msg); len(r) > maxNoteLen {
+		msg = string(r[:maxNoteLen]) + "…"
+	}
+	return "not listed: " + string(e.Category) + ": " + msg
 }
 
 type collInfo struct {

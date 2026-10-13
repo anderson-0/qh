@@ -1,23 +1,28 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/anderson-0/qh/internal/core"
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/testutil"
@@ -184,5 +189,57 @@ func TestLocalCommandsReadOldMasterKey(t *testing.T) {
 	t.Setenv("QH_MASTER_KEY_OLD", "not-base64")
 	if _, errOut, code := run(t, home, "", "conn", "ls"); code != 1 || !strings.Contains(errOut, "QH_MASTER_KEY_OLD must hold") {
 		t.Fatalf("bad old key: %d %q", code, errOut)
+	}
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// The service's logger reaches a shared store, so a lost invalidation
+// listener is reported where serve and mcp log.
+func TestSharedStoreLogsToTheServiceLogger(t *testing.T) {
+	dsn := pgStoreDSN(t)
+	t.Setenv("QH_MASTER_KEY", testMasterKey(t))
+	t.Setenv("QH_STORE_DSN", dsn)
+	var buf lockedBuffer
+	a, err := openAppWith(context.Background(), t.TempDir(), core.Options{Logger: slog.New(slog.NewJSONHandler(&buf, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.svc.Start(ctx)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(buf.String(), "reconnected"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("no reconnect was logged:\n%s", buf.String())
+		}
+		if _, err := db.Exec(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+			AND datname = current_database() AND query LIKE 'LISTEN%'`); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), "lost the connection") {
+		t.Fatalf("the lost connection was not logged:\n%s", buf.String())
 	}
 }

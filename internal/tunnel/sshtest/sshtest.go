@@ -3,12 +3,19 @@
 package sshtest
 
 import (
+	"crypto"
+	"crypto/dsa" //nolint:staticcheck // tests that DSA keys are refused
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
+	_ "embed"
+	"encoding/asn1"
+	"encoding/binary"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"strconv"
 	"sync"
@@ -27,12 +34,15 @@ type Options struct {
 	// ExtraHostKey also gives the server an ECDSA host key, like a stock
 	// OpenSSH bastion that holds several key types.
 	ExtraHostKey bool
+	// HostKey is the type of the server's main host key: "" (Ed25519),
+	// "ecdsa" (P-256) or "rsa" (2048 bits).
+	HostKey string
 }
 
 // Server is a running test SSH server.
 type Server struct {
 	Addr        string
-	Fingerprint string // of the Ed25519 host key
+	Fingerprint string // of the main host key (Ed25519 unless Options.HostKey says otherwise)
 	// FingerprintECDSA is the ECDSA host key's fingerprint; empty unless
 	// Options.ExtraHostKey is set.
 	FingerprintECDSA string
@@ -66,10 +76,67 @@ func Key(t testing.TB, passphrase string) (string, ssh.PublicKey) {
 	return string(pem.EncodeToMemory(b)), sp
 }
 
+// DSAKey returns a new 1024-bit DSA private key as unencrypted PEM, in the
+// OpenSSL format x/crypto parses.
+func DSAKey(t testing.TB) string {
+	t.Helper()
+	var k dsa.PrivateKey
+	if err := dsa.GenerateParameters(&k.Parameters, rand.Reader, dsa.L1024N160); err != nil {
+		t.Fatal(err)
+	}
+	if err := dsa.GenerateKey(&k, rand.Reader); err != nil {
+		t.Fatal(err)
+	}
+	der, err := asn1.Marshal(struct {
+		Version       int
+		P, Q, G, Y, X *big.Int
+	}{0, k.P, k.Q, k.G, k.Y, k.X})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "DSA PRIVATE KEY", Bytes: der}))
+}
+
+// RSA8704 is an 8704-bit RSA private key in PKCS#1 PEM, unencrypted. It
+// exists only for tests (generating one takes tens of seconds) and is
+// larger than the 8192 bits server mode accepts.
+//
+//go:embed testdata/rsa8704-test-only.pem
+var RSA8704 string
+
+// KeyWithRounds returns an encrypted OpenSSH-format private key whose
+// header asks for rounds bcrypt_pbkdf rounds. Only the header is valid: the
+// public key and the encrypted block are junk, so the key can never be
+// decrypted.
+func KeyWithRounds(rounds uint32) string {
+	str := func(b []byte) []byte { return append(binary.BigEndian.AppendUint32(nil, uint32(len(b))), b...) }
+	kdfOpts := binary.BigEndian.AppendUint32(str(make([]byte, 16)), rounds)
+	var b []byte
+	b = append(b, "openssh-key-v1\x00"...)
+	b = append(b, str([]byte("aes256-ctr"))...)
+	b = append(b, str([]byte("bcrypt"))...)
+	b = append(b, str(kdfOpts)...)
+	b = binary.BigEndian.AppendUint32(b, 1)
+	b = append(b, str([]byte("junk public key"))...)
+	b = append(b, str(make([]byte, 64))...)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: b}))
+}
+
 // Start listens on 127.0.0.1 and serves until the test ends.
 func Start(t testing.TB, o Options) *Server {
 	t.Helper()
-	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
+	var hostPriv crypto.Signer
+	var err error
+	switch o.HostKey {
+	case "":
+		_, hostPriv, err = ed25519.GenerateKey(rand.Reader)
+	case "ecdsa":
+		hostPriv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case "rsa":
+		hostPriv, err = rsa.GenerateKey(rand.Reader, 2048)
+	default:
+		t.Fatalf("sshtest: unknown host key type %q", o.HostKey)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

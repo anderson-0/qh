@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secretref"
+	"github.com/anderson-0/qh/internal/sshkey"
 )
 
 // SSH is a connection's tunnel through a bastion host. The private key,
@@ -61,7 +63,15 @@ func (s *SSH) Addr() string { return net.JoinHostPort(s.Host, strconv.Itoa(s.por
 // Validate checks s without connecting. An empty HostKey is allowed: the
 // connection test then reports the bastion's fingerprint. Errors never
 // contain key material or passwords.
-func (s *SSH) Validate() error {
+func (s *SSH) Validate() error { return s.validate(false) }
+
+// ValidateServer is Validate for a tenant's settings in server mode. It
+// applies the server's key limits (KDF rounds, RSA size) and does not
+// decrypt an encrypted key: the tunnel decrypts it once, when connecting,
+// and reports a wrong passphrase then.
+func (s *SSH) ValidateServer() error { return s.validate(true) }
+
+func (s *SSH) validate(server bool) error {
 	if strings.TrimSpace(s.Host) == "" {
 		return sshInvalid("ssh.host is required")
 	}
@@ -97,26 +107,46 @@ func (s *SSH) Validate() error {
 		return sshInvalid("ssh.passphrase applies only with a private key")
 	}
 	if s.PrivateKey != "" {
-		return checkKey(s.PrivateKey, s.Passphrase, s.PassphraseRef != "")
+		return checkKey(s.PrivateKey, s.Passphrase, s.PassphraseRef != "", server)
 	}
 	return nil
 }
 
-func checkKey(key, pass string, passRef bool) error {
-	_, err := ssh.ParseRawPrivateKey([]byte(key))
+// checkKey parses key without decrypting it, then (outside server mode)
+// decrypts it with pass. Parsing first never runs the KDF.
+func checkKey(key, pass string, passRef, server bool) error {
+	rounds, rsaBits := 0, 0
+	if server {
+		rounds, rsaBits = sshkey.ServerMaxKDFRounds, sshkey.ServerMaxRSABits
+	}
+	if err := sshkey.Check(key, rounds); err != nil {
+		return qerr.New(qerr.Invalid, "ssh: "+err.Error())
+	}
+	k, err := ssh.ParseRawPrivateKey([]byte(key))
 	var missing *ssh.PassphraseMissingError
 	switch {
 	case err == nil:
 		if pass != "" {
 			return sshInvalid("ssh.passphrase is set but the private key is not encrypted")
 		}
+		if err := sshkey.CheckParsed(k, rsaBits, server); err != nil {
+			return qerr.New(qerr.Invalid, "ssh: "+err.Error())
+		}
 		return nil
 	case errors.As(err, &missing):
+		// An encrypted key is only decrypted when connecting, but its type
+		// is known now: refuse DSA here rather than at the first use.
+		if server && isDSA(key, missing) {
+			return qerr.New(qerr.Invalid, "ssh: DSA keys are not accepted; use an Ed25519, ECDSA or RSA key")
+		}
 		if passRef {
 			return nil
 		}
 		if pass == "" {
 			return sshInvalid("the ssh private key is encrypted; give ssh.passphrase or ssh.passphrase_ref")
+		}
+		if server {
+			return nil
 		}
 		if _, err := ssh.ParseRawPrivateKeyWithPassphrase([]byte(key), []byte(pass)); err != nil {
 			return sshInvalid("ssh.passphrase does not decrypt the private key")
@@ -155,4 +185,14 @@ func (s *SSH) RefStrings() []string {
 		}
 	}
 	return out
+}
+
+// isDSA reports whether an encrypted private key is a DSA key: a legacy
+// "DSA PRIVATE KEY" PEM block, or an OpenSSH key whose unencrypted public
+// part is ssh-dss.
+func isDSA(key string, missing *ssh.PassphraseMissingError) bool {
+	if b, _ := pem.Decode([]byte(key)); b != nil && b.Type == "DSA PRIVATE KEY" {
+		return true
+	}
+	return missing.PublicKey != nil && missing.PublicKey.Type() == ssh.KeyAlgoDSA //nolint:staticcheck // recognised only to refuse it
 }

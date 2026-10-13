@@ -1,12 +1,14 @@
 package mongodb
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/anderson-0/qh/internal/engine"
 )
@@ -220,12 +222,32 @@ func TestCollectNamespacesSkipsFailedDatabase(t *testing.T) {
 		}
 		return engine.Namespace{Name: db, Objects: []*engine.Object{{Name: "x"}}}, nil
 	}
-	got, err := collectNamespaces([]string{"a", "b", "c"}, build)
+	note := func(err error) string { return "not listed: " + err.Error() }
+	got, err := collectNamespaces([]string{"a", "b", "c"}, build, note)
 	if err != nil || len(got) != 3 || got[1].Name != "b" || len(got[1].Objects) != 0 || len(got[2].Objects) != 1 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
-	if _, err := collectNamespaces([]string{"b"}, build); err == nil {
+	if got[1].Note != "not listed: unauthorized" || got[0].Note != "" || got[2].Note != "" {
+		t.Errorf("notes: %q %q %q", got[0].Note, got[1].Note, got[2].Note)
+	}
+	if _, err := collectNamespaces([]string{"b"}, build, note); err == nil {
 		t.Error("every database failed but no error")
+	}
+}
+
+func TestUnlistedNote(t *testing.T) {
+	c := &conn{password: "s3cret-pw"}
+	cmdErr := mongo.CommandError{Code: 13, Name: "Unauthorized", Message: "not authorized on shop to execute command { listCollections: 1, pwd: \"s3cret-pw\" }"}
+	got := c.unlistedNote(cmdErr)
+	if !strings.HasPrefix(got, "not listed: query_error: not authorized") || strings.Contains(got, "s3cret-pw") {
+		t.Errorf("note: %q", got)
+	}
+	if len([]rune(got)) > 140 {
+		t.Errorf("note too long (%d): %q", len(got), got)
+	}
+	long := c.unlistedNote(errors.New("boom\nsecond line " + strings.Repeat("x", 500)))
+	if strings.Contains(long, "\n") || len([]rune(long)) > 140 {
+		t.Errorf("long note: %q", long)
 	}
 }
 

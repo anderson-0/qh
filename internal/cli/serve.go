@@ -177,7 +177,7 @@ func serveCmd(home *string, version string) *cobra.Command {
 	fl.StringVar(&sqliteRoot, "sqlite-root", "", "server mode: allow SQLite files under DIR/<workspace>/ (SQLite is disabled otherwise)")
 	fl.StringSliceVar(&allow, "allow-cidr", nil, "server mode: allow database addresses in this range, even if denied by default (repeatable)")
 	fl.StringSliceVar(&deny, "deny-cidr", nil, "server mode: also refuse database addresses in this range (repeatable)")
-	fl.StringArrayVar(&allowRefs, "allow-secret-ref", nil, "server mode: allow secret references matching this pattern (repeatable; * is a wildcard), e.g. env:QH_TENANT_*")
+	fl.StringArrayVar(&allowRefs, "allow-secret-ref", nil, "server mode: allow secret references matching this pattern (repeatable; * is a wildcard), e.g. env:TENANT_DB_*")
 	fl.BoolVar(&denySSH, "deny-ssh", false, "server mode: refuse connections that use an SSH tunnel")
 	return cmd
 }

@@ -57,8 +57,8 @@ func (c *conn) forbidden(db string) error {
 
 // checkStages refuses any $out, $merge, $lookup or $unionWith, however deeply
 // nested ($facet, $lookup.pipeline, $unionWith.pipeline), that names a
-// database outside the allowed list, or names one that cannot be checked
-// because it is not a plain string.
+// database outside the allowed list. A db that is not a plain string cannot
+// be checked, so it is refused as invalid.
 func (c *conn) checkStages(v any) error {
 	switch x := v.(type) {
 	case bson.D:
@@ -75,9 +75,10 @@ func (c *conn) checkStages(v any) error {
 			if d, ok := field(target, "db"); ok {
 				s, isStr := d.(string)
 				if !isStr {
-					s = fmt.Sprintf("%v", d)
+					return qerr.New(qerr.Invalid, fmt.Sprintf("a %s stage's db must be a plain string", e.Key)).
+						WithHint("Name the database literally; qh cannot check an expression against the allowed list. Allowed: " + strings.Join(c.namespaces, ", "))
 				}
-				if !isStr || !c.allowed(s) {
+				if !c.allowed(s) {
 					return c.forbidden(s)
 				}
 			}

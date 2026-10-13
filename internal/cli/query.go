@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -83,7 +84,9 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off})
+			// stdout carries the protocol, so warnings go to stderr.
+			logger := slog.New(slog.NewJSONHandler(cmd.ErrOrStderr(), nil))
+			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off, Logger: logger})
 			if err != nil {
 				return err
 			}

@@ -140,12 +140,21 @@ func (s *Service) checkInput(in ConnInput) error {
 			return err
 		}
 	}
+	return s.denySSH(in)
+}
+
+// denySSH refuses SSH settings on a --deny-ssh server. Callers run it
+// before normalize, which parses the key.
+func (s *Service) denySSH(in ConnInput) error {
 	if in.SSH != nil && s.opts.DenySSH {
 		return qerr.New(qerr.Forbidden, "SSH tunnels are disabled on this server").
 			WithHint("The operator turned them off with qh serve --deny-ssh")
 	}
 	return nil
 }
+
+// server reports server mode, where connection settings come from tenants.
+func (s *Service) server() bool { return s.opts.Dial != nil }
 
 // allowEngine refuses engines this server does not permit.
 func (s *Service) allowEngine(name string) error {

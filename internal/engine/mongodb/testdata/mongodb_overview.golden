@@ -1,0 +1,5 @@
+shop: 3 collections, 1 view
+  order_items ~20: _id PK, order_id→orders, sku, qty
+  orders ~250: _id PK, user_id→users, status [paid|pending|…], total
+  paid_orders (view): _id, user_id→users, total
+  users ~3: _id PK, email, name, bio, avatar, created_at

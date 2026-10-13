@@ -119,24 +119,67 @@ func columnList(o *engine.Object) string {
 			fks[fk.Columns[0]] = fk
 		}
 	}
-	cols := make([]string, len(o.Fields))
-	for i, f := range o.Fields {
+	names := map[string]bool{}
+	for _, f := range o.Fields {
+		names[f.Name] = true
+	}
+	children := map[string][]string{}
+	for _, f := range o.Fields {
+		if p, c, ok := childOf(f.Name); ok && names[p] && !contains(children[p], c) {
+			children[p] = append(children[p], c)
+		}
+	}
+	var cols []string
+	for _, f := range o.Fields {
+		if p, _, ok := childOf(f.Name); ok && names[p] {
+			continue
+		}
 		s := f.Name
+		if kids := children[f.Name]; len(kids) > 0 {
+			shown := kids
+			if len(shown) > 2 {
+				shown = append(append([]string{}, kids[:2]...), "…")
+			}
+			s += "{" + strings.Join(shown, ",") + "}"
+		}
 		if pk[f.Name] {
 			s += " PK"
 		}
 		if fk, ok := fks[f.Name]; ok {
 			s += "→" + target(o.Namespace, fk.RefNamespace, fk.RefObject)
-			if fk.RefColumns[0] != f.Name {
+			if fk.RefColumns[0] != f.Name && fk.RefColumns[0] != "_id" {
 				s += "." + fk.RefColumns[0]
 			}
 		}
 		if len(f.Enum) > 0 && len(f.Enum) <= 10 {
 			s += " [" + strings.Join(f.Enum, "|") + "]"
 		}
-		cols[i] = s
+		cols = append(cols, s)
 	}
 	return strings.Join(cols, ", ")
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// childOf returns the top-level parent and the next segment of a nested
+// field name such as "address.city" or "items[].sku".
+func childOf(name string) (parent, child string, ok bool) {
+	i := strings.IndexAny(name, ".[")
+	if i <= 0 {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(name[i:], "[]"), ".")
+	if j := strings.IndexAny(rest, ".["); j >= 0 {
+		rest = rest[:j]
+	}
+	return name[:i], rest, rest != ""
 }
 
 var kindLabels = []struct {
@@ -144,9 +187,9 @@ var kindLabels = []struct {
 	one, many string
 }{
 	{engine.KindTable, "table", "tables"},
+	{engine.KindCollection, "collection", "collections"},
 	{engine.KindView, "view", "views"},
 	{engine.KindMatView, "materialized view", "materialized views"},
-	{engine.KindCollection, "collection", "collections"},
 }
 
 func kindCounts(objs []*engine.Object) string {

@@ -1,0 +1,7 @@
+shop.orders ~250 rows
+  _id int PK
+  user_id int NN → users._id
+  status string NN [paid|pending|…]
+  total double NN
+  ← order_items.order_id
+  idx (user_id)

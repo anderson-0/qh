@@ -478,8 +478,3 @@ func scrubText(s string, secrets ...string) string {
 	}
 	return s
 }
-
-// Introspect is implemented in introspect.go.
-func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
-	return nil, qerr.New(qerr.Invalid, "not implemented")
-}

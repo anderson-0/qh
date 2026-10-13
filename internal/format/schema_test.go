@@ -193,3 +193,25 @@ func TestMatching(t *testing.T) {
 		t.Fatalf("object: %+v", got)
 	}
 }
+
+func TestOverviewFoldsNestedFields(t *testing.T) {
+	c := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "shop", Objects: []*engine.Object{
+		{Namespace: "shop", Name: "customers", Kind: engine.KindCollection, RowEstimate: 599, PrimaryKey: []string{"_id"},
+			Fields: []engine.Field{{Name: "_id"}, {Name: "name"}, {Name: "address"}, {Name: "address.city"},
+				{Name: "address.country"}, {Name: "address.zip"}, {Name: "items"}, {Name: "items[].sku"}, {Name: "store_id"}},
+			ForeignKeys: []engine.ForeignKey{{Namespace: "shop", Object: "customers", Columns: []string{"store_id"},
+				RefNamespace: "shop", RefObject: "stores", RefColumns: []string{"_id"}}}},
+	}}}}
+	out, _ := Schema(c, SchemaOpts{})
+	want := "shop: 1 collection\n  customers ~599: _id PK, name, address{city,country,…}, items{sku}, store_id→stores\n"
+	if out != want {
+		t.Errorf("got\n%s\nwant\n%s", out, want)
+	}
+}
+
+func TestKindCountsListCollectionsBeforeViews(t *testing.T) {
+	objs := []*engine.Object{{Kind: engine.KindView}, {Kind: engine.KindCollection}, {Kind: engine.KindCollection}}
+	if got := kindCounts(objs); got != "2 collections, 1 view" {
+		t.Errorf("kindCounts = %q", got)
+	}
+}

@@ -56,6 +56,22 @@ func envMCP(t *testing.T, home string, args ...string) (*mcp.ClientSession, func
 	}
 }
 
+// ephemeralTmp points TMPDIR at a fresh directory, where the ephemeral store
+// goes, and returns it.
+func ephemeralTmp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	return dir
+}
+
+func assertEmptyDir(t *testing.T, dir string) {
+	t.Helper()
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("%s is not empty after exit: %v", dir, entries)
+	}
+}
+
 func callText(t *testing.T, s *mcp.ClientSession, name string, args map[string]any) string {
 	t.Helper()
 	res, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
@@ -72,8 +88,12 @@ func TestEnvMCPServesOneConnection(t *testing.T) {
 	t.Setenv("QH_NAME", "shop")
 	t.Setenv("QH_DESCRIPTION", "Orders and customers")
 	home := filepath.Join(t.TempDir(), "home")
+	tmp := ephemeralTmp(t)
 
 	s, finish := envMCP(t, home)
+	if entries, _ := os.ReadDir(tmp); len(entries) != 1 {
+		t.Errorf("expected one ephemeral store directory while serving: %v", entries)
+	}
 	in := s.InitializeResult().Instructions
 	if !strings.Contains(in, "shop (sqlite, ro): Orders and customers") {
 		t.Errorf("instructions: %q", in)
@@ -81,9 +101,14 @@ func TestEnvMCPServesOneConnection(t *testing.T) {
 	if out := callText(t, s, "query", map[string]any{"query": "SELECT count(*) AS n FROM orders"}); !strings.HasPrefix(out, "n\n250\n-- 1 row · ") {
 		t.Errorf("query: %q", out)
 	}
-	if code, errOut := finish(); code != 0 {
+	code, errOut := finish()
+	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut)
 	}
+	if !strings.Contains(errOut, "serving one connection from QH_DSN; stored connections are not used") || strings.Contains(errOut, db) {
+		t.Errorf("stderr: %q", errOut)
+	}
+	assertEmptyDir(t, tmp)
 	// Nothing is kept on disk: not even the data directory exists.
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
 		entries, _ := os.ReadDir(home)
@@ -107,6 +132,7 @@ func TestEnvMCPModeRW(t *testing.T) {
 	clearQHEnv(t)
 	t.Setenv("QH_DSN", testutil.SQLiteFixture(t))
 	t.Setenv("QH_MODE", "rw")
+	tmp := ephemeralTmp(t)
 	s, finish := envMCP(t, t.TempDir())
 	if in := s.InitializeResult().Instructions; !strings.Contains(in, "db (sqlite, rw)") {
 		t.Errorf("instructions: %q", in)
@@ -117,6 +143,7 @@ func TestEnvMCPModeRW(t *testing.T) {
 	if code, errOut := finish(); code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut)
 	}
+	assertEmptyDir(t, tmp)
 }
 
 func TestEnvMCPReadOnlyByDefault(t *testing.T) {
@@ -130,7 +157,9 @@ func TestEnvMCPReadOnlyByDefault(t *testing.T) {
 	if !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "read_only") {
 		t.Errorf("write on ro: %+v", res)
 	}
-	finish()
+	if code, errOut := finish(); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
 }
 
 func TestEnvRefusals(t *testing.T) {
@@ -147,7 +176,9 @@ func TestEnvRefusals(t *testing.T) {
 		{"bad mode", map[string]string{"QH_DSN": db, "QH_MODE": "xx"}, nil, "error[invalid]: QH_MODE must be ro or rw"},
 		{"bad name", map[string]string{"QH_DSN": db, "QH_NAME": "Not Valid"}, nil, `error[invalid]: invalid connection name "Not Valid"`},
 		{"no engine", map[string]string{"QH_DSN": "user:pw@tcp(host)/db"}, nil, "error[invalid]: cannot tell the engine from QH_DSN; set QH_ENGINE"},
-		{"unknown engine", map[string]string{"QH_DSN": db, "QH_ENGINE": "oracle"}, nil, "error[invalid]"},
+		{"unknown engine", map[string]string{"QH_DSN": db, "QH_ENGINE": "oracle"}, nil, `error[invalid]: unknown engine "oracle"`},
+		{"server env", map[string]string{"QH_DSN": db, "QH_SERVER": "http://127.0.0.1:1"}, nil, "error[invalid]: QH_DSN cannot be used with --server"},
+		{"workspace env", map[string]string{"QH_DSN": db, "QH_WORKSPACE": "other"}, nil, "error[invalid]: QH_DSN serves the default workspace only"},
 		{"workspace", map[string]string{"QH_DSN": db}, []string{"--workspace", "other"}, "error[invalid]: QH_DSN serves the default workspace only"},
 	}
 	for _, c := range cases {
@@ -157,6 +188,8 @@ func TestEnvRefusals(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			home := filepath.Join(t.TempDir(), "home")
+			tmp := ephemeralTmp(t)
+			defer assertEmptyDir(t, tmp)
 			var args []string
 			args = append(args, c.args...)
 			args = append(args, "mcp")
@@ -175,23 +208,105 @@ func TestEnvRefusals(t *testing.T) {
 }
 
 func TestEnvBadDSNDoesNotLeakPassword(t *testing.T) {
-	clearQHEnv(t)
-	for _, dsn := range []string{
-		"postgres://reader:hunter2pw@db.example.com:notaport/shop",
-		"mysql://reader:hunter2pw@db.example.com:notaport/shop",
-		"mongodb://reader:hunter2pw@db.example.com:notaport/shop",
+	for _, c := range []struct{ dsn, engine string }{
+		{"postgres://reader:hunter2pw@db.example.com:notaport/shop", ""},
+		{"mysql://reader:hunter2pw@db.example.com:notaport/shop", ""},
+		{"mongodb://reader:hunter2pw@db.example.com:notaport/shop", ""},
+		// A MySQL string in the go-sql-driver form that ends in .db is not SQLite.
+		{"reader:hunter2pw@tcp(db.example.com)/x.db", ""},
+		// The wrong QH_ENGINE must not echo the string as a missing file.
+		{"reader:hunter2pw@tcp(db.example.com)/x.db", "sqlite"},
+		{"postgres://reader:hunter2pw@db.example.com/shop", "sqlite"},
+		{"reader:hunter2pw@tcp(db.example.com)/shop", "postgres"},
 	} {
-		t.Setenv("QH_DSN", dsn)
+		clearQHEnv(t)
+		t.Setenv("QH_DSN", c.dsn)
+		t.Setenv("QH_ENGINE", c.engine)
 		home := filepath.Join(t.TempDir(), "home")
+		tmp := ephemeralTmp(t)
 		out, errOut, code := run(t, home, "", "mcp")
 		if code != 1 || !strings.HasPrefix(errOut, "error[") {
-			t.Errorf("%s: %d %q", dsn, code, errOut)
+			t.Errorf("%s: %d %q", c.dsn, code, errOut)
 		}
 		if strings.Contains(out+errOut, "hunter2pw") {
-			t.Errorf("%s leaks the password: %q %q", dsn, out, errOut)
+			t.Errorf("%s leaks the password: %q %q", c.dsn, out, errOut)
 		}
 		if _, err := os.Stat(home); err == nil {
-			t.Errorf("%s: home was created", dsn)
+			t.Errorf("%s: home was created", c.dsn)
+		}
+		assertEmptyDir(t, tmp)
+	}
+}
+
+// Upper-case schemes are valid (RFC 3986); each must reach its own engine.
+func TestEnvUpperCaseScheme(t *testing.T) {
+	clearQHEnv(t)
+	t.Setenv("QH_DSN", "SQLITE://"+testutil.SQLiteFixture(t))
+	s, finish := envMCP(t, t.TempDir())
+	if in := s.InitializeResult().Instructions; !strings.Contains(in, "db (sqlite, ro)") {
+		t.Errorf("instructions: %q", in)
+	}
+	if out := callText(t, s, "query", map[string]any{"query": "SELECT count(*) AS n FROM users"}); !strings.HasPrefix(out, "n\n3\n") {
+		t.Errorf("query: %q", out)
+	}
+	if code, errOut := finish(); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+
+	// pgx would read POSTGRES://… as keywords and connect to the local socket
+	// as the OS user; the scheme is lower-cased first, so the host is honoured.
+	t.Setenv("QH_DSN", "POSTGRES://u:hunter2pw@127.0.0.1:1/db?connect_timeout=1")
+	s, finish = envMCP(t, t.TempDir())
+	res, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "query", Arguments: map[string]any{"query": "SELECT 1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "127.0.0.1") || strings.Contains(text, "hunter2pw") {
+		t.Errorf("query: %+v", res)
+	}
+	finish()
+}
+
+func TestNormalizeScheme(t *testing.T) {
+	for in, want := range map[string]string{
+		"POSTGRES://U:P@H/Db":      "postgres://U:P@H/Db",
+		"PostgreSQL://u@h/db":      "postgresql://u@h/db",
+		"MongoDB+SRV://u:p@h/db":   "mongodb+srv://u:p@h/db",
+		"SQLITE:///Data/App.db":    "sqlite:///Data/App.db",
+		"FILE:/Data/App.db":        "file:/Data/App.db",
+		"C:/Data/App.db":           "C:/Data/App.db",
+		"/Data/App.db":             "/Data/App.db",
+		"host=H user=U dbname=D":   "host=H user=U dbname=D",
+		"U:P@tcp(H)/Db":            "U:P@tcp(H)/Db",
+		"postgres://already/lower": "postgres://already/lower",
+	} {
+		if got := normalizeScheme(in); got != want {
+			t.Errorf("normalizeScheme(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// With a read-only root filesystem and no writable /tmp the store cannot be
+// created; the error says how to fix it.
+func TestEnvNeedsWritableTmp(t *testing.T) {
+	clearQHEnv(t)
+	t.Setenv("QH_DSN", testutil.SQLiteFixture(t))
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	_, errOut, code := run(t, filepath.Join(t.TempDir(), "home"), "", "mcp")
+	if code != 1 || !strings.HasPrefix(errOut, "error[") || !strings.Contains(errOut, "cannot create a temporary store") ||
+		!strings.Contains(errOut, "--tmpfs /tmp") {
+		t.Fatalf("%d %q", code, errOut)
+	}
+}
+
+func TestMCPHelpListsEnvironment(t *testing.T) {
+	out, _, code := run(t, t.TempDir(), "", "mcp", "--help")
+	if code != 0 {
+		t.Fatal(out)
+	}
+	for _, v := range []string{"QH_DSN", "QH_ENGINE", "QH_NAME", "QH_DESCRIPTION", "QH_MODE"} {
+		if !strings.Contains(out, v) {
+			t.Errorf("help lacks %s: %q", v, out)
 		}
 	}
 }
@@ -220,7 +335,7 @@ func TestInferEngine(t *testing.T) {
 		"postgresql://u:p@h/db":             "postgres",
 		"POSTGRES://u:p@h/db":               "postgres",
 		"mysql://u:p@h/db":                  "mysql",
-		"mariadb://u:p@h/db":                "mysql",
+		"mariadb://u:p@h/db":                "mariadb",
 		"mongodb://u:p@h/db":                "mongodb",
 		"mongodb+srv://u:p@h/db":            "mongodb",
 		"sqlite:///data/app.db":             "sqlite",
@@ -248,6 +363,7 @@ func TestEnvEngineOverridesInference(t *testing.T) {
 	if in := s.InitializeResult().Instructions; !strings.Contains(in, "db (mysql, ro)") {
 		t.Errorf("instructions: %q", in)
 	}
-	finish()
-
+	if code, errOut := finish(); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
 }

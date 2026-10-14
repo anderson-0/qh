@@ -70,7 +70,7 @@ set `$QH_HOME` to use another directory.
 ## Use it from your editor
 
 qh speaks MCP over stdio with `qh mcp`. Connections you add or edit with `qh conn` while it runs are used on
-the agent's next call. Some apps don't inherit your shell's `PATH`; if the server fails to start, use the full
+the agent's next call (not when `QH_DSN` is set; see below). Some apps don't inherit your shell's `PATH`; if the server fails to start, use the full
 path that `which qh` prints instead of `qh`.
 
 **Claude Code**
@@ -111,9 +111,9 @@ code --add-mcp '{"name":"qh","command":"qh","args":["mcp"]}'
 |---|---|
 | Claude Desktop | macOS `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows `%APPDATA%\Claude\claude_desktop_config.json` (Settings → Developer → Edit Config); restart the app afterwards |
 | Cursor | `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project |
-| Windsurf (Devin Desktop) | `~/.config/devin/mcp_config.json`, or `%APPDATA%\devin\mcp_config.json` on Windows |
+| Windsurf (Devin Desktop) | `~/.config/devin/mcp_config.json`, or `%APPDATA%\devin\mcp_config.json` on Windows; older Windsurf installs use `~/.codeium/windsurf/mcp_config.json` |
 
-**Zed**: add it under `context_servers` in `~/.config/zed/settings.json`:
+**Zed**: add it under `context_servers` in `~/.config/zed/settings.json` (Windows: `%APPDATA%\Zed\settings.json`):
 
 ```json
 {
@@ -130,20 +130,28 @@ When `QH_DSN` is set, `qh mcp` serves exactly that one connection and ignores th
 `qh conn add`:
 
 ```bash
-docker run -i --rm -e QH_DSN='postgres://reader:…@db.example.com/shop' ghcr.io/anderson-0/qh:1 mcp
+export QH_DSN='postgres://reader:…@db.example.com/shop'
+docker run -i --rm -e QH_DSN ghcr.io/anderson-0/qh:1 mcp
 ```
 
+Passing `-e QH_DSN` without a value copies it from your shell, so the password stays out of `ps` and your shell
+history. Inside a container `localhost` is the container itself; reach a database on the Docker host as
+`host.docker.internal` (see Install).
+
 - **`QH_DSN`:** the connection string. The engine comes from its scheme (`postgres://`, `postgresql://`,
-  `mysql://`, `mongodb://`, `mongodb+srv://`, `sqlite://`, `file:`) or from a path ending in `.db`, `.sqlite`
-  or `.sqlite3`. Set `QH_ENGINE` (`postgres`, `mysql`, `mongodb` or `sqlite`) for any other string; it always wins.
+  `mysql://`, `mariadb://`, `mongodb://`, `mongodb+srv://`, `sqlite://`, `file:`) or from a path ending in
+  `.db`, `.sqlite` or `.sqlite3`. For any other string, such as `user:pw@tcp(host)/db`, set `QH_ENGINE`.
+- **`QH_ENGINE`:** `postgres`, `mysql`, `mariadb`, `mongodb` or `sqlite`. It always wins over the inferred engine.
 - **`QH_NAME`:** the connection name agents pass as `source` (default `db`).
 - **`QH_DESCRIPTION`:** optional text that tells agents what the database holds.
 - **`QH_MODE`:** `ro` (default) or `rw`.
 
-This mode keeps nothing on disk: the store and the query log are a temporary file removed on exit, the random
-master key exists only in memory, and the data directory and `master.key` are never created. The string is
-checked at startup but the database is not contacted, so an unreachable database fails per query rather than
-stopping the server. `QH_DSN` cannot be combined with `--store`, `QH_STORE_DSN`, `--server` or a non-default `--workspace`.
+This mode keeps nothing on disk that outlives the process: the store and the query log are a temporary file
+removed on exit, the random master key exists only in memory, and the data directory and `master.key` are never
+created. Connections you add with `qh conn` are not used while `QH_DSN` is set. The string is checked at startup
+but the database is not contacted, so an unreachable database fails per query rather than stopping the server.
+`QH_DSN` cannot be combined with `--store`, `QH_STORE_DSN`, `--server` or a non-default `--workspace`.
+With `docker run --read-only`, mount a writable `/tmp` for the temporary store: `--tmpfs /tmp`.
 
 ## Server mode
 

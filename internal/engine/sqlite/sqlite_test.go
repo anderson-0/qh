@@ -83,6 +83,23 @@ func TestPath(t *testing.T) {
 			t.Errorf("Path(%q) accepted", bad)
 		}
 	}
+	// A string for another database is refused with a message that does not
+	// repeat it, so a password in it never reaches an agent.
+	for _, other := range []string{
+		"u:hunter2pw@tcp(h)/x.db", "u:hunter2pw@unix(/run/m.sock)/x.db", "postgres://u:hunter2pw@h/x.db",
+		"mysql://u:hunter2pw@h/x", "MONGODB://u:hunter2pw@h/x", "https://h/x.db",
+	} {
+		_, err := Path(other)
+		if err == nil || strings.Contains(err.Error(), "hunter2pw") || qerr.From(err).Category != qerr.Invalid {
+			t.Errorf("Path(%q) = %v", other, err)
+		}
+	}
+	// Paths that merely contain an @ stay valid.
+	for in, want := range map[string]string{"/tmp/me@x/a.db": "/tmp/me@x/a.db", "/tmp/a@2x.db": "/tmp/a@2x.db", "SQLITE:///tmp/a.db": "/tmp/a.db", "FILE:/tmp/a.db": "/tmp/a.db"} {
+		if got, err := Path(in); err != nil || got != want {
+			t.Errorf("Path(%q) = %q, %v", in, got, err)
+		}
+	}
 	info, err := Engine{}.Inspect("sqlite:///tmp/a.db")
 	if err != nil || info.Database != "/tmp/a.db" || info.Redacted != "/tmp/a.db" || info.Password != "" {
 		t.Fatalf("Inspect = %+v, %v", info, err)

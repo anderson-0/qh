@@ -56,6 +56,8 @@ jobs:
 
   # Lists the release in the MCP registry (registry.modelcontextprotocol.io).
   # Runs after the image is pushed: the registry checks the image's label.
+  # If this job fails after the release is public, use "Re-run failed jobs" only;
+  # re-running the whole workflow repeats the release steps.
   mcp-registry:
     needs: release
     if: ${{ !contains(github.ref_name, '-') }} # not for prereleases

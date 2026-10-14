@@ -21,7 +21,7 @@ import (
 // QH_ENGINE, QH_NAME, QH_DESCRIPTION and QH_MODE. It reports false when
 // QH_DSN is unset. Errors never include the connection string.
 func envConnInput() (core.ConnInput, bool, error) {
-	dsn := strings.TrimSpace(os.Getenv("QH_DSN"))
+	dsn := normalizeScheme(strings.TrimSpace(os.Getenv("QH_DSN")))
 	if dsn == "" {
 		return core.ConnInput{}, false, nil
 	}
@@ -30,7 +30,7 @@ func envConnInput() (core.ConnInput, bool, error) {
 		var ok bool
 		if eng, ok = inferEngine(dsn); !ok {
 			return core.ConnInput{}, true, qerr.New(qerr.Invalid, "cannot tell the engine from QH_DSN; set QH_ENGINE").
-				WithHint("QH_ENGINE is postgres, mysql, mongodb or sqlite; QH_DSN is inferred from postgres://, mysql://, mongodb://, sqlite://, file: or a .db, .sqlite or .sqlite3 path")
+				WithHint("QH_ENGINE is postgres, mysql, mariadb, mongodb or sqlite; without it QH_DSN must start with postgres://, postgresql://, mysql://, mariadb://, mongodb://, mongodb+srv://, sqlite:// or file:, or be a path ending in .db, .sqlite or .sqlite3")
 		}
 	}
 	name := strings.TrimSpace(os.Getenv("QH_NAME"))
@@ -55,7 +55,7 @@ func inferEngine(dsn string) (string, bool) {
 	d := strings.ToLower(strings.TrimSpace(dsn))
 	for _, c := range []struct{ engine, prefix string }{
 		{"postgres", "postgres://"}, {"postgres", "postgresql://"},
-		{"mysql", "mysql://"}, {"mysql", "mariadb://"},
+		{"mysql", "mysql://"}, {"mariadb", "mariadb://"},
 		{"mongodb", "mongodb://"}, {"mongodb", "mongodb+srv://"},
 		{"sqlite", "sqlite:"}, {"sqlite", "file:"},
 	} {
@@ -63,12 +63,35 @@ func inferEngine(dsn string) (string, bool) {
 			return c.engine, true
 		}
 	}
+	// An @ or a scheme means credentials or another kind of string, such as
+	// user:pw@tcp(host)/app.db; it is not a file.
+	if strings.Contains(d, "@") || strings.Contains(d, "://") {
+		return "", false
+	}
 	for _, ext := range []string{".db", ".sqlite", ".sqlite3"} {
 		if strings.HasSuffix(d, ext) {
 			return "sqlite", true
 		}
 	}
 	return "", false
+}
+
+// schemes are those inferEngine and the engines recognise.
+var schemes = map[string]bool{
+	"postgres": true, "postgresql": true, "mysql": true, "mariadb": true,
+	"mongodb": true, "mongodb+srv": true, "sqlite": true, "file": true,
+}
+
+// normalizeScheme lower-cases dsn's scheme when it is one qh knows. Schemes
+// are case-insensitive (RFC 3986), but the drivers match them exactly: pgx
+// reads POSTGRES://host as key/value text and would connect to the local
+// socket as the OS user.
+func normalizeScheme(dsn string) string {
+	i := strings.IndexByte(dsn, ':')
+	if i <= 0 || !schemes[strings.ToLower(dsn[:i])] {
+		return dsn
+	}
+	return strings.ToLower(dsn[:i]) + dsn[i:]
 }
 
 // checkEnvConflicts refuses QH_DSN together with settings that point qh at
@@ -103,7 +126,8 @@ func openEphemeralApp(ctx context.Context, in core.ConnInput, opts core.Options)
 	}
 	dir, err := os.MkdirTemp("", "qh-ephemeral-")
 	if err != nil {
-		return nil, qerr.Wrap(qerr.Invalid, "cannot create a temporary store: "+err.Error(), err)
+		return nil, qerr.Wrap(qerr.Invalid, "cannot create a temporary store: "+err.Error(), err).
+			WithHint("QH_DSN keeps its store in a temporary directory; mount a writable /tmp, e.g. docker run --read-only --tmpfs /tmp …")
 	}
 	st, err := store.OpenSQLite(filepath.Join(dir, "qh.db"))
 	if err != nil {

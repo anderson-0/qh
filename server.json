@@ -31,6 +31,17 @@
           "isSecret": true
         },
         {
+          "name": "QH_ENGINE",
+          "description": "Database engine, needed only when QH_DSN does not start with a known scheme (postgres://, mysql://, mariadb://, mongodb://, sqlite://) or end in .db, .sqlite or .sqlite3",
+          "choices": [
+            "postgres",
+            "mysql",
+            "mariadb",
+            "sqlite",
+            "mongodb"
+          ]
+        },
+        {
           "name": "QH_NAME",
           "description": "Name the agent sees for the connection (default db)"
         },
@@ -41,7 +52,11 @@
         {
           "name": "QH_MODE",
           "description": "ro (default) for read-only, or rw to allow writes",
-          "default": "ro"
+          "default": "ro",
+          "choices": [
+            "ro",
+            "rw"
+          ]
         }
       ]
     }

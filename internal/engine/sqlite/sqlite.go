@@ -49,14 +49,39 @@ func (Engine) BuildDSN(f engine.DSNFields) (string, error) {
 	return f.Database, nil
 }
 
+var (
+	scheme = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*)://`)
+	// driverNet matches the network part of a go-sql-driver string.
+	driverNet = regexp.MustCompile(`@(?:tcp|unix)\(`)
+	// userinfo matches user:password@ at the start of a string, which a file
+	// path does not have (a path with an @ in a directory name is fine).
+	userinfo = regexp.MustCompile(`^[^/\\@:]+:[^/\\@]*@`)
+)
+
+// foreign reports whether p is a connection string for another engine: a URL
+// whose scheme is not sqlite or file, or one with credentials in front of a
+// host.
+func foreign(p string) bool {
+	if m := scheme.FindStringSubmatch(p); m != nil {
+		s := strings.ToLower(m[1])
+		return s != "sqlite" && s != "file"
+	}
+	return driverNet.MatchString(p) || userinfo.MatchString(p)
+}
+
 // Path returns the absolute database path in dsn: a file path, optionally
 // prefixed with sqlite:// or file:. Query strings and fragments are rejected
 // so driver parameters cannot be injected.
 func Path(dsn string) (string, error) {
 	p := strings.TrimSpace(dsn)
+	if foreign(p) {
+		// Fixed text: the string may hold a password, and errors reach agents.
+		return "", qerr.New(qerr.Invalid, "not a SQLite database path; this looks like a connection string for another engine").
+			WithHint("Check the engine: a SQLite connection string is a file path, optionally prefixed with sqlite: or file:")
+	}
 	for _, prefix := range []string{"sqlite:", "file:"} {
-		if strings.HasPrefix(p, prefix) {
-			p = strings.TrimPrefix(p, prefix)
+		if len(p) >= len(prefix) && strings.EqualFold(p[:len(prefix)], prefix) {
+			p = p[len(prefix):]
 			if strings.HasPrefix(p, "//") {
 				p = p[2:]
 			}

@@ -21,7 +21,13 @@ Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+, SQLite and MongoDB 
 
 ## Install
 
-Download a binary for Linux, macOS or Windows (amd64 or arm64) from the
+With Homebrew, on macOS or Linux:
+
+```bash
+brew install anderson-0/tap/qh
+```
+
+Or download a binary for Linux, macOS or Windows (amd64 or arm64) from the
 [releases page](https://github.com/anderson-0/qh/releases), unpack it and put `qh` on your `PATH`.
 Each release lists SHA-256 checksums in `checksums.txt`. The binaries are not signed: on macOS, a binary
 downloaded with a browser needs `xattr -d com.apple.quarantine qh` before its first run.

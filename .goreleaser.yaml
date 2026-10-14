@@ -61,6 +61,39 @@ dockers_v2:
       # The MCP registry checks that this image belongs to the server it lists.
       io.modelcontextprotocol.server.name: io.github.anderson-0/qh
 
+# `brew install anderson-0/tap/qh`, on macOS. The release workflow pushes the
+# cask to anderson-0/homebrew-tap with a deploy key (HOMEBREW_TAP_DEPLOY_KEY);
+# a prerelease is not pushed.
+homebrew_casks:
+  - name: qh
+    ids: [default]
+    repository:
+      owner: anderson-0
+      name: homebrew-tap
+      branch: main
+      git:
+        url: git@github.com:anderson-0/homebrew-tap.git
+        private_key: '{{ index .Env "HOMEBREW_TAP_DEPLOY_KEY" }}' # empty in snapshot builds
+    directory: Casks
+    homepage: https://github.com/anderson-0/qh
+    description: Token-efficient database server for AI agents (MCP)
+    license: MIT
+    skip_upload: auto
+    commit_author:
+      name: Anderson
+      email: anderson.consultant.it@outlook.com
+    commit_msg_template: "qh {{ .Tag }}"
+    # The binaries are not notarized, so macOS would quarantine qh and refuse
+    # to run it. Homebrew warns that `postflight` is deprecated; GoReleaser's
+    # replacement (hooks.post.install_steps, for postflight_steps) is not in a
+    # release yet (2.18.3). Switch when it is.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qh"]
+          end
+
 release:
   github:
     owner: anderson-0

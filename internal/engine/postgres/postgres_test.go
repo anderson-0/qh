@@ -316,3 +316,113 @@ func TestPipelineRecoversAfterErrors(t *testing.T) {
 		t.Fatalf("update: %+v, %v", res, err)
 	}
 }
+
+// TestIntrospectKeysAndComments covers what Introspect resolves itself: key
+// columns by attribute number (shifted by a dropped column, listed out of
+// column order, or on a partition that only a foreign key reaches) and
+// comments joined from pg_description. A foreign key to a partitioned table
+// is listed once, not again for each partition.
+func TestIntrospectKeysAndComments(t *testing.T) {
+	dsn := startPostgres(t, "postgres:17-alpine")
+	ctx := context.Background()
+	pc, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pc.Exec(ctx, `
+CREATE SCHEMA edge;
+CREATE TABLE edge.p2 (gone int, x int, y int, PRIMARY KEY (y, x));
+ALTER TABLE edge.p2 DROP COLUMN gone;
+CREATE TABLE edge.child (id int PRIMARY KEY, py int, px int, twice int GENERATED ALWAYS AS (px * 2) STORED,
+  made timestamptz DEFAULT now(), FOREIGN KEY (py, px) REFERENCES edge.p2 (y, x));
+CREATE TABLE edge.hidden (id int);
+CREATE ROLE reader LOGIN PASSWORD 'reader-pw';
+GRANT USAGE ON SCHEMA edge TO reader;
+GRANT SELECT ON edge.child TO reader;
+COMMENT ON TABLE edge.child IS 'Child rows';
+COMMENT ON COLUMN edge.child.px IS 'x of the parent';
+CREATE TABLE edge.events (id int, region text, PRIMARY KEY (id, region)) PARTITION BY LIST (region);
+CREATE TABLE edge.events_eu PARTITION OF edge.events FOR VALUES IN ('eu');
+CREATE TABLE edge.eu_ref (id int PRIMARY KEY, rg text, ev int, FOREIGN KEY (ev, rg) REFERENCES edge.events_eu (id, region));
+CREATE TABLE edge.any_ref (id int PRIMARY KEY, ev int, rg text, FOREIGN KEY (ev, rg) REFERENCES edge.events (id, region));`)
+	pc.Close(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro, _ := specs(dsn)
+	c, err := Engine{}.Open(ctx, ro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	cat, err := c.Introspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs := map[string]*engine.Object{}
+	for _, ns := range cat.Namespaces {
+		for _, o := range ns.Objects {
+			objs[o.Namespace+"."+o.Name] = o
+		}
+	}
+	join := func(s []string) string { return strings.Join(s, ",") }
+	fk := func(o *engine.Object) string {
+		if o == nil || len(o.ForeignKeys) != 1 {
+			return "no single foreign key"
+		}
+		f := o.ForeignKeys[0]
+		return join(f.Columns) + "->" + f.RefNamespace + "." + f.RefObject + "(" + join(f.RefColumns) + ")"
+	}
+	if o := objs["edge.p2"]; o == nil || join(o.PrimaryKey) != "y,x" || len(o.Fields) != 2 || o.Fields[0].Name != "x" {
+		t.Errorf("p2: %+v", o)
+	}
+	if got := fk(objs["edge.child"]); got != "py,px->edge.p2(y,x)" {
+		t.Errorf("child: %s", got)
+	}
+	if o := objs["edge.child"]; o.Comment != "Child rows" || o.Fields[0].Comment != "" || o.Fields[2].Comment != "x of the parent" ||
+		o.Fields[3].Default != "(px * 2)" || o.Fields[4].Default != "now()" {
+		t.Errorf("child comments and defaults: %q %+v", o.Comment, o.Fields)
+	}
+	if objs["edge.hidden"] == nil {
+		t.Error("the owner does not see edge.hidden")
+	}
+	// A user who owns nothing sees only what it was granted.
+	u, _ := url.Parse(dsn)
+	u.User = url.UserPassword("reader", "reader-pw")
+	ro.DSN = u.String()
+	rc, err := Engine{}.Open(ctx, ro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	rcat, err := rc.Introspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	for _, ns := range rcat.Namespaces {
+		for _, o := range ns.Objects {
+			if o.Namespace == "edge" {
+				seen = append(seen, o.Name)
+			}
+		}
+	}
+	if join(seen) != "child" {
+		t.Errorf("reader sees %v", seen)
+	}
+	if o := objs["edge.events"]; o == nil || join(o.PrimaryKey) != "id,region" {
+		t.Errorf("events: %+v", o)
+	}
+	if objs["edge.events_eu"] != nil {
+		t.Error("a partition is listed")
+	}
+	if got := fk(objs["edge.eu_ref"]); got != "ev,rg->edge.events_eu(id,region)" {
+		t.Errorf("eu_ref: %s", got)
+	}
+	if got := fk(objs["edge.any_ref"]); got != "ev,rg->edge.events(id,region)" {
+		t.Errorf("any_ref: %s", got)
+	}
+	if o := objs["public.users"]; o == nil || o.Comment != "App users" || o.Fields[1].Comment != "Login email" {
+		t.Errorf("users: %+v", o)
+	}
+}

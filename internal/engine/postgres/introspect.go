@@ -29,7 +29,7 @@ const nsFilter = `n.nspname NOT IN ('pg_catalog', 'information_schema')
 //   - defaults are deparsed with no relation (pg_get_expr with 0), which
 //     needs no relation cache entry; a DEFAULT cannot refer to columns. Only
 //     generated columns, whose expressions can, pass the relation.
-const descJoin = `LEFT JOIN pg_description ds ON ds.objoid = c.oid AND ds.classoid = 'pg_class'::regclass AND ds.objsubid = `
+const descJoin = `LEFT JOIN pg_description ds ON ds.objoid = c.oid AND ds.classoid = 'pg_catalog.pg_class'::regclass AND ds.objsubid = `
 
 var (
 	relationsSQL = `SELECT n.nspname::text, c.relname::text, c.relkind::text, c.reltuples::bigint,

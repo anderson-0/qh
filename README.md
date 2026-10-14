@@ -67,13 +67,61 @@ Connection strings are encrypted (AES-256-GCM) in `~/.config/qh/qh.db`; the key 
 (or `$QH_MASTER_KEY`). `$XDG_CONFIG_HOME/qh` is used instead of `~/.config/qh` when `$XDG_CONFIG_HOME` is set;
 set `$QH_HOME` to use another directory.
 
-## Use it from Claude Code
+## Use it from your editor
+
+qh speaks MCP over stdio with `qh mcp`. Connections you add or edit with `qh conn` while it runs are used on
+the agent's next call. Some apps don't inherit your shell's `PATH`; if the server fails to start, use the full
+path that `which qh` prints instead of `qh`.
+
+**Claude Code**
 
 ```bash
 claude mcp add qh -- qh mcp
 ```
 
-Connections you add or edit with `qh conn` while the server runs are used on the agent's next call.
+**Codex CLI**
+
+```bash
+codex mcp add qh -- qh mcp
+```
+
+**Gemini CLI**
+
+```bash
+gemini mcp add -s user qh qh mcp
+```
+
+**VS Code** (GitHub Copilot agent mode)
+
+```bash
+code --add-mcp '{"name":"qh","command":"qh","args":["mcp"]}'
+```
+
+**Claude Desktop, Cursor, Windsurf (Devin Desktop)**: add this to the app's MCP config file:
+
+```json
+{
+  "mcpServers": {
+    "qh": { "command": "qh", "args": ["mcp"] }
+  }
+}
+```
+
+| App | Config file |
+|---|---|
+| Claude Desktop | macOS `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows `%APPDATA%\Claude\claude_desktop_config.json` (Settings → Developer → Edit Config); restart the app afterwards |
+| Cursor | `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project |
+| Windsurf (Devin Desktop) | `~/.config/devin/mcp_config.json`, or `%APPDATA%\devin\mcp_config.json` on Windows |
+
+**Zed**: add it under `context_servers` in `~/.config/zed/settings.json`:
+
+```json
+{
+  "context_servers": {
+    "qh": { "command": "qh", "args": ["mcp"] }
+  }
+}
+```
 
 ### One connection from the environment
 

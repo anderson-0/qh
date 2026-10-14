@@ -63,10 +63,32 @@ var (
 // host.
 func foreign(p string) bool {
 	if m := scheme.FindStringSubmatch(p); m != nil {
-		s := strings.ToLower(m[1])
-		return s != "sqlite" && s != "file"
+		if s := strings.ToLower(m[1]); s != "sqlite" && s != "file" {
+			return true
+		}
 	}
-	return driverNet.MatchString(p) || userinfo.MatchString(p)
+	return driverNet.MatchString(stripPrefix(p)) || userinfo.MatchString(stripPrefix(p))
+}
+
+// stripPrefix removes a leading sqlite: or file: (any case) and a following //.
+func stripPrefix(p string) string {
+	for _, prefix := range []string{"sqlite:", "file:"} {
+		if len(p) >= len(prefix) && strings.EqualFold(p[:len(prefix)], prefix) {
+			return strings.TrimPrefix(p[len(prefix):], "//")
+		}
+	}
+	return p
+}
+
+// notFound is the error for a database file that is missing. The path is not
+// shown when it has an @ or =: it is then probably a connection string for
+// another engine, may hold a password, and the error reaches the agent.
+func notFound(path string, err error) error {
+	if strings.ContainsAny(path, "@=") {
+		return qerr.New(qerr.ConnectionFailed, "database file not found (the path is not shown because it contains @ or =)").
+			WithHint("Check the engine: a SQLite connection string is a file path")
+	}
+	return qerr.Wrap(qerr.ConnectionFailed, "database file not found: "+path, err)
 }
 
 // Path returns the absolute database path in dsn: a file path, optionally
@@ -79,15 +101,7 @@ func Path(dsn string) (string, error) {
 		return "", qerr.New(qerr.Invalid, "not a SQLite database path; this looks like a connection string for another engine").
 			WithHint("Check the engine: a SQLite connection string is a file path, optionally prefixed with sqlite: or file:")
 	}
-	for _, prefix := range []string{"sqlite:", "file:"} {
-		if len(p) >= len(prefix) && strings.EqualFold(p[:len(prefix)], prefix) {
-			p = p[len(prefix):]
-			if strings.HasPrefix(p, "//") {
-				p = p[2:]
-			}
-			break
-		}
-	}
+	p = stripPrefix(p)
 	if p == "" {
 		return "", qerr.New(qerr.Invalid, "sqlite connection string must be a file path")
 	}
@@ -119,12 +133,12 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 		}
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil, qerr.Wrap(qerr.ConnectionFailed, "database file not found: "+path, err)
+		return nil, notFound(path, err)
 	}
 	if spec.FileRoot != "" {
 		real, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return nil, qerr.Wrap(qerr.ConnectionFailed, "database file not found: "+path, err)
+			return nil, notFound(path, err)
 		}
 		root, err := filepath.EvalSymlinks(spec.FileRoot)
 		if err != nil {

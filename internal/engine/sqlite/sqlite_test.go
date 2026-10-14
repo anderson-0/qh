@@ -66,6 +66,28 @@ func TestOpenMissingFileDoesNotCreate(t *testing.T) {
 	}
 }
 
+// A missing file is named in the error, unless its path has an @ or =, which
+// marks a connection string for another engine: it may hold a password, and
+// the error reaches the agent.
+func TestOpenMissingFileDoesNotEchoSecrets(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.db")
+	for _, dsn := range []string{
+		"host=h user=u password=hunter2pw dbname=d", "u:hunter2pw/x@h/x.db", "//u:hunter2pw@h/x.db",
+		"mongodb+srv:/u:hunter2pw@h/db", "/tmp/hunter2pw=x.db",
+	} {
+		for _, root := range []string{"", "/"} {
+			_, err := Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: dsn, Mode: engine.ModeRO, PoolSize: 1, FileRoot: root})
+			if e := qerr.From(err); err == nil || e.Category == "" || strings.Contains(err.Error(), "hunter2pw") {
+				t.Errorf("Open(%q, root %q) = %v", dsn, root, err)
+			}
+		}
+	}
+	_, err := Engine{}.Open(context.Background(), engine.ConnSpec{ID: "x", DSN: missing, Mode: engine.ModeRO, PoolSize: 1})
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Errorf("a plain missing path should be named: %v", err)
+	}
+}
+
 func TestPath(t *testing.T) {
 	cases := map[string]string{
 		"/tmp/a b.db":        "/tmp/a b.db",
@@ -88,6 +110,9 @@ func TestPath(t *testing.T) {
 	for _, other := range []string{
 		"u:hunter2pw@tcp(h)/x.db", "u:hunter2pw@unix(/run/m.sock)/x.db", "postgres://u:hunter2pw@h/x.db",
 		"mysql://u:hunter2pw@h/x", "MONGODB://u:hunter2pw@h/x", "https://h/x.db",
+		// Behind a sqlite: or file: prefix it is still another engine's string.
+		"sqlite://u:hunter2pw@tcp(h)/x.db", "file:u:hunter2pw@tcp(h)/x.db", "SQLITE:u:hunter2pw@unix(/s)/x.db",
+		"sqlite:u:hunter2pw@h/x.db",
 	} {
 		_, err := Path(other)
 		if err == nil || strings.Contains(err.Error(), "hunter2pw") || qerr.From(err).Category != qerr.Invalid {

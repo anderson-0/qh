@@ -218,6 +218,9 @@ func TestEnvBadDSNDoesNotLeakPassword(t *testing.T) {
 		{"reader:hunter2pw@tcp(db.example.com)/x.db", "sqlite"},
 		{"postgres://reader:hunter2pw@db.example.com/shop", "sqlite"},
 		{"reader:hunter2pw@tcp(db.example.com)/shop", "postgres"},
+		// key=value text that happens to end in .db, and a prefix hiding another engine's string.
+		{"host=h user=u password=hunter2pw dbname=app.db", ""},
+		{"sqlite://reader:hunter2pw@tcp(db.example.com)/x.db", ""},
 	} {
 		clearQHEnv(t)
 		t.Setenv("QH_DSN", c.dsn)
@@ -235,6 +238,30 @@ func TestEnvBadDSNDoesNotLeakPassword(t *testing.T) {
 			t.Errorf("%s: home was created", c.dsn)
 		}
 		assertEmptyDir(t, tmp)
+	}
+}
+
+// Strings that reach the sqlite engine by a wrong QH_ENGINE and pass its checks
+// fail when the file is opened; that error must not show the string either.
+func TestEnvSQLiteMisconfigurationDoesNotLeak(t *testing.T) {
+	for _, dsn := range []string{
+		"host=h user=u password=hunter2pw dbname=app.db", "u:hunter2pw/x@h/x.db", "//u:hunter2pw@h/x.db",
+		"mongodb+srv:/u:hunter2pw@h/db",
+	} {
+		clearQHEnv(t)
+		t.Setenv("QH_DSN", dsn)
+		t.Setenv("QH_ENGINE", "sqlite")
+		s, finish := envMCP(t, t.TempDir())
+		res, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "query", Arguments: map[string]any{"query": "SELECT 1"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || strings.Contains(text, "hunter2pw") {
+			t.Errorf("%s: %+v", dsn, res)
+		}
+		if code, errOut := finish(); code != 0 || strings.Contains(errOut, "hunter2pw") {
+			t.Errorf("%s: exit %d: %s", dsn, code, errOut)
+		}
 	}
 }
 
@@ -264,7 +291,9 @@ func TestEnvUpperCaseScheme(t *testing.T) {
 	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "127.0.0.1") || strings.Contains(text, "hunter2pw") {
 		t.Errorf("query: %+v", res)
 	}
-	finish()
+	if code, errOut := finish(); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
 }
 
 func TestNormalizeScheme(t *testing.T) {

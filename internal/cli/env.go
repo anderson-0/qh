@@ -64,8 +64,9 @@ func inferEngine(dsn string) (string, bool) {
 		}
 	}
 	// An @ or a scheme means credentials or another kind of string, such as
-	// user:pw@tcp(host)/app.db; it is not a file.
-	if strings.Contains(d, "@") || strings.Contains(d, "://") {
+	// user:pw@tcp(host)/app.db, or host=h password=p dbname=app.db; it is not a
+	// file.
+	if strings.ContainsAny(d, "@=") || strings.Contains(d, "://") {
 		return "", false
 	}
 	for _, ext := range []string{".db", ".sqlite", ".sqlite3"} {

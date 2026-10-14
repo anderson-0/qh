@@ -32,7 +32,7 @@
         },
         {
           "name": "QH_ENGINE",
-          "description": "Database engine, needed only when QH_DSN does not start with a known scheme (postgres://, mysql://, mariadb://, mongodb://, sqlite://) or end in .db, .sqlite or .sqlite3",
+          "description": "Database engine, needed only when QH_DSN does not start with a known scheme (postgres://, postgresql://, mysql://, mariadb://, mongodb://, mongodb+srv://, sqlite://) or end in .db, .sqlite or .sqlite3",
           "choices": [
             "postgres",
             "mysql",

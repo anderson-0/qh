@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -70,23 +72,60 @@ func mcpCmd(home *string, version string) *cobra.Command {
 	var lf queryLogFlags
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Serve MCP over stdio (local store)",
-		Args:  cobra.NoArgs,
+		Short: "Serve MCP over stdio (local store, or one connection from QH_DSN)",
+		Long: `Serve MCP over stdio. By default it serves the connections in the local store
+(add them with qh conn add).
+
+When QH_DSN is set it serves exactly one connection from the environment instead,
+on a temporary store that is removed on exit; stored connections are not used.
+The engine is inferred from QH_DSN's scheme, or from a .db, .sqlite or .sqlite3
+file name. QH_DSN cannot be combined with --store, QH_STORE_DSN, --server or
+--workspace.
+
+  QH_DSN          the connection string
+  QH_ENGINE       postgres, mysql, mariadb, mongodb or sqlite; needed when the
+                  engine cannot be inferred, and always wins when set
+  QH_NAME         the connection name agents pass as source (default db)
+  QH_DESCRIPTION  what the database holds; shown to agents
+  QH_MODE         ro (default) or rw`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := refuseRemote(cmd); err != nil {
+			fromEnv := strings.TrimSpace(os.Getenv("QH_DSN")) != ""
+			var envIn core.ConnInput
+			if fromEnv {
+				server, _ := cmd.Flags().GetString("server")
+				ws, set := workspaceOf(cmd)
+				if err := checkEnvConflicts(server, ws, set); err != nil {
+					return err
+				}
+				var err error
+				if envIn, _, err = envConnInput(); err != nil {
+					return err
+				}
+			} else if err := refuseRemote(cmd); err != nil {
 				return err
 			}
 			retention, err := lf.retention()
 			if err != nil {
 				return err
 			}
-			dir, err := homeDir(*home)
-			if err != nil {
-				return err
-			}
 			// stdout carries the protocol, so warnings go to stderr.
 			logger := slog.New(slog.NewJSONHandler(cmd.ErrOrStderr(), nil))
-			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off, Logger: logger})
+			opts := core.Options{NoQueryLog: lf.off, Logger: logger}
+			var a *app
+			if fromEnv {
+				// One connection from the environment, on a store that lives
+				// and dies with this process; --home is not touched.
+				if a, err = openEphemeralApp(cmd.Context(), envIn, opts); err == nil {
+					logger.Info("serving one connection from QH_DSN; stored connections are not used")
+				}
+			} else {
+				var dir string
+				if dir, err = homeDir(*home); err != nil {
+					return err
+				}
+				a, err = openAppWith(cmd.Context(), dir, opts)
+			}
 			if err != nil {
 				return err
 			}
@@ -98,8 +137,10 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			a.svc.Start(ctx)
 			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
 			ws, _ := workspaceOf(cmd)
-			if err := requireWorkspace(ctx, a, ws); err != nil {
-				return err
+			if !fromEnv {
+				if err := requireWorkspace(ctx, a, ws); err != nil {
+					return err
+				}
 			}
 			srv := mcpserver.New(a.svc, func(context.Context) string { return ws }, version)
 			// The command's own streams, not os.Stdin/os.Stdout: main passes

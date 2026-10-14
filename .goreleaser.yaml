@@ -58,6 +58,8 @@ dockers_v2:
       org.opencontainers.image.revision: "{{ .FullCommit }}"
       org.opencontainers.image.created: "{{ .Date }}"
       org.opencontainers.image.licenses: MIT
+      # The MCP registry checks that this image belongs to the server it lists.
+      io.modelcontextprotocol.server.name: io.github.anderson-0/qh
 
 release:
   github:

@@ -2,6 +2,16 @@
 
 All notable changes to qh are listed here. Versions follow [semantic versioning](https://semver.org).
 
+## [1.0.2] - 2026-10-14
+
+Easier to install and to run in a container.
+
+### Added
+
+- **One connection from the environment.** When `QH_DSN` is set, `qh mcp` serves that one connection (with optional `QH_ENGINE`, `QH_NAME`, `QH_DESCRIPTION` and `QH_MODE`) from a temporary store that is removed on exit, so `docker run -i --rm -e QH_DSN ghcr.io/anderson-0/qh:1 mcp` works with no setup. This mode is what containers and MCP catalogs need, because they can only pass environment variables.
+- **The official MCP registry.** qh is listed as `io.github.anderson-0/qh`, pointing at the container image. Each release updates the listing.
+- **Editor setup.** The README shows how to add qh to Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Zed, Codex CLI and Gemini CLI.
+
 ## [1.0.1] - 2026-10-13
 
 Hardening for the shared store, SSH tunnels and MongoDB. Nothing changes for local use; in server mode some tenant SSH keys are now refused, and a wrong passphrase is found later (see SSH tunnels).

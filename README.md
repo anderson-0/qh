@@ -67,13 +67,91 @@ Connection strings are encrypted (AES-256-GCM) in `~/.config/qh/qh.db`; the key 
 (or `$QH_MASTER_KEY`). `$XDG_CONFIG_HOME/qh` is used instead of `~/.config/qh` when `$XDG_CONFIG_HOME` is set;
 set `$QH_HOME` to use another directory.
 
-## Use it from Claude Code
+## Use it from your editor
+
+qh speaks MCP over stdio with `qh mcp`. Connections you add or edit with `qh conn` while it runs are used on
+the agent's next call (not when `QH_DSN` is set; see below). Some apps don't inherit your shell's `PATH`; if the server fails to start, use the full
+path that `which qh` prints instead of `qh`.
+
+**Claude Code**
 
 ```bash
 claude mcp add qh -- qh mcp
 ```
 
-Connections you add or edit with `qh conn` while the server runs are used on the agent's next call.
+**Codex CLI**
+
+```bash
+codex mcp add qh -- qh mcp
+```
+
+**Gemini CLI**
+
+```bash
+gemini mcp add -s user qh qh mcp
+```
+
+**VS Code** (GitHub Copilot agent mode)
+
+```bash
+code --add-mcp '{"name":"qh","command":"qh","args":["mcp"]}'
+```
+
+**Claude Desktop, Cursor, Windsurf (Devin Desktop)**: add this to the app's MCP config file:
+
+```json
+{
+  "mcpServers": {
+    "qh": { "command": "qh", "args": ["mcp"] }
+  }
+}
+```
+
+| App | Config file |
+|---|---|
+| Claude Desktop | macOS `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows `%APPDATA%\Claude\claude_desktop_config.json` (Settings → Developer → Edit Config); restart the app afterwards |
+| Cursor | `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project |
+| Windsurf (Devin Desktop) | `~/.config/devin/mcp_config.json`, or `%APPDATA%\devin\mcp_config.json` on Windows; older Windsurf installs use `~/.codeium/windsurf/mcp_config.json` |
+
+**Zed**: add it under `context_servers` in `~/.config/zed/settings.json` (Windows: `%APPDATA%\Zed\settings.json`):
+
+```json
+{
+  "context_servers": {
+    "qh": { "command": "qh", "args": ["mcp"] }
+  }
+}
+```
+
+### One connection from the environment
+
+Docker's MCP catalog and the official MCP registry configure a server through environment variables only.
+When `QH_DSN` is set, `qh mcp` serves exactly that one connection and ignores the connections added with
+`qh conn add`:
+
+```bash
+export QH_DSN='postgres://reader:…@db.example.com/shop'
+docker run -i --rm -e QH_DSN ghcr.io/anderson-0/qh:1 mcp
+```
+
+Passing `-e QH_DSN` without a value copies it from your shell, so the password stays out of `ps` and your shell
+history. Inside a container `localhost` is the container itself; reach a database on the Docker host as
+`host.docker.internal` (see Install).
+
+- **`QH_DSN`:** the connection string. The engine comes from its scheme (`postgres://`, `postgresql://`,
+  `mysql://`, `mariadb://`, `mongodb://`, `mongodb+srv://`, `sqlite://`, `file:`) or from a path ending in
+  `.db`, `.sqlite` or `.sqlite3`. For any other string, such as `user:pw@tcp(host)/db`, set `QH_ENGINE`.
+- **`QH_ENGINE`:** `postgres`, `mysql`, `mariadb`, `mongodb` or `sqlite`. It always wins over the inferred engine.
+- **`QH_NAME`:** the connection name agents pass as `source` (default `db`).
+- **`QH_DESCRIPTION`:** optional text that tells agents what the database holds.
+- **`QH_MODE`:** `ro` (default) or `rw`.
+
+This mode keeps nothing on disk that outlives the process: the store and the query log are a temporary file
+removed on exit, the random master key exists only in memory, and the data directory and `master.key` are never
+created. Connections you add with `qh conn` are not used while `QH_DSN` is set. The string is checked at startup
+but the database is not contacted, so an unreachable database fails per query rather than stopping the server.
+`QH_DSN` cannot be combined with `--store`, `QH_STORE_DSN`, `--server` or a non-default `--workspace`.
+With `docker run --read-only`, mount a writable `/tmp` for the temporary store: `--tmpfs /tmp`.
 
 ## Server mode
 

@@ -21,6 +21,8 @@ type app struct {
 	pools *pool.Manager
 	st    store.Store
 	keys  *secret.Keyring
+	// cleanup, when set, runs after Close (an ephemeral store's temporary files).
+	cleanup func()
 }
 
 // storeFlag is bound to the --store persistent flag by newRoot.
@@ -125,4 +127,7 @@ func (a *app) Close() {
 	a.svc.Close()
 	a.pools.Close()
 	a.st.Close()
+	if a.cleanup != nil {
+		a.cleanup()
+	}
 }

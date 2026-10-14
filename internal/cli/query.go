@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -70,23 +72,43 @@ func mcpCmd(home *string, version string) *cobra.Command {
 	var lf queryLogFlags
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Serve MCP over stdio (local store)",
+		Short: "Serve MCP over stdio (local store, or one connection from QH_DSN)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := refuseRemote(cmd); err != nil {
+			fromEnv := strings.TrimSpace(os.Getenv("QH_DSN")) != ""
+			var envIn core.ConnInput
+			if fromEnv {
+				server, _ := cmd.Flags().GetString("server")
+				ws, set := workspaceOf(cmd)
+				if err := checkEnvConflicts(server, ws, set); err != nil {
+					return err
+				}
+				var err error
+				if envIn, _, err = envConnInput(); err != nil {
+					return err
+				}
+			} else if err := refuseRemote(cmd); err != nil {
 				return err
 			}
 			retention, err := lf.retention()
 			if err != nil {
 				return err
 			}
-			dir, err := homeDir(*home)
-			if err != nil {
-				return err
-			}
 			// stdout carries the protocol, so warnings go to stderr.
 			logger := slog.New(slog.NewJSONHandler(cmd.ErrOrStderr(), nil))
-			a, err := openAppWith(cmd.Context(), dir, core.Options{NoQueryLog: lf.off, Logger: logger})
+			opts := core.Options{NoQueryLog: lf.off, Logger: logger}
+			var a *app
+			if fromEnv {
+				// One connection from the environment, on a store that lives
+				// and dies with this process; --home is not touched.
+				a, err = openEphemeralApp(cmd.Context(), envIn, opts)
+			} else {
+				var dir string
+				if dir, err = homeDir(*home); err != nil {
+					return err
+				}
+				a, err = openAppWith(cmd.Context(), dir, opts)
+			}
 			if err != nil {
 				return err
 			}
@@ -98,8 +120,10 @@ func mcpCmd(home *string, version string) *cobra.Command {
 			a.svc.Start(ctx)
 			pruneQueryLog(ctx, a.svc, retention) // retention applies even when logging is off
 			ws, _ := workspaceOf(cmd)
-			if err := requireWorkspace(ctx, a, ws); err != nil {
-				return err
+			if !fromEnv {
+				if err := requireWorkspace(ctx, a, ws); err != nil {
+					return err
+				}
 			}
 			srv := mcpserver.New(a.svc, func(context.Context) string { return ws }, version)
 			// The command's own streams, not os.Stdin/os.Stdout: main passes

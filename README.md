@@ -75,6 +75,28 @@ claude mcp add qh -- qh mcp
 
 Connections you add or edit with `qh conn` while the server runs are used on the agent's next call.
 
+### One connection from the environment
+
+Docker's MCP catalog and the official MCP registry configure a server through environment variables only.
+When `QH_DSN` is set, `qh mcp` serves exactly that one connection and ignores the connections added with
+`qh conn add`:
+
+```bash
+docker run -i --rm -e QH_DSN='postgres://reader:…@db.example.com/shop' ghcr.io/anderson-0/qh:1 mcp
+```
+
+- **`QH_DSN`:** the connection string. The engine comes from its scheme (`postgres://`, `postgresql://`,
+  `mysql://`, `mongodb://`, `mongodb+srv://`, `sqlite://`, `file:`) or from a path ending in `.db`, `.sqlite`
+  or `.sqlite3`. Set `QH_ENGINE` (`postgres`, `mysql`, `mongodb` or `sqlite`) for any other string; it always wins.
+- **`QH_NAME`:** the connection name agents pass as `source` (default `db`).
+- **`QH_DESCRIPTION`:** optional text that tells agents what the database holds.
+- **`QH_MODE`:** `ro` (default) or `rw`.
+
+This mode keeps nothing on disk: the store and the query log are a temporary file removed on exit, the random
+master key exists only in memory, and the data directory and `master.key` are never created. The string is
+checked at startup but the database is not contacted, so an unreachable database fails per query rather than
+stopping the server. `QH_DSN` cannot be combined with `--store`, `QH_STORE_DSN`, `--server` or a non-default `--workspace`.
+
 ## Server mode
 
 Run qh for a team or as the backend of a product:

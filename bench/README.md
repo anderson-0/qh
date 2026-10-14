@@ -1,6 +1,8 @@
 # qh benchmark
 
-Compares qh with a rival MCP database server: [bytebase/dbhub](https://github.com/bytebase/dbhub) on Pagila (Postgres), Sakila (MySQL), Chinook (SQLite) and Lendco (Postgres), or MongoDB's official [mongodb-mcp-server](https://github.com/mongodb-js/mongodb-mcp-server) on Pagila and Lendco modelled as documents.
+Compares qh with a rival MCP database server:
+- [bytebase/dbhub](https://github.com/bytebase/dbhub) or Google's [MCP Toolbox for Databases](https://github.com/googleapis/mcp-toolbox) on Pagila (Postgres), Sakila (MySQL), Chinook (SQLite) and Lendco (Postgres);
+- MongoDB's official [mongodb-mcp-server](https://github.com/mongodb-js/mongodb-mcp-server) on Pagila and Lendco modelled as documents.
 
 Models know the first three sample databases by heart, so they can answer without looking at the schema. Lendco is Pagila's data rebuilt under unfamiliar table and column names (`harness/lendco.sql`), so its questions measure schema discovery too. Its 30 questions mirror Pagila's, and a test checks that each has the same answer as its Pagila twin.
 
@@ -19,7 +21,7 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
 ## Requirements
 
 - Docker.
-- Node 22.5 or later, with `npx`, for dbhub and mongodb-mcp-server.
+- Node 22.5 or later, with `npx`, for dbhub, mongodb-mcp-server and MCP Toolbox.
 - `ANTHROPIC_API_KEY`, for agent runs and token counting.
 - `ANTHROPIC_WORKSPACE_ID`, only for an API key that is not scoped to a workspace: it is sent as the `anthropic-workspace-id` header.
 
@@ -52,6 +54,45 @@ make bench ARGS="-rival mongodb-mcp"                    # pagila-docs and lendco
   - mongodb-mcp-server's `find` returns 10 documents unless the model passes a limit; its cap is 100.
   - mongodb-mcp-server wraps its results in an `<untrusted-user-data>` notice. That is its real behaviour and the benchmark keeps it, so it costs that server tokens.
 - **Cost:** about 360 conversations (60 questions × 3 runs × 2 servers), roughly half a SQL run.
+
+## MCP Toolbox for Databases
+
+```bash
+make bench ARGS="-rival toolbox -limit 1 -runs 1"   # smoke run first
+make bench ARGS="-rival toolbox"                    # the four SQL datasets, 3 runs
+make bench ARGS="-rival toolbox-data"               # Pagila and Lendco with Toolbox's data toolset
+```
+
+- **Rival:** Google's MCP Toolbox for Databases, pinned to 1.14.0 (`@toolbox-sdk/server` through `npx`), with its version check off.
+- **Configuration:** the prebuilt configuration for each dataset's engine, the setup Toolbox's documentation gives (`--prebuilt=postgres` and so on). Its tools depend on the engine:
+
+  | Engine | `toolbox` | `toolbox-data` |
+  |---|---|---|
+  | Postgres (Pagila, Lendco) | 29 tools | 8 (the `data` toolset) |
+  | MySQL (Sakila) | 9 | 4 |
+  | SQLite (Chinook) | 2 | 2 (no toolsets) |
+
+  `toolbox` is what a user gets by following the documentation. `toolbox-data` is Toolbox's own way to trim its Postgres tools to querying and the catalogue, so the comparison does not rest on Toolbox's monitoring tools alone. It runs on Pagila and Lendco by default.
+- **Fairness:**
+  - Toolbox has no read-only mode: its `execute_sql` can write. The benchmark's databases are throwaway containers and a temporary SQLite copy, so this changes nothing measured.
+  - Toolbox has no place for a dataset description, and sends no server instructions. qh gets the description, as against dbhub.
+  - Toolbox caps no rows; qh caps at 100. Both get the same 100,000-byte tool-output cap.
+  - A prebuilt configuration holds one database per process, so Toolbox's tool-definition tokens are measured with one Postgres connection.
+  - Toolbox connects when it starts, so its cold-schema figure excludes connecting; qh's includes it. Its schema call is `list_tables` with names only.
+- **Results (2026-10-14, `claude-sonnet-5-5` at effort high, 3 runs per question):**
+
+  | | qh | `toolbox` | qh | `toolbox-data` |
+  |---|---|---|---|---|
+  | Datasets | all four | all four | Pagila, Lendco | Pagila, Lendco |
+  | Tokens per task | 3,118 | 19,067 | 3,653 | 15,463 |
+  | qh's saving | 83.6% | | 76.4% | |
+  | Accuracy | 100% | 100% | 100% | 100% |
+  | Tool calls per task | 1.6 | 2.2 | 1.9 | 2.2 |
+  | Tool definitions, one Postgres connection | 392 | 6,663 | 392 | 2,054 |
+
+  - The micro-benchmarks favour Toolbox. Its first schema call on 1,000 tables took 28 ms against qh's 99 ms: it lists names only and is already connected, while qh builds a catalogue with keys and foreign keys and connects first. Query latency p50 was 0.4 ms against 0.6 ms.
+  - Each task was still quicker end to end with qh: 4.0 s against 4.8 s on average.
+  - Lendco, the dataset with unfamiliar names, shows the largest gap. qh used 4,977 tokens per task, `toolbox` 35,604 and `toolbox-data` 22,287.
 
 ## Cost and time
 

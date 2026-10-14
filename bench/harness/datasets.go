@@ -1,4 +1,4 @@
-// Package harness runs the qh benchmark against dbhub or mongodb-mcp-server: datasets, questions,
+// Package harness runs the qh benchmark against dbhub, mongodb-mcp-server or MCP Toolbox: datasets, questions,
 // servers under test, the agent loop and the report.
 package harness
 

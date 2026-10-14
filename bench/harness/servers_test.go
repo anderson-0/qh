@@ -154,3 +154,61 @@ func TestFindToolPrefersAnExactName(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestToolboxEnv(t *testing.T) {
+	for _, tc := range []struct {
+		c    Conn
+		want string
+	}{
+		{Conn{Name: "pagila", Engine: "postgres", DSN: "postgres://postgres:bench-pw@localhost:55001/pagila?sslmode=disable"},
+			"POSTGRES_HOST=localhost POSTGRES_PORT=55001 POSTGRES_DATABASE=pagila POSTGRES_USER=postgres POSTGRES_PASSWORD=bench-pw"},
+		{Conn{Name: "pg", Engine: "postgres", DSN: "postgres://u@db/x"},
+			"POSTGRES_HOST=db POSTGRES_PORT=5432 POSTGRES_DATABASE=x POSTGRES_USER=u POSTGRES_PASSWORD="},
+		{Conn{Name: "sakila", Engine: "mysql", DSN: "mysql://bench:bench-pw@127.0.0.1:55002/sakila"},
+			"MYSQL_HOST=127.0.0.1 MYSQL_PORT=55002 MYSQL_DATABASE=sakila MYSQL_USER=bench MYSQL_PASSWORD=bench-pw"},
+		{Conn{Name: "chinook", Engine: "sqlite", DSN: "/tmp/x/chinook.sqlite"}, "SQLITE_DATABASE=/tmp/x/chinook.sqlite"},
+	} {
+		env, err := toolboxEnv(tc.c)
+		if got := strings.Join(env, " "); err != nil || got != tc.want {
+			t.Errorf("%s: %q %v", tc.c.Name, got, err)
+		}
+	}
+	if _, err := toolboxEnv(Conn{Name: "m", Engine: "mongodb", DSN: "mongodb://x"}); err == nil {
+		t.Error("mongodb accepted")
+	}
+}
+
+func TestToolboxServer(t *testing.T) {
+	ds := chinook(t)
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Skip("npx not installed")
+	}
+	ctx := context.Background()
+	for _, toolset := range []string{"", "data"} {
+		srv, err := StartToolbox(ctx, DefaultToolboxVersion, toolset, []Conn{ConnFor(ds)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer srv.Close()
+		var names []string
+		for _, tl := range srv.Tools() {
+			names = append(names, tl.Name)
+		}
+		sort.Strings(names)
+		want := map[string]string{"": "toolbox", "data": "toolbox-data"}[toolset]
+		if strings.Join(names, ",") != "execute_sql,list_tables" || srv.Name() != want {
+			t.Fatalf("%s: tools %v", srv.Name(), names)
+		}
+		prefix, args := SchemaCall(srv.Name(), ds)
+		if out, isErr := srv.Call(ctx, prefix, args); isErr || !strings.Contains(out, "Track") {
+			t.Fatalf("list_tables: %q %v", out, isErr)
+		}
+		prefix, argsFor := QueryCall(srv.Name(), ds)
+		if out, isErr := srv.Call(ctx, prefix, argsFor("SELECT count(*) AS n FROM Track")); isErr || !strings.Contains(out, "3503") {
+			t.Fatalf("execute_sql: %q %v", out, isErr)
+		}
+	}
+	if _, err := StartToolbox(ctx, DefaultToolboxVersion, "", []Conn{ConnFor(ds), ConnFor(ds)}); err == nil {
+		t.Error("two connections accepted")
+	}
+}

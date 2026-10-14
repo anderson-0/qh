@@ -68,7 +68,8 @@ func StartGenerated(ctx context.Context, n int) (*Dataset, func(), error) {
 
 // SchemaCall is the schema-discovery call measured for a server: qh's
 // schema overview; dbhub's search_objects for tables at summary detail;
-// mongodb-mcp-server's list-collections. mongodb-mcp-server 3.0.5 requires a
+// mongodb-mcp-server's list-collections; Toolbox's list_tables with names
+// only. mongodb-mcp-server 3.0.5 requires a
 // connectionId on every call; "preconfigured" is the connection string given
 // to it in its environment.
 // dbhub caps search_objects at 100 results unless limit is given (1 to 1000),
@@ -81,6 +82,8 @@ func SchemaCall(server string, ds *Dataset) (string, json.RawMessage) {
 		return "schema", json.RawMessage(fmt.Sprintf(`{"source":%q}`, ds.Name))
 	case "mongodb-mcp":
 		return "list-collections", json.RawMessage(fmt.Sprintf(`{"connectionId":"preconfigured","database":%q}`, mongoDB(ds)))
+	case "toolbox", "toolbox-data":
+		return "list_tables", json.RawMessage(`{"output_format":"simple"}`)
 	}
 	return "search_objects", json.RawMessage(`{"object_type":"table","detail_level":"summary","limit":1000}`)
 }

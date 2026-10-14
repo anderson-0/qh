@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -268,4 +269,66 @@ func StartMongoMCP(ctx context.Context, version string, conns []Conn) (Server, e
 	cmd := exec.Command("npx", "-y", "mongodb-mcp-server@"+version, "--readOnly", "--telemetry", "disabled")
 	cmd.Env = append(nodeEnv(os.Environ()), "MDB_MCP_CONNECTION_STRING="+conns[0].DSN)
 	return connect(ctx, "mongodb-mcp", cmd, func() {})
+}
+
+// DefaultToolboxVersion is the MCP Toolbox for Databases npm version
+// (@toolbox-sdk/server) benchmarked.
+const DefaultToolboxVersion = "1.14.0"
+
+// toolboxEnv is the environment Toolbox's prebuilt configuration for c's
+// engine reads its connection from.
+func toolboxEnv(c Conn) ([]string, error) {
+	if c.Engine == "sqlite" {
+		return []string{"SQLITE_DATABASE=" + c.DSN}, nil
+	}
+	prefix, port := map[string]string{"postgres": "POSTGRES", "mysql": "MYSQL"}[c.Engine], map[string]string{"postgres": "5432", "mysql": "3306"}[c.Engine]
+	if prefix == "" {
+		return nil, fmt.Errorf("toolbox: no prebuilt configuration for engine %q", c.Engine)
+	}
+	u, err := url.Parse(c.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("toolbox: %s connection string: %w", c.Name, err)
+	}
+	if u.Port() != "" {
+		port = u.Port()
+	}
+	pw, _ := u.User.Password()
+	return []string{
+		prefix + "_HOST=" + u.Hostname(),
+		prefix + "_PORT=" + port,
+		prefix + "_DATABASE=" + strings.TrimPrefix(u.Path, "/"),
+		prefix + "_USER=" + u.User.Username(),
+		prefix + "_PASSWORD=" + pw,
+	}, nil
+}
+
+// StartToolbox serves Google's MCP Toolbox for Databases over stdio through
+// npx with the prebuilt configuration for the connection's engine, the setup
+// its documentation gives. toolset narrows it to one of the configuration's
+// toolsets ("data" keeps the query and catalogue tools); "" serves them all.
+// A prebuilt configuration holds one database, so it takes one connection.
+// Toolbox has no read-only mode: the benchmark's databases are throwaway
+// containers and a temporary SQLite copy.
+func StartToolbox(ctx context.Context, version, toolset string, conns []Conn) (Server, error) {
+	if len(conns) != 1 {
+		return nil, errors.New("start toolbox: its prebuilt configuration takes exactly one connection")
+	}
+	if _, err := exec.LookPath("npx"); err != nil {
+		return nil, errors.New("start toolbox: npx is not installed")
+	}
+	env, err := toolboxEnv(conns[0])
+	if err != nil {
+		return nil, err
+	}
+	prebuilt, name := conns[0].Engine, "toolbox"
+	if toolset != "" && conns[0].Engine != "sqlite" { // sqlite's configuration has no toolsets
+		prebuilt += "/" + toolset
+	}
+	if toolset != "" {
+		name += "-" + toolset
+	}
+	cmd := exec.Command("npx", "-y", "@toolbox-sdk/server@"+version,
+		"--prebuilt="+prebuilt, "--stdio", "--disable-version-check", "--log-level=ERROR")
+	cmd.Env = append(nodeEnv(os.Environ()), env...)
+	return connect(ctx, name, cmd, func() {})
 }

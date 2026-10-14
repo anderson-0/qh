@@ -1,4 +1,5 @@
-// Command bench runs the qh benchmark against dbhub or mongodb-mcp-server (spec §9.2).
+// Command bench runs the qh benchmark against dbhub, mongodb-mcp-server or MCP
+// Toolbox for Databases (spec §9.2).
 package main
 
 import (
@@ -20,9 +21,9 @@ func main() {
 	var datasets, servers, out, rival, rivalVersion string
 	flag.StringVar(&cfg.Model, "model", harness.DefaultModel, "Claude model id")
 	flag.StringVar(&cfg.Effort, "effort", harness.DefaultEffort, "output_config effort sent with every request (low, medium, high, xhigh, max)")
-	flag.StringVar(&rival, "rival", "dbhub", "server qh is compared with: dbhub (SQL datasets) or mongodb-mcp (MongoDB datasets)")
+	flag.StringVar(&rival, "rival", "dbhub", "server qh is compared with: dbhub, toolbox or toolbox-data (SQL datasets), or mongodb-mcp (MongoDB datasets)")
 	flag.StringVar(&rivalVersion, "rival-version", "", "the rival's npm version (default: the pinned one)")
-	flag.StringVar(&datasets, "datasets", "", "datasets to run (default: pagila,sakila,chinook,lendco for dbhub; pagila-docs,lendco-docs for mongodb-mcp)")
+	flag.StringVar(&datasets, "datasets", "", "datasets to run (default: pagila,sakila,chinook,lendco for dbhub and toolbox; pagila,lendco for toolbox-data; pagila-docs,lendco-docs for mongodb-mcp)")
 	flag.StringVar(&servers, "servers", "", "servers to compare (default: qh and the rival)")
 	flag.IntVar(&cfg.Runs, "runs", 3, "runs per question")
 	flag.IntVar(&cfg.Limit, "limit", 0, "questions per dataset (0 = all)")
@@ -41,8 +42,17 @@ func main() {
 		cfg.RivalVersion = harness.DefaultDBHubVersion
 	case "mongodb-mcp":
 		cfg.RivalVersion, allowed = harness.DefaultMongoMCPVersion, docSets
+	case "toolbox":
+		cfg.RivalVersion = harness.DefaultToolboxVersion
+	case "toolbox-data":
+		// The data toolset only narrows Postgres' 29 tools in practice
+		// (MySQL keeps 4 of 9; SQLite has no toolsets).
+		cfg.RivalVersion = harness.DefaultToolboxVersion
+		if datasets == "" {
+			datasets = "pagila,lendco"
+		}
 	default:
-		usage(fmt.Errorf("-rival: unknown value %q (use dbhub or mongodb-mcp)", rival))
+		usage(fmt.Errorf("-rival: unknown value %q (use dbhub, toolbox, toolbox-data or mongodb-mcp)", rival))
 	}
 	cfg.Rival = rival
 	if rivalVersion != "" {

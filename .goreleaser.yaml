@@ -84,7 +84,9 @@ homebrew_casks:
       email: anderson.consultant.it@outlook.com
     commit_msg_template: "qh {{ .Tag }}"
     # The binaries are not notarized, so macOS would quarantine qh and refuse
-    # to run it.
+    # to run it. Homebrew warns that `postflight` is deprecated; GoReleaser's
+    # replacement (hooks.post.install_steps, for postflight_steps) is not in a
+    # release yet (2.18.3). Switch when it is.
     hooks:
       post:
         install: |

@@ -14,7 +14,7 @@ import (
 // Config selects what a benchmark run does.
 type Config struct {
 	Model, Effort                    string
-	Rival, RivalVersion              string // "dbhub" (default) or "mongodb-mcp"
+	Rival, RivalVersion              string // "dbhub" (default), "mongodb-mcp", "toolbox" or "toolbox-data"
 	Datasets, Servers                []string
 	Runs, Limit, Parallel, MaxTurns  int
 	TokenBudget                      int64 // input+output tokens one run may spend; 0 = no ceiling
@@ -137,6 +137,10 @@ func DefaultDeps(cfg Config, qhBin string) Deps {
 				return StartDBHub(ctx, cfg.RivalVersion, conns)
 			case "mongodb-mcp":
 				return StartMongoMCP(ctx, cfg.RivalVersion, conns)
+			case "toolbox":
+				return StartToolbox(ctx, cfg.RivalVersion, "", conns)
+			case "toolbox-data":
+				return StartToolbox(ctx, cfg.RivalVersion, "data", conns)
 			}
 			return nil, fmt.Errorf("unknown server %q", server)
 		},
@@ -284,13 +288,20 @@ func runDataset(ctx context.Context, cfg Config, deps Deps, name string, record 
 }
 
 // toolTokens measures tool-definition tokens with Chinook (Pagila as
-// documents for mongodb-mcp) registered 1..5 times. mongodb-mcp-server serves
-// one connection per process, so it is measured with one.
+// documents for mongodb-mcp, Pagila for toolbox) registered 1..5 times.
+// mongodb-mcp-server and Toolbox's prebuilt configurations serve one
+// connection per process, so they are measured with one. Toolbox is measured
+// on Postgres because its tool set depends on the engine, and Postgres is the
+// engine of two of the four datasets.
 func toolTokens(ctx context.Context, cfg Config, deps Deps, rep *Report) error {
 	dsName, maxConns := "chinook", 5
-	if cfg.rival() == "mongodb-mcp" {
+	switch cfg.rival() {
+	case "mongodb-mcp":
 		dsName, maxConns = "pagila-docs", 1
 		rep.Notes = append(rep.Notes, "mongodb-mcp-server serves one connection per process; its tool tokens are measured with one")
+	case "toolbox", "toolbox-data":
+		dsName, maxConns = "pagila", 1
+		rep.Notes = append(rep.Notes, "Toolbox's prebuilt configuration serves one database per process and its tools depend on the engine; tool tokens are measured with one Postgres connection (Pagila). Its MySQL and SQLite tool sets are smaller.")
 	}
 	ds, stop, err := deps.StartDataset(ctx, dsName)
 	if err != nil {
@@ -361,6 +372,9 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 		stop()
 		if len(rep.ColdSchema) > 0 {
 			note := "Cold schema: qh's overview lists the first 200 of 1,000 tables with a pattern hint (it builds the full catalogue); dbhub's search_objects (summary, limit 1000) lists all 1,000."
+			if strings.HasPrefix(cfg.rival(), "toolbox") {
+				note = "Cold schema: qh's overview lists the first 200 of 1,000 tables with a pattern hint (it builds the full catalogue); Toolbox's list_tables (output_format simple) lists all 1,000 names. Toolbox connects when it starts, so its figure excludes connecting; qh's includes it."
+			}
 			if docs {
 				note = "Cold schema: qh samples 100 documents from each of 1,000 collections and infers fields and references; mongodb-mcp-server's list-collections returns names only. mongodb-mcp-server connects when it starts, so its figure excludes connecting; qh's includes it."
 			}

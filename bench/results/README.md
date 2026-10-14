@@ -12,8 +12,19 @@ The three runs below measure `main` at e242674 (Plans 1–6 and #9). Each is a f
 
 All three pass every spec §1 criterion, and the token result varies by only 0.1 points between runs.
 
-Only the first run includes the tool-definition and micro-benchmark sections:
+Only the first run includes the tool-definition and micro-benchmark sections.
 
 - Tool definitions: 393 tokens against dbhub's 579.
 - Cold schema build, 1,000 tables: 0.08 s against 2.08 s.
 - Query latency p50: 0.5 ms against 0.7 ms.
+
+## Against MCP Toolbox for Databases
+
+Both runs measure `main` after v1.0.2, with `claude-sonnet-5-5` at effort high against Toolbox 1.14.0, 3 runs per question.
+
+| Run | Rival | Datasets | Tokens per task | Accuracy (qh vs rival) | Tool calls (qh vs rival) |
+|---|---|---|---|---|---|
+| [2026-10-14T150816](2026-10-14T150816/report.md) | `toolbox` (prebuilt, all tools) | all four | 83.6% fewer | 100% vs 100% | 1.6 vs 2.2 |
+| [2026-10-14T152230](2026-10-14T152230/report.md) | `toolbox-data` (Postgres `data` toolset) | Pagila, Lendco | 76.4% fewer | 100% vs 100% | 1.9 vs 2.2 |
+
+The first run includes the micro-benchmarks. Toolbox's first schema call on 1,000 tables took 28 ms and qh's 99 ms. Toolbox lists table names only and connects when it starts, so its figure leaves out connecting; qh builds the full catalogue and connects first.

@@ -9,7 +9,15 @@ whatever the number of connections, and names the connections in its MCP instruc
 | `query` | Runs one statement and returns TSV, 100 rows by default, with a footer that says when rows were cut |
 
 Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+, SQLite and MongoDB (7 and 8).
-`qh serve` adds an HTTP server mode with a REST API, and `bench/` compares qh with dbhub and with mongodb-mcp-server (see `bench/README.md`).
+`qh serve` adds an HTTP server mode with a REST API.
+
+`bench/` compares qh with other database MCP servers on the same questions, model and prompts (see `bench/README.md`). Accuracy was equal in every comparison:
+
+| Rival | Datasets | Fewer tokens per task with qh |
+|---|---|---|
+| Google's MCP Toolbox for Databases 1.14.0 | Postgres, MySQL, SQLite | 83.6% |
+| dbhub 1.5.0 | Postgres, MySQL, SQLite | 40% |
+| mongodb-mcp-server 3.0.5 | MongoDB | 95.2% |
 
 ## Install
 

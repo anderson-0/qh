@@ -2,6 +2,12 @@
 
 All notable changes to qh are listed here. Versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- **Homebrew.** `brew install anderson-0/tap/qh` installs qh on macOS and Linux. Each release updates the cask in [anderson-0/homebrew-tap](https://github.com/anderson-0/homebrew-tap).
+
 ## [1.0.2] - 2026-10-14
 
 Easier to install and to run in a container.

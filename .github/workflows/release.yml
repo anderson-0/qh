@@ -53,6 +53,8 @@ jobs:
           args: release --clean --release-notes ${{ runner.temp }}/notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Write access to anderson-0/homebrew-tap only (a deploy key), for the cask.
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
 
   # Lists the release in the MCP registry (registry.modelcontextprotocol.io).
   # Runs after the image is pushed: the registry checks the image's label.

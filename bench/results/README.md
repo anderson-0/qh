@@ -40,3 +40,7 @@ The [2026-10-15 checks](sqlite-mongodb-cold-schema-2026-10-15.md) record two fre
 ## MongoDB inference allocations
 
 The [2026-10-15 profiling report](mongodb-inference-2026-10-15.md) separates MongoDB catalog commands from local inference and includes a workload with 999 verified references. Counting path presence directly cuts inference allocation bytes by 25–26% in the generated samples. Controlled introspection medians improve by 5.8–7.5%; the two normal MCP runs overlap the earlier baseline, so they do not establish an overall latency win. Output comparisons and an independent review found no differences. No model calls were made.
+
+## MySQL catalog follow-up
+
+The [fresh-connection profile](mysql-catalog-profile-2026-10-15.md) times every catalog query on MySQL 8.4 and MariaDB 11.4. Columns remain the critical path; isolated sort savings do not establish an overall gain. Two unchanged-code MCP runs measured qh at 22.4 ms and Toolbox at 21.3/24.2 ms, with connection/output differences stated. The initial MySQL catalog call was much slower than the subsequent fresh-process calls. Production code is unchanged, and no model calls were made.

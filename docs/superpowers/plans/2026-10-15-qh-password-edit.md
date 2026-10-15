@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.27, Cobra, existing pgx v5.11.0, go-sql-driver/mysql v1.10.1, MongoDB driver v2.9.2, existing store/keyring and testcontainers. No new dependency.
 
-**Spec:** [Password-edit design](../specs/2026-10-15-qh-password-edit-design.md), explicitly approved by the user at `101465c`. This plan awaits its own approval and execution-method choice; no implementation is authorized yet.
+**Spec:** [Password-edit design](../specs/2026-10-15-qh-password-edit-design.md), explicitly approved by the user at `101465c`. The user also approved this plan and chose subagent execution. Tasks 1–5 passed their independent reviews. Task 6 is implemented and full root tests, vet, focused race checks and the unchanged MCP surface check pass. Its independent review and whole-branch review precede the feature PR.
 
 ## Global Constraints
 
@@ -47,7 +47,7 @@
 
 `internal/cli/root.go`, `internal/core/service.go`, engine parser files and existing test helpers are read-only reference unless a focused test demonstrates a necessary change within the approved design. No restructuring of existing large files.
 
-Tasks 1–3 own different engine directories. Task 1 alone owns `engine.go`; once its optional interface declaration is fixed, up to three engine workers can proceed in parallel if the user chooses subagent execution. Do not create a setup-only task. Task 4 waits for all three engine deliverables; Task 5 waits for Task 4; Task 6 waits for Tasks 4–5. Each task has its own test cycle and review; the final whole-branch review follows Task 6. An execution choice is still required.
+Tasks 1–3 own different engine directories. Task 1 alone owns `engine.go`; once its optional interface declaration is fixed, up to three engine workers can proceed in parallel if the user chooses subagent execution. Do not create a setup-only task. Task 4 waits for all three engine deliverables; Task 5 waits for Task 4; Task 6 waits for Tasks 4–5. Each task has its own test cycle and review; the final whole-branch review follows Task 6. The user chose subagent execution.
 
 ## Task 1: Optional capability and PostgreSQL rewriting
 
@@ -207,4 +207,4 @@ For every pair among DSN stdin/database/SSH password/SSH passphrase, assert erro
 
 The spec's engine transformation contract maps to Tasks 1–3; presence/reference/validation/encryption/version/pool requirements to Task 4; additive REST/client/OpenAPI compatibility to Task 5; stdin/local-versus-remote/docs and unchanged MCP/schema acceptance to Task 6. Real authentication and rollback tests belong to Task 4 rather than a separate test-only ticket.
 
-Plan self-review must check every global constraint and review-focus line against its named tests, the exact interface signatures above, and actual fixture helper availability. No implementation-plan approval or execution-method selection is inferred from approval of the written spec. Present this plan for user review and offer native or subagent execution; recommend subagent execution because three engine grammars and core lifecycle behavior benefit from separate task reviews. Wait for the user's approval and method choice before coding.
+The user explicitly approved this plan and chose subagent execution after approving the written spec. Plan self-review checked the global constraints, review-focus lines, exact interfaces and fixture helpers. Tasks 1–5 passed their independent reviews; Task 6 and whole-branch review remain before the feature PR. Merge, tagging, release and paid benchmark calls require separate approvals.

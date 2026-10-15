@@ -55,12 +55,12 @@ func (f *connFlags) register(cmd *cobra.Command, create bool) {
 		fl.IntVar(&f.port, "port", 0, "database port (default: the engine's)")
 		fl.StringVar(&f.database, "database", "", "database name, or the file path for sqlite")
 		fl.StringVar(&f.user, "user", "", "database user")
-		fl.BoolVar(&f.passwordStdin, "password-stdin", false, "read the password from the first line of stdin")
 		fl.StringToStringVar(&f.params, "param", nil, "extra connection setting key=value (repeatable)")
 	} else {
 		fl.BoolVar(&f.noTLS, "no-tls", false, "remove the TLS settings")
 		fl.BoolVar(&f.noSSH, "no-ssh", false, "remove the SSH tunnel")
 	}
+	fl.BoolVar(&f.passwordStdin, "password-stdin", false, "read the password from the first line of stdin")
 	fl.StringVar(&f.dsn, "dsn", "", "connection string, or - to read it from stdin")
 	fl.StringVar(&f.mode, "mode", "ro", "ro (read-only) or rw (read-write)")
 	fl.StringVar(&f.description, "description", "", "what this database holds; shown to agents")
@@ -383,6 +383,13 @@ func connEditCmd(with withBackend) *cobra.Command {
 					return err
 				}
 				p.DSN = &dsn
+			}
+			if f.passwordStdin {
+				password, err := readLine(cmd)
+				if err != nil {
+					return err
+				}
+				p.Password = &password
 			}
 			if fl.Changed("mode") {
 				m := engine.Mode(f.mode)

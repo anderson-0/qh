@@ -276,6 +276,29 @@ qh conn add shop --engine postgres --dsn - --tls-mode verify-full --tls-ca ca.pe
   server files are refused.
 - `qh conn edit NAME --no-tls` removes the settings.
 
+### Update a stored password
+
+To replace only the database password stored by qh, keep the other connection settings and read the new value from stdin:
+
+```bash
+printf '%s\n' "$PASSWORD" | qh conn edit shop --password-stdin
+```
+
+This updates qh's stored credential; it does not change the database account's password. It works with PostgreSQL, MySQL, MariaDB and MongoDB. SQLite has no database password and rejects this edit. qh tests the updated connection before saving unless you pass `--skip-test`. A failed test leaves the stored connection unchanged.
+
+An empty first line or immediate EOF clears the inline password. The CLI trims whitespace from the first line, accepts a line without a final newline and ignores later lines. Only one of `--dsn -`, `--password-stdin`, `--ssh-password-stdin` and `--ssh-passphrase-stdin` can read stdin in one command. Boolean flags set to `false` do not read stdin.
+
+Remote mode uses the same edit through the server. With an admin key, name the workspace explicitly:
+
+```bash
+printf '%s\n' "$PASSWORD" | qh --server https://qh.example.com --key "$QH_KEY" \
+  --workspace team conn edit shop --password-stdin
+```
+
+A connection that uses `--dsn-ref` or `--password-ref` must remove those database references in the same edit. For a password reference, pass `--password-ref ''` with `--password-stdin`. For a DSN reference, pass a literal `--dsn` without a password; that replaces the reference, and `--password-stdin` sets the password on the new DSN. If both references exist, also pass `--password-ref ''`. A literal `--dsn` and `--dsn-ref` cannot be passed together, even when the reference is empty. SSH references are unchanged.
+
+Over REST, `PATCH /api/v1/connections/{name}` accepts `password`. An absent or `null` value leaves it unchanged; an empty string clears it. REST preserves the supplied whitespace. Passwords stay hidden in show/list output and responses. A newer CLI using this feature against an older server gets the server's unknown-field error; upgrade the server before using password edits.
+
 ## SSH tunnels and secret references
 
 Reach a database through a bastion host:

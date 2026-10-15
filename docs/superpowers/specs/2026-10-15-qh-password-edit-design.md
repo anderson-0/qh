@@ -1,6 +1,6 @@
 # Edit a stored database password
 
-Status: proposed written spec for user review. The user approved this direction and writing the spec. The written spec and implementation plan still require their own approvals before implementation. Base: `main` at `61831b0`.
+Status: the user approved this written spec and the implementation plan and chose subagent execution. All six tasks are implemented on `codex/password-edit-spec`; full root tests, vet, focused race checks and the unchanged MCP surface check pass. Task 6 and whole-branch independent reviews precede the feature PR. Merge, tagging and release still require separate approval. Base: `main` at `61831b0`.
 
 ## Goal and scope
 
@@ -126,4 +126,4 @@ Implementation will update CLI/API documentation and `CHANGELOG.md` under `[Unre
 
 The REST request addition is additive for existing clients. Existing stored connections and stores need no migration; older clients can continue their existing operations. A new client requesting this feature from an older server receives that server's existing unknown-field rejection. Do not claim feature support across that version mismatch.
 
-This document is the architectural design, not an implementation plan. Next, review the written spec with the user. Only their approval of this artifact permits writing the implementation plan; implementation then waits for plan approval and the user's execution-method choice. Keep one branch and one PR for this work. Merge, tagging, release and paid benchmark calls require their separate approvals.
+The user approved this architectural design and the implementation plan and chose subagent execution. The six implementation tasks use one feature branch; Task 6 and whole-branch independent review remain before opening the feature PR. Keep one branch and one PR for this work. Merge, tagging, release and paid benchmark calls require their separate approvals.

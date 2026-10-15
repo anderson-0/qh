@@ -3,12 +3,14 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/testcontainers/testcontainers-go"
 	tcmariadb "github.com/testcontainers/testcontainers-go/modules/mariadb"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
@@ -140,6 +142,113 @@ func TestConformance(t *testing.T) {
 				},
 				GoldenPrefix: im.golden,
 			})
+		})
+	}
+}
+
+func TestCancellationAndRecovery(t *testing.T) {
+	for _, image := range []string{"mysql:8.0", "mysql:8.4", "mariadb:10.11", "mariadb:11.4"} {
+		t.Run(image, func(t *testing.T) {
+			dsn := startDB(t, image)
+			ctx, stop := context.WithTimeout(context.Background(), 40*time.Second)
+			defer stop()
+			observer, err := sql.Open("mysql", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer observer.Close()
+			ro, rw := specs(dsn)
+			for _, spec := range []engine.ConnSpec{ro, rw} {
+				t.Run(string(spec.Mode), func(t *testing.T) {
+					spec.PoolSize = 1
+					c := openConn(t, spec)
+					for _, kind := range []string{"context cancel", "external cancel", "server timeout", "context deadline"} {
+						t.Run(kind, func(t *testing.T) {
+							qctx, cancel := context.WithCancel(ctx)
+							defer cancel()
+							opts := engine.QueryOpts{MaxRows: 1, Timeout: 5 * time.Second}
+							want := qerr.QueryError
+							switch kind {
+							case "server timeout":
+								opts.Timeout = 100 * time.Millisecond
+								want = qerr.Timeout
+							case "context deadline":
+								var deadlineCancel context.CancelFunc
+								qctx, deadlineCancel = context.WithTimeout(qctx, 100*time.Millisecond)
+								defer deadlineCancel()
+								want = qerr.Timeout
+							}
+							// Distinguish this query from any canceled work the server
+							// has not yet stopped after the driver closed its socket.
+							q := slowQuery + " /* qh_" + string(spec.Mode) + "_" + strings.ReplaceAll(kind, " ", "_") + " */"
+							done := make(chan error, 1)
+							go func() {
+								_, err := c.Query(qctx, q, opts)
+								done <- err
+							}()
+							if want == qerr.QueryError {
+								var id uint64
+								for {
+									err := observer.QueryRowContext(ctx, `SELECT ID FROM information_schema.PROCESSLIST
+WHERE ID <> CONNECTION_ID() AND DB = DATABASE() AND COMMAND = 'Query' AND INFO = ?`, q).Scan(&id)
+									if err == nil {
+										break
+									}
+									if !errors.Is(err, sql.ErrNoRows) {
+										t.Fatal(err)
+									}
+									select {
+									case err := <-done:
+										t.Fatalf("query ended before cancellation: %v", err)
+									case <-ctx.Done():
+										t.Fatal(ctx.Err())
+									case <-time.After(10 * time.Millisecond):
+									}
+								}
+								if kind == "context cancel" {
+									cancel()
+								} else if _, err := observer.ExecContext(ctx, fmt.Sprintf("KILL QUERY %d", id)); err != nil {
+									t.Fatal(err)
+								}
+							}
+							var queryErr error
+							select {
+							case queryErr = <-done:
+							case <-ctx.Done():
+								t.Fatal(ctx.Err())
+							}
+							var qe *qerr.Error
+							if !errors.As(queryErr, &qe) || qe.Category != want {
+								t.Errorf("query error = %v; want %s", queryErr, want)
+							} else if want == qerr.QueryError && qe.Hint != "" {
+								t.Errorf("cancellation contains timeout advice: %v", queryErr)
+							} else if kind == "context cancel" && qe.Message != "query canceled" {
+								t.Errorf("cancellation message = %q", qe.Message)
+							}
+							if kind == "external cancel" || kind == "server timeout" {
+								code := uint16(1317)
+								if kind == "server timeout" {
+									code = 3024
+									if strings.HasPrefix(image, "mariadb") {
+										code = 1969
+									}
+								}
+								var me *gomysql.MySQLError
+								if !errors.As(queryErr, &me) || me.Number != code {
+									t.Errorf("underlying server error = %v; want code %d", queryErr, code)
+								}
+							}
+							res, err := c.Query(ctx, "SELECT 1", engine.QueryOpts{MaxRows: 1, Timeout: 5 * time.Second})
+							if err != nil {
+								t.Fatalf("query after cancellation: %v", err)
+							}
+							if len(res.Rows) != 1 || res.Rows[0][0].Text != "1" {
+								t.Fatalf("query after cancellation = %+v", res)
+							}
+						})
+					}
+				})
+			}
 		})
 	}
 }

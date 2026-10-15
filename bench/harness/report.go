@@ -11,6 +11,7 @@ import (
 type Report struct {
 	Date, Model, Effort    string
 	Rival, RivalVersion    string // the server qh is compared with; empty Rival means dbhub
+	MicroEngine            string
 	Runs                   int
 	Results                []Result
 	ToolTokens             map[string][]int64 // server → tool-definition tokens for 1..5 connections
@@ -187,6 +188,12 @@ func Criteria(r *Report) []Criterion {
 	}
 	cs = append(cs, c)
 	c = Criterion{Name: "cold schema", Label: "Cold schema build, 1,000 tables", Target: "< 1 s", Result: "not measured"}
+	if r.MicroEngine == "mysql" {
+		c.Label = "Cold schema build, 1,000 MySQL tables"
+	}
+	if r.MicroEngine == "postgres" {
+		c.Label = "Cold schema build, 1,000 Postgres tables"
+	}
 	limit := time.Second
 	if rival == "mongodb-mcp" {
 		c.Label, c.Target, limit = "Cold schema build, 1,000 collections", "< 5 s", 5*time.Second
@@ -238,12 +245,19 @@ func (r *Report) Markdown() string {
 	if len(r.ColdSchema)+len(r.LatencyP50) > 0 {
 		fmt.Fprintf(&b, "\n## Micro-benchmarks\n\n| | qh | %s |\n|---|---|---|\n", rival)
 		unit := "tables"
+		latencySuffix := ""
+		if r.MicroEngine == "mysql" {
+			unit, latencySuffix = "MySQL tables", " (MySQL)"
+		}
+		if r.MicroEngine == "postgres" {
+			unit, latencySuffix = "Postgres tables", " (Postgres)"
+		}
 		if rival == "mongodb-mcp" {
 			unit = "collections"
 		}
 		fmt.Fprintf(&b, "| Cold schema, 1,000 %s (median of 3) | %s | %s |\n", unit, dur(r.ColdSchema, "qh"), dur(r.ColdSchema, rival))
-		fmt.Fprintf(&b, "| Query latency p50 | %s | %s |\n", dur(r.LatencyP50, "qh"), dur(r.LatencyP50, rival))
-		fmt.Fprintf(&b, "| Query latency p95 | %s | %s |\n", dur(r.LatencyP95, "qh"), dur(r.LatencyP95, rival))
+		fmt.Fprintf(&b, "| Query latency p50%s | %s | %s |\n", latencySuffix, dur(r.LatencyP50, "qh"), dur(r.LatencyP50, rival))
+		fmt.Fprintf(&b, "| Query latency p95%s | %s | %s |\n", latencySuffix, dur(r.LatencyP95, "qh"), dur(r.LatencyP95, rival))
 	}
 	fmt.Fprintf(&b, "\n## Per question\n\n| Question | Kind | qh correct | %[1]s correct | qh avg tokens | %[1]s avg tokens |\n|---|---|---|---|---|---|\n", rival)
 	type agg struct {

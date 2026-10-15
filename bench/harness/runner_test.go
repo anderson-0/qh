@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // answerModel submits the right answer for chinook-01 on the first turn.
@@ -43,6 +45,69 @@ func fakeDeps(failDBHub bool) Deps {
 type namedServer struct {
 	fakeServer
 	name string
+}
+
+func TestMicroUsesSelectedEngine(t *testing.T) {
+	for _, selection := range []string{"postgres", "mysql", "mongodb", "default-sql", "default-mongo"} {
+		engine := selection
+		if selection == "default-sql" {
+			engine = "postgres"
+		}
+		if selection == "default-mongo" {
+			engine = "mongodb"
+		}
+		t.Run(selection, func(t *testing.T) {
+			cfg := Config{MicroEngine: engine, Servers: []string{"qh"}, SkipAgent: true, SkipTokens: true}
+			if strings.HasPrefix(selection, "default-") {
+				cfg.MicroEngine = ""
+			}
+			latency := "pagila"
+			if engine == "mysql" {
+				latency = "sakila"
+			}
+			if engine == "mongodb" {
+				cfg.Rival = "mongodb-mcp"
+				latency = "pagila-docs"
+			}
+			deps := Deps{
+				StartGenerated: func(_ context.Context, got string, n int) (*Dataset, func(), error) {
+					if got != engine || n != 1000 {
+						t.Fatalf("generator: %s %d", got, n)
+					}
+					return &Dataset{Name: "gen", Engine: engine}, func() {}, nil
+				},
+				StartDataset: func(_ context.Context, name string) (*Dataset, func(), error) {
+					if name != latency {
+						t.Fatalf("latency dataset %q want %q", name, latency)
+					}
+					return &Dataset{Name: name, Engine: engine}, func() {}, nil
+				},
+				StartServer: func(_ context.Context, _ string, conns []Conn) (Server, error) {
+					if len(conns) != 1 || conns[0].Engine != engine {
+						t.Fatalf("connections: %+v", conns)
+					}
+					return &microServer{fakeServer{out: "ok"}}, nil
+				},
+			}
+			rep, err := RunBenchmark(context.Background(), cfg, deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, cold := rep.ColdSchema["qh"]
+			_, latencyMeasured := rep.LatencyP50["qh"]
+			if rep.MicroEngine != engine || !cold || !latencyMeasured {
+				t.Fatalf("report %+v", rep)
+			}
+		})
+	}
+}
+
+func TestMicroRejectsIncompatibleEngine(t *testing.T) {
+	for _, cfg := range []Config{{MicroEngine: "sqlite"}, {MicroEngine: "mongodb", Rival: "toolbox"}, {MicroEngine: "mysql", Rival: "mongodb-mcp"}} {
+		if _, err := RunBenchmark(context.Background(), cfg, Deps{}); err == nil {
+			t.Fatalf("accepted %+v", cfg)
+		}
+	}
 }
 
 func (n *namedServer) Name() string { return n.name }
@@ -404,3 +469,7 @@ func TestDefaultDepsDispatch(t *testing.T) {
 		t.Fatalf("mongodb-mcp dispatch: %v", err)
 	}
 }
+
+type microServer struct{ fakeServer }
+
+func (*microServer) Tools() []*mcp.Tool { return []*mcp.Tool{{Name: "schema"}, {Name: "query"}} }

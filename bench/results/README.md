@@ -1,6 +1,6 @@
 # Recorded benchmark runs
 
-Each directory holds one `make bench` run: `report.md` is the report, and `raw.jsonl` has one line per model conversation. Other local runs are not committed.
+Each directory holds one `make bench` run: `report.md` is the report, and `raw.jsonl`, when present, has one line per model conversation. Other local runs are not committed.
 
 The three runs below measure `main` at e242674 (Plans 1–6 and #9). Each is a full run: 4 datasets × 30 questions × 3 runs × 2 servers, with `claude-sonnet-5-5` at effort high against dbhub 1.5.0.
 
@@ -28,3 +28,7 @@ Both runs measure `main` after v1.0.2, with `claude-sonnet-5-5` at effort high a
 | [2026-10-14T152230](2026-10-14T152230/report.md) | `toolbox-data` (Postgres `data` toolset) | Pagila, Lendco | 76.4% fewer | 100% vs 100% | 1.9 vs 2.2 |
 
 The first run includes the micro-benchmarks. Toolbox's first schema call on 1,000 tables took 28 ms and qh's 99 ms. Toolbox lists table names only and connects when it starts, so its figure leaves out connecting; qh builds the full catalogue and connects first.
+
+## MySQL cold schema
+
+The [2026-10-15 measurements](mysql-cold-schema-2026-10-15.md) compare old and new qh binaries on a generated 1,000-table MySQL schema, then run the free benchmark against Toolbox twice. The controlled comparison measured 29.5 ms before and 24.6 ms after. These are fresh-process measurements against a running database, not database-restart timings. qh still trails Toolbox slightly; the report states the output and connection-timing differences. No model calls were made.

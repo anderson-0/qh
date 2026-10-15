@@ -15,8 +15,8 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
   - accuracy against a reference SQL answer.
 - **Tool-definition tokens:** measured with 1 to 5 connections registered, using the token-counting endpoint.
 - **Micro-benchmarks:**
-  - cold schema build on a generated 1,000-table Postgres database;
-  - query latency p50/p95 on Pagila.
+  - cold schema build on a generated 1,000-table Postgres database, or MySQL with `-micro-engine mysql`;
+  - query latency p50/p95 on Pagila (Postgres) or Sakila (MySQL).
 
 ## Requirements
 
@@ -32,7 +32,10 @@ make bench                                   # everything; writes bench/results/
 make bench ARGS="-limit 1 -runs 1"           # first: a cheap smoke run (8 conversations)
 make bench ARGS="-limit 3 -runs 1"           # a larger sample
 make bench ARGS="-skip-agent -skip-tokens"   # micro-benchmarks only, no API key needed
+make bench ARGS="-rival toolbox -micro-engine mysql -skip-agent -skip-tokens" # MySQL only, free
 ```
+
+`-micro-engine` selects only the micro-benchmarks; `-datasets` still selects the agent workloads. SQL rivals default to Postgres. The MongoDB rival defaults to MongoDB and accepts no SQL micro-engine. Cold schema is the median of three fresh server processes against one database instance, so database caches can warm between samples. It measures the first schema call, not a database restart. MySQL uses 1,000 generated tables with seven columns, a primary key, a table comment and a foreign key to the previous table.
 
 Run the `-limit 1 -runs 1` smoke run before a full run: it checks your API key, the model id and both servers for a few cents.
 

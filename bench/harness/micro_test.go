@@ -7,7 +7,60 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/testcontainers/testcontainers-go"
 )
+
+// Missing columns, comments or FKs would make this workload cheaper than
+// the Postgres generator and hide catalog-query costs.
+func TestGeneratedMySQL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs Docker")
+	}
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+	ds, stop, err := StartGeneratedMySQL(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if ds.Engine != "mysql" {
+		t.Fatalf("engine %q", ds.Engine)
+	}
+	for _, check := range []struct {
+		query string
+		want  int
+	}{
+		{`SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'gen' AND TABLE_COMMENT LIKE 'generated table %'`, 3},
+		{`SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'gen'`, 21},
+		{`SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = 'gen' AND REFERENCED_TABLE_NAME IS NOT NULL`, 2},
+	} {
+		var got int
+		if err := ds.DB.QueryRowContext(ctx, check.query).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != check.want {
+			t.Fatalf("%s: got %d want %d", check.query, got, check.want)
+		}
+	}
+	if _, err := ds.DB.ExecContext(ctx, "INSERT INTO t_0001 (id, name, parent_id) VALUES (1, 'orphan', 42)"); err == nil {
+		t.Fatal("foreign key not enforced")
+	}
+	bin, cleanup, err := BuildQH(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	srv, err := StartQH(ctx, bin, []Conn{ConnFor(ds)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	_, args := SchemaCall("qh", ds)
+	if out, isErr := srv.Call(ctx, "schema", args); isErr || !strings.Contains(out, "t_0002") {
+		t.Fatalf("generated MySQL schema missing: error=%v %q", isErr, out)
+	}
+}
 
 func TestPercentile(t *testing.T) {
 	var ds []time.Duration

@@ -11,6 +11,7 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 ### Changed
 
 - **A faster first schema call on Postgres.** On 1,000 tables it takes about 23 ms instead of 99 ms. The catalog queries no longer do work per row that a new connection pays for in full, such as looking up each comment, privilege and key column on its own. The output is unchanged.
+- **MySQL schema discovery does less work.** The column query no longer materializes and sorts its results on MySQL; qh restores column order itself. Foreign-key links use an object map instead of searching the catalog for every key. Schema output is unchanged, including on MariaDB. The free benchmark now covers a generated 1,000-table MySQL database with `-micro-engine mysql`.
 
 ### Fixed
 

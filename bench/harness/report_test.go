@@ -109,6 +109,17 @@ func TestMarkdown(t *testing.T) {
 	}
 }
 
+func TestMySQLMicroReport(t *testing.T) {
+	r := sampleReport()
+	r.MicroEngine = "mysql"
+	md := r.Markdown()
+	for _, want := range []string{"Cold schema build, 1,000 MySQL tables", "Cold schema, 1,000 MySQL tables (median of 3)", "Query latency p50 (MySQL)"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("report lacks %q", want)
+		}
+	}
+}
+
 func TestCriteriaUseOnlyPairedRuns(t *testing.T) {
 	r := sampleReport() // chinook: 2 questions, both servers, qh 1000 vs dbhub 2000 tokens
 	// pagila: qh ran twice (expensive, 5000 tokens, 9 calls, wrong), dbhub was aborted both times.

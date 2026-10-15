@@ -108,6 +108,80 @@ func TestTools(t *testing.T) {
 	}
 }
 
+func TestArgumentValidationErrors(t *testing.T) {
+	s := connect(t)
+	for _, tt := range []struct {
+		name, tool, arguments, detail string
+	}{
+		{"missing query", "query", `{}`, "query"},
+		{"omitted arguments", "query", "", "query"},
+		{"null query", "query", `{"query":null}`, "query"},
+		{"query type", "query", `{"query":42}`, "query"},
+		{"query source type", "query", `{"query":"SELECT 1","source":false}`, "source"},
+		{"max rows type", "query", `{"query":"SELECT 1","max_rows":"2"}`, "max_rows"},
+		{"multiline invalid value", "query", `{"query":"SELECT 1","max_rows":"2\n\t3"}`, "max_rows"},
+		{"fractional max rows", "query", `{"query":"SELECT 1","max_rows":1.5}`, "max_rows"},
+		{"overflowing max rows", "query", `{"query":"SELECT 1","max_rows":1e100}`, "max_rows"},
+		{"explain type", "query", `{"query":"SELECT 1","explain":"true"}`, "explain"},
+		{"schema source type", "schema", `{"source":42}`, "source"},
+		{"pattern type", "schema", `{"pattern":[]}`, "pattern"},
+		{"object type", "schema", `{"object":{}}`, "object"},
+		{"query array", "query", `[]`, "arguments"},
+		{"schema scalar", "schema", `42`, "arguments"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var arguments any
+			if tt.arguments != "" {
+				arguments = json.RawMessage(tt.arguments)
+			}
+			res, err := s.CallTool(context.Background(), &mcp.CallToolParams{
+				Name: tt.tool, Arguments: arguments,
+			})
+			if err != nil {
+				t.Fatalf("protocol error instead of tool error: %v", err)
+			}
+			if !res.IsError || len(res.Content) != 1 {
+				t.Fatalf("result = %+v", res)
+			}
+			content, ok := res.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("content type = %T", res.Content[0])
+			}
+			if !strings.HasPrefix(content.Text, "error[invalid]: ") ||
+				!strings.Contains(content.Text, tt.detail) || strings.ContainsAny(content.Text, "\n\r\t") {
+				t.Errorf("validation error = %q; want one-line error[invalid] with %q", content.Text, tt.detail)
+			}
+		})
+	}
+	// A rejected call does not break the session or subsequent valid calls.
+	if out, isErr := call(t, s, "query", map[string]any{"query": "SELECT 1 AS n"}); isErr || !strings.HasPrefix(out, "n\n1\n") {
+		t.Fatalf("valid query after invalid calls = %q (isError %v)", out, isErr)
+	}
+}
+
+func TestToolErrorCategoriesPreserved(t *testing.T) {
+	s := connect(t)
+	for _, tt := range []struct {
+		name, source, query, category string
+	}{
+		{"empty query", "shop", "", "invalid"},
+		{"unknown source", "absent", "SELECT 1", "unknown_source"},
+		{"write", "shop", "DELETE FROM users", "read_only"},
+		{"unknown table", "shop", "SELECT * FROM absent", "query_error"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, isErr := call(t, s, "query", map[string]any{"source": tt.source, "query": tt.query})
+			if !isErr || !strings.HasPrefix(out, "error["+tt.category+"]: ") || strings.Count(out, "error[") != 1 {
+				t.Fatalf("query = %q (isError %v); want category %s", out, isErr, tt.category)
+			}
+		})
+	}
+	res, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "absent", Arguments: map[string]any{}})
+	if err == nil || res != nil || !strings.Contains(err.Error(), "unknown tool") {
+		t.Fatalf("unknown tool = (%+v, %v); want protocol error", res, err)
+	}
+}
+
 func TestInstructionsNameConnections(t *testing.T) {
 	s := connect(t)
 	in := s.InitializeResult().Instructions

@@ -72,6 +72,7 @@ func TestServiceSharesInvalidations(t *testing.T) {
 	}
 
 	other := New(h.st, h.svc.keys, pool.New(OpenConn, pool.Options{}), catalog.New(time.Hour))
+	t.Cleanup(other.Close)
 	// otherCreates has another instance create table, checks that our cached
 	// schema does not show it yet, delivers notice, and waits for it to appear.
 	otherCreates := func(table, notice string) {

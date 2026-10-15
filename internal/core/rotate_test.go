@@ -36,7 +36,9 @@ func serviceWith(t *testing.T, st *store.SQLite, keys *secret.Keyring) *Service 
 	t.Helper()
 	pools := pool.New(OpenConn, pool.Options{})
 	t.Cleanup(pools.Close)
-	return New(st, keys, pools, catalog.New(time.Minute))
+	svc := New(st, keys, pools, catalog.New(time.Minute))
+	t.Cleanup(svc.Close)
+	return svc
 }
 
 // insertRaw stores a connection sealed in the pre-Plan-4 format.

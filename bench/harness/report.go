@@ -191,6 +191,9 @@ func Criteria(r *Report) []Criterion {
 	if r.MicroEngine == "mysql" {
 		c.Label = "Cold schema build, 1,000 MySQL tables"
 	}
+	if r.MicroEngine == "sqlite" {
+		c.Label = "Cold schema build, 1,000 SQLite tables"
+	}
 	if r.MicroEngine == "postgres" {
 		c.Label = "Cold schema build, 1,000 Postgres tables"
 	}
@@ -248,6 +251,9 @@ func (r *Report) Markdown() string {
 		latencySuffix := ""
 		if r.MicroEngine == "mysql" {
 			unit, latencySuffix = "MySQL tables", " (MySQL)"
+		}
+		if r.MicroEngine == "sqlite" {
+			unit, latencySuffix = "SQLite tables", " (SQLite)"
 		}
 		if r.MicroEngine == "postgres" {
 			unit, latencySuffix = "Postgres tables", " (Postgres)"

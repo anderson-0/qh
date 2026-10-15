@@ -109,14 +109,18 @@ func TestMarkdown(t *testing.T) {
 	}
 }
 
-func TestMySQLMicroReport(t *testing.T) {
-	r := sampleReport()
-	r.MicroEngine = "mysql"
-	md := r.Markdown()
-	for _, want := range []string{"Cold schema build, 1,000 MySQL tables", "Cold schema, 1,000 MySQL tables (median of 3)", "Query latency p50 (MySQL)"} {
-		if !strings.Contains(md, want) {
-			t.Errorf("report lacks %q", want)
-		}
+func TestSQLMicroReportNamesEngine(t *testing.T) {
+	for _, tt := range []struct{ engine, name string }{{"mysql", "MySQL"}, {"sqlite", "SQLite"}} {
+		t.Run(tt.engine, func(t *testing.T) {
+			r := sampleReport()
+			r.MicroEngine = tt.engine
+			md := r.Markdown()
+			for _, want := range []string{"Cold schema build, 1,000 " + tt.name + " tables", "Cold schema, 1,000 " + tt.name + " tables (median of 3)", "Query latency p50 (" + tt.name + ")"} {
+				if !strings.Contains(md, want) {
+					t.Errorf("report lacks %q", want)
+				}
+			}
+		})
 	}
 }
 

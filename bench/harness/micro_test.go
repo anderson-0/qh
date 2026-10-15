@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -10,6 +11,67 @@ import (
 
 	"github.com/testcontainers/testcontainers-go"
 )
+
+func TestGeneratedSQLite(t *testing.T) {
+	ctx := context.Background()
+	ds, stop, err := StartGeneratedSQLite(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	if ds.Engine != "sqlite" {
+		t.Fatalf("engine %q", ds.Engine)
+	}
+	for _, check := range []struct {
+		query string
+		want  int
+	}{
+		{`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name LIKE 't_%'`, 3},
+		{`SELECT COUNT(*) FROM sqlite_schema s JOIN pragma_table_info(s.name) p WHERE s.type = 'table'`, 21},
+		{`SELECT COUNT(*) FROM sqlite_schema s JOIN pragma_foreign_key_list(s.name) f WHERE s.type = 'table'`, 2},
+	} {
+		var got int
+		if err := ds.DB.QueryRowContext(ctx, check.query).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != check.want {
+			t.Fatalf("%s: got %d want %d", check.query, got, check.want)
+		}
+	}
+	if _, err := ds.DB.ExecContext(ctx, `INSERT INTO t_0001 (id,name,parent_id) VALUES (1,'orphan',42)`); err == nil {
+		t.Fatal("foreign key not enforced")
+	}
+	for _, q := range []string{`INSERT INTO t_0000 (id,name) VALUES (42,'root')`, `INSERT INTO t_0001 (id,name,parent_id) VALUES (1,'child',42)`} {
+		if _, err := ds.DB.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop()
+	if _, err := os.Stat(ds.DSN); !os.IsNotExist(err) {
+		t.Fatalf("SQLite file not removed: %v", err)
+	}
+	if err := ds.DB.PingContext(ctx); err == nil {
+		t.Fatal("database left open")
+	}
+}
+
+func TestGeneratedSQLiteCanceled(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, stop, err := StartGeneratedSQLite(ctx, 3); err == nil {
+		stop()
+		t.Fatal("canceled generation succeeded")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary database leaked: %v", entries)
+	}
+}
 
 // Missing columns, comments or FKs would make this workload cheaper than
 // the Postgres generator and hide catalog-query costs.

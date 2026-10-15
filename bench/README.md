@@ -15,12 +15,12 @@ Spec §9.2 defines the benchmark and §1 its success criteria.
   - accuracy against a reference SQL answer.
 - **Tool-definition tokens:** measured with 1 to 5 connections registered, using the token-counting endpoint.
 - **Micro-benchmarks:**
-  - cold schema build on a generated 1,000-table Postgres database, or MySQL with `-micro-engine mysql`;
-  - query latency p50/p95 on Pagila (Postgres) or Sakila (MySQL).
+  - cold schema build on a generated 1,000-table Postgres database, or MySQL/SQLite with `-micro-engine mysql`/`sqlite`;
+  - query latency p50/p95 on Pagila (Postgres), Sakila (MySQL) or Chinook (SQLite).
 
 ## Requirements
 
-- Docker.
+- Docker for Postgres, MySQL and MongoDB. SQLite-only micro-benchmarks do not need it.
 - Node 22.5 or later, with `npx`, for dbhub, mongodb-mcp-server and MCP Toolbox.
 - `ANTHROPIC_API_KEY`, for agent runs and token counting.
 - `ANTHROPIC_WORKSPACE_ID`, only for an API key that is not scoped to a workspace: it is sent as the `anthropic-workspace-id` header.
@@ -33,9 +33,12 @@ make bench ARGS="-limit 1 -runs 1"           # first: a cheap smoke run (8 conve
 make bench ARGS="-limit 3 -runs 1"           # a larger sample
 make bench ARGS="-skip-agent -skip-tokens"   # micro-benchmarks only, no API key needed
 make bench ARGS="-rival toolbox -micro-engine mysql -skip-agent -skip-tokens" # MySQL only, free
+make bench ARGS="-rival toolbox -micro-engine sqlite -skip-agent -skip-tokens" # SQLite only, free
 ```
 
-`-micro-engine` selects only the micro-benchmarks; `-datasets` still selects the agent workloads. SQL rivals default to Postgres. The MongoDB rival defaults to MongoDB and accepts no SQL micro-engine. Cold schema is the median of three fresh server processes against one database instance, so database caches can warm between samples. It measures the first schema call, not a database restart. MySQL uses 1,000 generated tables with seven columns, a primary key, a table comment and a foreign key to the previous table.
+`-micro-engine` selects only the micro-benchmarks; `-datasets` still selects the agent workloads. SQL rivals default to Postgres. The MongoDB rival defaults to MongoDB and accepts no SQL micro-engine. Cold schema is the median of three fresh server processes against one database instance, so database caches can warm between samples. It measures the first schema call, not a database restart.
+
+MySQL and SQLite use 1,000 generated tables with seven columns, a primary key and a foreign key to the previous table. MySQL also has table comments. SQLite has no catalog metadata for them, and its `INTEGER PRIMARY KEY` aliases the rowid instead of creating a separate primary-key index. Compare servers on the same engine; the catalog work differs between engines.
 
 Run the `-limit 1 -runs 1` smoke run before a full run: it checks your API key, the model id and both servers for a few cents.
 

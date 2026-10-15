@@ -8,6 +8,8 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +23,52 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
+
+// StartGeneratedSQLite creates n tables with seven columns and a foreign key
+// to the previous table. SQLite has no catalog metadata for table comments.
+func StartGeneratedSQLite(ctx context.Context, n int) (*Dataset, func(), error) {
+	dir, err := os.MkdirTemp("", "qh-bench-sqlite-gen-")
+	if err != nil {
+		return nil, nil, err
+	}
+	path := filepath.Join(dir, "gen.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, err
+	}
+	cleanup := func() { db.Close(); os.RemoveAll(dir) }
+	// Keep foreign_keys enabled on the connection used to build the fixture.
+	db.SetMaxOpenConns(1)
+	err = func() error {
+		if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for i := 0; i < n; i++ {
+			fk := ""
+			if i > 0 {
+				fk = fmt.Sprintf(" REFERENCES t_%04d(id)", i-1)
+			}
+			q := fmt.Sprintf("CREATE TABLE t_%04d (id INTEGER PRIMARY KEY, name TEXT NOT NULL, status TEXT, amount NUMERIC, "+
+				"created_at TEXT DEFAULT CURRENT_TIMESTAMP, parent_id INTEGER%s, note TEXT)", i, fk)
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return fmt.Errorf("generate SQLite table %d: %w", i, err)
+			}
+		}
+		return tx.Commit()
+	}()
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return &Dataset{Name: "gen", Engine: "sqlite", DSN: path, DB: db,
+		Description: fmt.Sprintf("Generated schema with %d tables", n)}, cleanup, nil
+}
 
 // StartGeneratedMySQL mirrors StartGenerated on MySQL 8.4: seven columns,
 // a primary key, a comment and a foreign key to the previous table.

@@ -22,10 +22,10 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
 |---|---|---|
 | MCP Toolbox 1.14.0, prebuilt config | Postgres, MySQL, SQLite | 83.6% fewer with qh |
 | MCP Toolbox 1.14.0, `data` toolset | Postgres | 76.4% fewer |
-| dbhub 1.5.0 | Postgres, MySQL, SQLite | 40.3–40.4% fewer (measured at e242674, before 1.0.0) |
+| dbhub 1.5.0 | Postgres, MySQL, SQLite | 40.2% fewer (2026-10-15, `main` at `0656d51`; one full run) |
 | mongodb-mcp-server 3.0.5 | MongoDB | 95.2% fewer |
 
-**Speed:** the first schema call on 1,000 Postgres tables takes 23 ms, against Toolbox's 22–26 ms and dbhub's 2.08 s. Query latency p50 is about 0.5 ms; Toolbox's is 0.4 ms.
+**Speed:** the first schema call on 1,000 Postgres tables takes 23 ms, against Toolbox's 22–26 ms and dbhub's 2.10 s. Query latency p50 is about 0.5 ms; Toolbox's is 0.4 ms.
 
 ### Distribution
 
@@ -40,9 +40,9 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
    - Done: a follow-up fresh-connection profile on MySQL 8.4 and MariaDB 11.4. `COLUMNS` remains the critical path; isolated sort savings do not establish an overall gain. On unchanged code, two more MCP runs measured qh at 22.4 ms and Toolbox at 21.3/24.2 ms. Initial qh samples were 181.9–215.2 ms; the three-process median hides that first-call cost. See [the profile and caveats](../../../bench/results/mysql-catalog-profile-2026-10-15.md).
    - Done: two free SQLite and MongoDB checks. SQLite took 16.0–24.3 ms versus Toolbox's 32.3–34.4 ms on 1,000 tables. MongoDB took 245.9–248.7 ms versus 33.0–33.5 ms for names only; qh also samples and infers schema. See the [reports and caveats](../../../bench/results/sqlite-mongodb-cold-schema-2026-10-15.md).
    - MongoDB profiling found a per-document presence map in inference. Removing it cuts allocated bytes by 25–26% in the generated samples. Controlled introspection medians were 290.1 → 268.2 ms without references and 379.4 → 357.3 ms with 999 verified references, with matching output. Normal MCP runs overlap the earlier baseline, so they do not establish an overall latency improvement. See [the measurements and limits](../../../bench/results/mongodb-inference-2026-10-15.md). The standard generated benchmark still has no cross-collection reference fields; the controlled probe and new integration test cover them separately.
-   - No further engine rewrite is justified by these checks. MySQL lacks a stable fastest-rival result in these small samples; a separate first-ever catalog metric could expose its initial cost. MongoDB still issues three catalog commands per collection and extra reference lookups. More engine work needs a new measured hypothesis that preserves output. SQLite needs no engine rewrite on current evidence. Item 3 below remains gated on paid-run approval.
+   - No further engine rewrite is justified by these checks. MySQL lacks a stable fastest-rival result in these small samples; a separate first-ever catalog metric could expose its initial cost. MongoDB still issues three catalog commands per collection and extra reference lookups. More engine work needs a new measured hypothesis that preserves output. SQLite needs no engine rewrite on current evidence. The paid refresh in item 3 below is measured; further paid runs need approval.
    - Acceptance: qh's first schema call is at or below the fastest rival on each engine, with byte-identical output (the golden conformance tests pass).
-3. **Refresh the dbhub numbers.** The 40% figure predates 1.0.0. A golden test pins the SQL tool surface, so it should hold, but re-measure once on current `main`.
+3. **Done: refresh the dbhub numbers.** The [2026-10-15 full run](../../../bench/results/dbhub-refresh-2026-10-15.md) at `0656d51` measured 40.2% fewer tokens, equal 100% accuracy and 1.5 versus 1.6 tool calls on 360 paired tasks. There were no errors, aborts or truncated outputs. The 40% target passed by only 0.239 percentage points; one full run is not a guaranteed saving. Production code and MCP tool text are unchanged.
 4. **Agent-facing correctness:**
    - Two foreign keys on one column overwrite each other in the schema text.
    - MCP argument-validation errors from the SDK do not use the `error[category]` format.

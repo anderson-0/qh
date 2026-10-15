@@ -103,15 +103,14 @@ make bench ARGS="-rival toolbox-data"               # Pagila and Lendco with Too
 
 ## Cost and time
 
-A full run makes about 720 model conversations: 120 questions × 3 runs × 2 servers. Every request uses prompt caching, so a conversation re-reads its growing prefix at the cache-read price. Assuming a handful of turns per conversation, a few thousand tokens of tool output per turn and Sonnet 5.5 list prices, expect the order of magnitude:
+A full SQL run makes 720 model conversations: 120 questions × 3 runs × 2 servers. Requests use prompt caching. Cost and elapsed time depend on the rival, model behaviour and API latency.
 
-- **Cost:** tens to low hundreds of dollars for the whole run. dbhub conversations cost more than qh ones, because its tool definitions and its uncapped row output are larger.
-- **Time:** 1.5 to 3 hours at `-parallel 4` (the default), plus a few minutes for the datasets and the micro-benchmarks.
+The [2026-10-15 dbhub refresh](results/dbhub-refresh-2026-10-15.md), using Sonnet 5.5 at effort high and `-parallel 4`, took about 13 minutes including setup and micro-benchmarks. Its recorded conversation usage gives a conservative **$8.64** estimate at published rates when all input is priced as cache writes; actual billing is not captured. Other rivals and harder tasks can cost more or take longer. Ask before paid runs and agree a spending limit.
 
-These are estimates, not quotes; check your API budget before a full run. Two flags bound the spend:
+Two flags control conversation usage; neither is a total spending cap:
 
 - `-token-budget` (default 1,000,000) stops one conversation once its input plus output tokens, cache reads included, pass the ceiling. The run is recorded as failed ("token budget exceeded"), not aborted, so it counts against its server.
-- `-effort` (default `high`) is sent as `output_config.effort` on every request. `low` or `medium` cost less but change what is measured.
+- `-effort` (default `high`) is sent as `output_config.effort` on every request. `low` or `medium` can reduce reasoning usage but change what is measured.
 
 `raw.jsonl` gets one line per finished run, so an interrupted run keeps what it measured.
 

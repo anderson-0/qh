@@ -78,11 +78,16 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 		return nil, connectErr(err)
 	}
 	f, _ := parseVersion(v)
-	return &conn{db: db, readOnly: spec.Mode != engine.ModeRW, dbName: cfg.DBName, flavor: f, mariaDB111: atLeast(v, 11, 1)}, nil
+	c := &conn{db: db, readOnly: spec.Mode != engine.ModeRW, dbName: cfg.DBName, flavor: f, mariaDB111: atLeast(v, 11, 1)}
+	if f == flavorMySQL {
+		c.writes = newWriteCanceler(c, connector, size)
+	}
+	return c, nil
 }
 
 type conn struct {
 	db       *sql.DB
+	writes   *writeCanceler
 	readOnly bool
 	dbName   string
 	flavor   flavor
@@ -91,7 +96,13 @@ type conn struct {
 	mariaDB111 bool
 }
 
-func (c *conn) Close() error { return c.db.Close() }
+func (c *conn) Close() error {
+	var err error
+	if c.writes != nil {
+		err = c.writes.Close()
+	}
+	return errors.Join(err, c.db.Close())
+}
 
 func (c *conn) Ping(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -215,12 +226,23 @@ func discard(sc *sql.Conn) { _ = sc.Raw(func(any) error { return driver.ErrBadCo
 // returned only when commit is false: after a successful COMMIT the write
 // has happened, so reporting an error would make an agent retry it.
 func (c *conn) finish(sc *sql.Conn, commit, rw bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupWait)
 	defer cancel()
+	r := c.finishContext(ctx, sc, commit, rw)
+	if r.Committed {
+		return nil
+	}
+	return r.Err
+}
+
+// finishContext records the transaction acknowledgement independently of reset.
+// A reset failure cannot erase a successful commit or rollback.
+func (c *conn) finishContext(ctx context.Context, sc *sql.Conn, commit, rw bool) cleanupResult {
+	r := cleanupResult{}
+	fail := func(err error) cleanupResult { discard(sc); r.Err = err; return r }
 	if rw {
 		if _, err := sc.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
-			discard(sc)
-			return err
+			return fail(err)
 		}
 	}
 	end := "ROLLBACK"
@@ -228,16 +250,13 @@ func (c *conn) finish(sc *sql.Conn, commit, rw bool) error {
 		end = "COMMIT"
 	}
 	if _, err := sc.ExecContext(ctx, end); err != nil {
-		discard(sc)
-		return err
+		return fail(err)
 	}
+	r.Committed, r.RolledBack = commit, !commit
 	if _, err := sc.ExecContext(ctx, c.resetSQL()); err != nil {
-		discard(sc)
-		if !commit {
-			return err
-		}
+		return fail(err)
 	}
-	return nil
+	return r
 }
 
 func (c *conn) run(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, readOnly bool) (*engine.Result, error) {
@@ -313,6 +332,9 @@ func (c *conn) release(sc *sql.Conn) {
 // exec is run with a choice of how the transaction ends: commit false always
 // rolls back (used to explain a write without applying anything).
 func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access, commit bool) (*engine.Result, error) {
+	if c.flavor == flavorMySQL && commit {
+		return c.execProtected(ctx, q, o, access)
+	}
 	start := time.Now()
 	timeout, limit := callLimits(o)
 	// The server-side timeout fires first; this is a backstop.
@@ -381,11 +403,29 @@ func (c *conn) exec(ctx context.Context, q string, o engine.QueryOpts, access sq
 // reports killed. Writes (e.g. MariaDB's DELETE ... RETURNING) always drain,
 // because cancelling them would roll the write back.
 func collect(ctx context.Context, cancel context.CancelFunc, sc *sql.Conn, q string, limit int, read bool) (*engine.Result, bool, error) {
+	return collectWithStop(ctx, cancel, sc, q, limit, read, false)
+}
+
+func collectWithStop(ctx context.Context, onCap func(), sc *sql.Conn, q string, limit int, read, drainAfterStop bool) (result *engine.Result, killed bool, err error) {
 	rows, err := sc.QueryContext(ctx, q)
 	if err != nil {
 		return nil, false, err
 	}
-	defer rows.Close()
+	defer func() {
+		closeErr := rows.Close()
+		if drainAfterStop && err == nil {
+			err = closeErr
+		}
+	}()
+	terminal := func() error {
+		if drainAfterStop {
+			for rows.NextResultSet() {
+				for rows.Next() {
+				}
+			}
+		}
+		return rows.Err()
+	}
 	cts, err := rows.ColumnTypes()
 	if err != nil {
 		return nil, false, err
@@ -407,14 +447,19 @@ func collect(ctx context.Context, cancel context.CancelFunc, sc *sql.Conn, q str
 			if !read {
 				for rows.Next() {
 				}
-				return res, false, rows.Err()
+				return res, false, terminal()
 			}
 			for n := 0; n < drainBudget; n++ {
 				if !rows.Next() {
-					return res, false, rows.Err()
+					return res, false, terminal()
 				}
 			}
-			cancel()
+			onCap()
+			if drainAfterStop {
+				for rows.Next() {
+				}
+				return res, true, terminal()
+			}
 			return res, true, nil
 		}
 		if err := rows.Scan(ptrs...); err != nil {
@@ -426,5 +471,59 @@ func collect(ctx context.Context, cancel context.CancelFunc, sc *sql.Conn, q str
 		}
 		res.Rows = append(res.Rows, row)
 	}
-	return res, false, rows.Err()
+	return res, false, terminal()
+}
+
+// execProtected preserves the query session while the guard attempts server-side
+// interruption. Every return path releases registration and both reservations.
+func (c *conn) execProtected(ctx context.Context, q string, o engine.QueryOpts, access sqlx.Access) (*engine.Result, error) {
+	start := time.Now()
+	timeout, limit := callLimits(o)
+	ctx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
+	defer cancel()
+	call, err := c.writes.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer call.Cleanup(false)
+	sc, err := c.acquire(call.Context())
+	if err != nil {
+		return nil, err
+	}
+	call.discardAfter = access != sqlx.Read
+	if err = call.Prepare(sc, c.setupSQL(limit+1, timeout, false)); err != nil {
+		return nil, err
+	}
+	qctx, err := call.Admit()
+	if err != nil {
+		return nil, err
+	}
+	res, _, statementErr := collectWithStop(qctx, call.RequestTruncation, sc, q, limit, access == sqlx.Read, true)
+	stop := call.Complete(statementErr)
+	if stop.Reason != stopNone || statementErr != nil || ctx.Err() != nil {
+		cleanup := call.Cleanup(false)
+		if err := interruptionError(ctx, stop, cleanup, statementErr); err != nil {
+			return nil, err
+		}
+		res.Duration = time.Since(start)
+		return res, nil
+	}
+	if len(res.Columns) == 0 {
+		if err = sc.QueryRowContext(call.Context(), "SELECT ROW_COUNT()").Scan(&res.RowsAffected); err != nil {
+			return nil, interruptionError(ctx, stop, call.Cleanup(false), err)
+		}
+	}
+	if !call.CommitAllowed() {
+		if errors.Is(call.Context().Err(), context.DeadlineExceeded) {
+			stop.Reason = stopDeadline
+		} else {
+			stop.Reason = stopCallerCancel
+		}
+		return nil, interruptionError(ctx, stop, call.Cleanup(false), context.Canceled)
+	}
+	if err := interruptionError(ctx, stop, call.Cleanup(true), nil); err != nil {
+		return nil, err
+	}
+	res.Duration = time.Since(start)
+	return res, nil
 }

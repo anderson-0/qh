@@ -1,0 +1,60 @@
+package mysql
+
+import (
+ "bufio"
+ "context"
+ "database/sql"
+ "encoding/json"
+ "fmt"
+ "net"
+ "os"
+ "os/exec"
+ "sort"
+ "strconv"
+ "strings"
+ "sync"
+ "sync/atomic"
+ "testing"
+ "time"
+
+ "github.com/anderson-0/qh/internal/engine"
+)
+type measureConn struct {net.Conn;once sync.Once;live *atomic.Int64}
+func (c *measureConn) Close()error{err:=c.Conn.Close();c.once.Do(func(){c.live.Add(-1)});return err}
+type measureResult struct {Revision,Workload,Kind string;Batch int;NS []int64;P50,P95 int64;Questions,Prepare,StmtClose,Kill int64;Opened,Live,QueryRetained int64}
+func TestWriteProbeWorker(t *testing.T){
+ if os.Getenv("QH_WRITE_PROBE_ROLE")!="worker"{t.Skip("temporary measurement worker")}
+ ctx,cancel:=context.WithTimeout(context.Background(),45*time.Second);defer cancel()
+ workload:=os.Getenv("QH_WRITE_PROBE_WORKLOAD");cold:=os.Getenv("QH_WRITE_PROBE_KIND")=="cold"
+ var opened,live atomic.Int64
+ mode:=engine.ModeRW;if workload=="ro-select"{mode=engine.ModeRO}
+ c,err:= (Engine{}).Open(ctx,engine.ConnSpec{DSN:os.Getenv("QH_WRITE_PROBE_DSN"),Mode:mode,PoolSize:1,Dial:func(ctx context.Context,n,a string)(net.Conn,error){nc,err:=(&net.Dialer{}).DialContext(ctx,n,a);if err!=nil{return nil,err};opened.Add(1);live.Add(1);return &measureConn{Conn:nc,live:&live},nil}})
+ if err!=nil{t.Fatal("measurement open failed")};defer c.Close();internal:=c.(*conn)
+ observer,err:=sql.Open("mysql",os.Getenv("QH_WRITE_PROBE_DSN"));if err!=nil{t.Fatal("observer open")};defer observer.Close();observer.SetMaxOpenConns(1)
+ q:="SELECT id,name FROM users WHERE id=1";if workload=="rw-update"{q="UPDATE users SET name=IF(name='probe-a','probe-b','probe-a') WHERE id=1"}
+ run:=func(){if _,err:=c.Query(ctx,q,engine.QueryOpts{Timeout:10*time.Second});err!=nil{t.Fatal("measurement query failed")}}
+ idle:=func(){for internal.db.Stats().InUse!=0{select{case <-ctx.Done():t.Fatal("measurement cleanup stalled");case <-time.After(time.Millisecond):}}}
+ if !cold{for range 20{run()};idle()}
+ stats:=func()map[string]int64{rows,err:=observer.QueryContext(ctx,"SHOW GLOBAL STATUS WHERE Variable_name IN ('Questions','Com_stmt_prepare','Com_stmt_close','Com_kill')");if err!=nil{t.Fatal("status query failed")};defer rows.Close();v:=map[string]int64{};for rows.Next(){var key,value string;if err=rows.Scan(&key,&value);err!=nil{t.Fatal("status scan")};v[key],err=strconv.ParseInt(value,10,64);if err!=nil{t.Fatal("status value")}};if rows.Err()!=nil{t.Fatal("status rows")};return v}
+ before:=stats();dials:=opened.Load();n:=100;if cold{n=1};values:=make([]int64,0,n)
+ for range n{start:=time.Now();run();values=append(values,time.Since(start).Nanoseconds())};idle();after:=stats()
+ sorted:=append([]int64(nil),values...);sort.Slice(sorted,func(i,j int)bool{return sorted[i]<sorted[j]})
+ batch,_:=strconv.Atoi(os.Getenv("QH_WRITE_PROBE_BATCH"));r:=measureResult{Revision:os.Getenv("QH_WRITE_PROBE_REV"),Workload:workload,Kind:os.Getenv("QH_WRITE_PROBE_KIND"),Batch:batch,NS:values,P50:sorted[(n-1)*50/100],P95:sorted[(n-1)*95/100],Questions:after["Questions"]-before["Questions"]-1,Prepare:after["Com_stmt_prepare"]-before["Com_stmt_prepare"],StmtClose:after["Com_stmt_close"]-before["Com_stmt_close"],Kill:after["Com_kill"]-before["Com_kill"],Opened:opened.Load()-dials,Live:live.Load(),QueryRetained:int64(internal.db.Stats().OpenConnections)}
+ raw,_:=json.Marshal(r);fmt.Println("QH_MEASURE "+string(raw))
+}
+func TestWriteProbeLeader(t *testing.T){
+ if os.Getenv("QH_WRITE_PROBE_ROLE")!="leader"{t.Skip("temporary measurement leader")}
+ dsn:=startDB(t,"mysql:8.4")
+ out,err:=os.Create(os.Getenv("QH_WRITE_PROBE_OUTPUT"));if err!=nil{t.Fatal("output create")};defer out.Close()
+ for _,kind:=range []string{"warm","cold"}{for _,workload:=range []string{"ro-select","rw-select","rw-update"}{for batch:=range 5{
+ order:=[]string{"old","new"};if batch%2!=0{order=[]string{"new","old"}}
+ for _,revision:=range order{
+ binary:=os.Getenv("QH_WRITE_PROBE_NEW");if revision=="old"{binary=os.Getenv("QH_WRITE_PROBE_OLD")}
+ cmd:=exec.Command(binary,"-test.run=^TestWriteProbeWorker$","-test.count=1")
+ cmd.Env=append(os.Environ(),"QH_WRITE_PROBE_ROLE=worker","QH_WRITE_PROBE_DSN="+dsn,"QH_WRITE_PROBE_KIND="+kind,"QH_WRITE_PROBE_WORKLOAD="+workload,"QH_WRITE_PROBE_BATCH="+strconv.Itoa(batch+1),"QH_WRITE_PROBE_REV="+revision)
+ raw,err:=cmd.Output();if err!=nil{t.Fatal("measurement child failed (output withheld)")}
+ scanner:=bufio.NewScanner(strings.NewReader(string(raw)));found:=false;for scanner.Scan(){line:=scanner.Text();if strings.HasPrefix(line,"QH_MEASURE "){fmt.Fprintln(out,strings.TrimPrefix(line,"QH_MEASURE "));found=true}}
+ if !found{t.Fatal("measurement child produced no record")}
+ }
+ }}}
+}

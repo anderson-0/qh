@@ -6,3 +6,6 @@
 # local secrets
 .env.local
 .env*.local
+
+# local handoff notes for coding agents (security backlog stays out of the public repo)
+/.handoff/

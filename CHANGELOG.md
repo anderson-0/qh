@@ -6,6 +6,8 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 ### Added
 
+- **Password-only connection edits.** `qh conn edit NAME --password-stdin` replaces or clears qh's stored inline database password for PostgreSQL, MySQL, MariaDB and MongoDB. Local and remote modes preserve the other connection settings and test before saving unless `--skip-test` is set. REST patches accept a transient `password` field; passwords stay hidden in responses.
+
 - **SQLite cold-schema benchmark.** `-micro-engine sqlite` measures a generated 1,000-table SQLite schema and query latency on Chinook. It runs without Docker when agent runs and token counting are skipped.
 
 ### Changed

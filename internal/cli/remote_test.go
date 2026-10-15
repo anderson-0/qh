@@ -103,3 +103,14 @@ func TestRemoteRefusesPlainHTTP(t *testing.T) {
 		t.Fatalf("%d %q", code, errOut)
 	}
 }
+
+func TestRemotePasswordEdit(t *testing.T) {
+	url, admin := remoteServer(t)
+	home := t.TempDir()
+	if _, _, code := run(t, home, "", "--server", url, "--key", admin, "workspace", "create", "passwords"); code != 0 {
+		t.Fatal("create test workspace failed")
+	}
+	testPasswordEditCommands(t, func(stdin string, args ...string) (string, string, int) {
+		return run(t, home, stdin, append([]string{"--server", url, "--key", admin, "--workspace", "passwords"}, args...)...)
+	})
+}

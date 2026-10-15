@@ -53,6 +53,7 @@ type ConnInput struct {
 
 // ConnPatch changes the non-nil fields of a connection.
 type ConnPatch struct {
+	Password          *string // nil leaves the inline database password unchanged; empty clears it
 	DSN               *string
 	Description       *string
 	Mode              *engine.Mode
@@ -402,7 +403,7 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 }
 
 // UpdateConnection applies p. It tests the connection again when the
-// connection string or mode changes and test is true.
+// connection settings or inline password change and test is true.
 func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnPatch, test bool) (*ConnInfo, *TestResult, error) {
 	rec, err := s.store.GetConnection(ctx, ws, name)
 	if errors.Is(err, store.ErrNotFound) {
@@ -463,6 +464,26 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	if p.TLS != nil {
 		in.TLS = p.TLS
 	}
+	if p.Password != nil {
+		if strings.TrimSpace(in.DSNRef) != "" || strings.TrimSpace(in.PasswordRef) != "" {
+			return nil, nil, qerr.New(qerr.Invalid, "inline password edits require removing dsn_ref and password_ref")
+		}
+		eng, err := engine.Get(in.Engine)
+		if err != nil {
+			return nil, nil, err
+		}
+		// A setter must not turn a missing target into driver defaults.
+		if in.DSN, err = connString(eng, in); err != nil {
+			return nil, nil, err
+		}
+		setter, ok := eng.(engine.PasswordDSNSetter)
+		if !ok {
+			return nil, nil, qerr.New(qerr.Invalid, "this engine does not support inline password edits")
+		}
+		if in.DSN, err = setter.SetPassword(in.DSN, *p.Password); err != nil {
+			return nil, nil, qerr.New(qerr.Invalid, "invalid connection string for password edit")
+		}
+	}
 	if err := s.denySSH(in); err != nil {
 		return nil, nil, err
 	}
@@ -481,7 +502,7 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 		return nil, nil, err
 	}
 	var tr *TestResult
-	if test && (p.DSN != nil || p.DSNRef != nil || p.PasswordRef != nil || p.SSH != nil || p.ClearSSH || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
+	if test && (p.Password != nil || p.DSN != nil || p.DSNRef != nil || p.PasswordRef != nil || p.SSH != nil || p.ClearSSH || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
 		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
 			return nil, nil, err
 		}

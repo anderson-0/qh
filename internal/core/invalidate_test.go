@@ -103,3 +103,34 @@ func TestServiceSharesInvalidations(t *testing.T) {
 	otherCreates("t2", rec.ID) // another instance's DDL on this connection
 	otherCreates("t3", "")     // a reconnect: drop everything
 }
+
+func TestPasswordPatchSharesInvalidationOnlyAfterSave(t *testing.T) {
+	h, e := passwordFixture(t)
+	ctx := context.Background()
+	inv := &invStore{SQLite: h.st, ch: make(chan string)}
+	svc := passwordSharedService(t, h, inv)
+	before, _ := passwordRecord(t, h)
+	failed := "rejected-password"
+	if _, _, err := svc.UpdateConnection(ctx, ws, "pg", ConnPatch{Password: &failed}, true); err == nil {
+		t.Fatal("failed password test was accepted")
+	}
+	inv.mu.Lock()
+	n := len(inv.sent)
+	inv.mu.Unlock()
+	if n != 0 {
+		t.Fatal("failed password edit notified shared instances")
+	}
+	passwordUnchanged(t, h, before)
+	next := "replacement-password"
+	if _, _, err := svc.UpdateConnection(ctx, ws, "pg", ConnPatch{Password: &next}, true); err != nil {
+		t.Fatal("password edit failed")
+	}
+	inv.mu.Lock()
+	sent := append([]string(nil), inv.sent...)
+	inv.mu.Unlock()
+	if len(sent) != 1 || sent[0] != before.ID {
+		t.Fatal("successful password edit did not notify exactly once")
+	}
+	_, in := passwordRecord(t, h)
+	passwordWant(t, e, in.DSN, next)
+}

@@ -39,7 +39,12 @@ func newHarness(t *testing.T) *harness {
 	}
 	pools := pool.New(OpenConn, pool.Options{})
 	t.Cleanup(pools.Close)
-	return &harness{svc: New(st, keys, pools, catalog.New(10*time.Minute)), st: st}
+	svc := New(st, keys, pools, catalog.New(10*time.Minute))
+	// Cleanups run last first: Close writes the queued query-log entries
+	// before the store closes, so nothing writes into the temp dir while the
+	// test framework removes it.
+	t.Cleanup(svc.Close)
+	return &harness{svc: svc, st: st}
 }
 
 func (h *harness) addShop(t *testing.T, mode engine.Mode) {

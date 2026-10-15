@@ -31,7 +31,9 @@ func newServiceWith(t *testing.T, st *store.SQLite, opts Options) *Service {
 	}
 	pools := pool.New(OpenConn, pool.Options{})
 	t.Cleanup(pools.Close)
-	return New(st, keys, pools, catalog.New(10*time.Minute), opts)
+	svc := New(st, keys, pools, catalog.New(10*time.Minute), opts)
+	t.Cleanup(svc.Close) // writes the queued query-log entries before the store closes
+	return svc
 }
 
 func openStore(t *testing.T) *store.SQLite {
@@ -214,6 +216,7 @@ func TestServerDSNGate(t *testing.T) {
 	bad := "postgres://u:hunter22@db.example.com/db?connect_timeout=2&passfile=/etc/hosts"
 	// A row stored before the gate existed (or by local mode on the same store).
 	local := New(st, keys, pools, catalog.New(10*time.Minute))
+	t.Cleanup(local.Close)
 	if _, _, err := local.CreateConnection(ctx, ws, ConnInput{Name: "legacy", Engine: "postgres", DSN: bad}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +225,7 @@ func TestServerDSNGate(t *testing.T) {
 		dialed = true
 		return nil, errors.New("refused by policy")
 	}})
+	t.Cleanup(server.Close)
 	const want = "error[invalid]: this server only accepts these Postgres connection settings"
 	check := func(what string, err error) {
 		t.Helper()

@@ -103,6 +103,7 @@ func TestResolveRechecksStoredRefs(t *testing.T) {
 	pools := pool.New(OpenConn, pool.Options{})
 	t.Cleanup(pools.Close)
 	narrow := New(st, wide.keys, pools, catalog.New(10*time.Minute), Options{Dial: dialNowhere, SecretRefs: []string{"env:QH_OTHER_*"}})
+	t.Cleanup(narrow.Close)
 	if _, err := narrow.Query(ctx, ws, QueryInput{Source: "pg", Query: "SELECT 1"}); qerr.From(err).Category != qerr.Forbidden {
 		t.Fatalf("query: %v", err)
 	}

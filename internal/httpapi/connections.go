@@ -80,6 +80,7 @@ func (in connectionInput) core() core.ConnInput {
 }
 
 type connectionPatch struct {
+	Password          *string         `json:"password"`
 	DSN               *string         `json:"dsn"`
 	Description       *string         `json:"description"`
 	Mode              *string         `json:"mode"`
@@ -94,7 +95,7 @@ type connectionPatch struct {
 }
 
 func (p connectionPatch) core() (core.ConnPatch, error) {
-	out := core.ConnPatch{DSN: p.DSN, Description: p.Description, MaxRows: p.MaxRows, TimeoutMS: p.TimeoutMS,
+	out := core.ConnPatch{DSN: p.DSN, Password: p.Password, Description: p.Description, MaxRows: p.MaxRows, TimeoutMS: p.TimeoutMS,
 		PoolSize: p.PoolSize, AllowedNamespaces: p.AllowedNamespaces, DSNRef: p.DSNRef, PasswordRef: p.PasswordRef}
 	if p.Mode != nil {
 		m := engine.Mode(*p.Mode)

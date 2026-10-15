@@ -144,6 +144,95 @@ func TestDetailCompositeKeyAndView(t *testing.T) {
 	}
 }
 
+// Every single-column FK must survive in catalog order, including when a
+// composite FK shares the column or the overview folds an inferred child.
+func TestSchemaMultipleForeignKeys(t *testing.T) {
+	cases := []struct {
+		name         string
+		object       *engine.Object
+		wantOverview string
+		wantDetail   string
+	}{
+		{
+			name: "SQL column with a composite reference too",
+			object: &engine.Object{Namespace: "public", Name: "orders", Kind: engine.KindTable, RowEstimate: -1,
+				Fields:     []engine.Field{{Name: "id", Type: "bigint"}, {Name: "owner_id", Type: "bigint"}, {Name: "tenant_id", Type: "bigint"}},
+				PrimaryKey: []string{"id"},
+				ForeignKeys: []engine.ForeignKey{
+					{Columns: []string{"owner_id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"id"}},
+					{Columns: []string{"owner_id", "tenant_id"}, RefNamespace: "public", RefObject: "tenant_users", RefColumns: []string{"id", "tenant_id"}},
+					{Columns: []string{"owner_id"}, RefNamespace: "archive", RefObject: "users", RefColumns: []string{"id"}},
+				}},
+			wantOverview: "public: 1 table\n  orders: id PK, owner_id→{users.id,archive.users.id}, tenant_id\n",
+			wantDetail: "public.orders\n  id bigint PK\n  owner_id bigint NN → users.id, archive.users.id\n" +
+				"  tenant_id bigint NN\n  (owner_id,tenant_id) → tenant_users(id,tenant_id)\n",
+		},
+		{
+			name: "primary key references keep matching column shorthand",
+			object: &engine.Object{Namespace: "public", Name: "orders", Kind: engine.KindTable, RowEstimate: -1,
+				Fields:     []engine.Field{{Name: "id", Type: "bigint"}},
+				PrimaryKey: []string{"id"},
+				ForeignKeys: []engine.ForeignKey{
+					{Columns: []string{"id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"id"}},
+					{Columns: []string{"id"}, RefNamespace: "archive", RefObject: "users", RefColumns: []string{"id"}},
+				}},
+			wantOverview: "public: 1 table\n  orders: id PK→{users,archive.users}\n",
+			wantDetail:   "public.orders\n  id bigint PK → users.id, archive.users.id\n",
+		},
+		{
+			name: "three references to different columns of one table",
+			object: &engine.Object{Namespace: "public", Name: "orders", Kind: engine.KindTable, RowEstimate: -1,
+				Fields: []engine.Field{{Name: "owner_id", Type: "bigint", Nullable: true}},
+				ForeignKeys: []engine.ForeignKey{
+					{Columns: []string{"owner_id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"z_id"}},
+					{Columns: []string{"owner_id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"a_id"}},
+					{Columns: []string{"owner_id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"m_id"}},
+				}},
+			wantOverview: "public: 1 table\n  orders: owner_id→{users.z_id,users.a_id,users.m_id}\n",
+			wantDetail:   "public.orders\n  owner_id bigint → users.z_id, users.a_id, users.m_id\n",
+		},
+		{
+			name: "inferred scalar references omit id in overview",
+			object: &engine.Object{Namespace: "public", Name: "orders", Kind: engine.KindCollection, RowEstimate: -1,
+				Fields: []engine.Field{{Name: "owner_id", Type: "int", Inferred: true}},
+				ForeignKeys: []engine.ForeignKey{
+					{Columns: []string{"owner_id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"_id"}},
+					{Columns: []string{"owner_id"}, RefNamespace: "archive", RefObject: "users", RefColumns: []string{"_id"}},
+				}},
+			wantOverview: "public: 1 collection\n  orders: owner_id→{users,archive.users}\n",
+			wantDetail:   "public.orders\n  owner_id int NN → users._id, archive.users._id\n",
+		},
+		{
+			name: "folded inferred child keeps all references when promoted",
+			object: &engine.Object{Namespace: "public", Name: "orders", Kind: engine.KindCollection, RowEstimate: -1,
+				Fields: inferred("items", "items[].name", "items[].qty", "items[].owner_id"),
+				ForeignKeys: []engine.ForeignKey{
+					{Columns: []string{"items[].owner_id"}, RefNamespace: "public", RefObject: "users", RefColumns: []string{"_id"}},
+					{Columns: []string{"items[].owner_id"}, RefNamespace: "archive", RefObject: "users", RefColumns: []string{"_id"}},
+				}},
+			wantOverview: "public: 1 collection\n  orders: items{owner_id→{users,archive.users},name,…}\n",
+			wantDetail: "public.orders\n  items NN\n  items[].name NN\n  items[].qty NN\n" +
+				"  items[].owner_id NN → users._id, archive.users._id\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := &engine.Catalog{Namespaces: []engine.Namespace{{Name: "public", Objects: []*engine.Object{tc.object}}}}
+			for _, output := range []struct {
+				name string
+				opts SchemaOpts
+				want string
+			}{{"overview", SchemaOpts{}, tc.wantOverview}, {"detail", SchemaOpts{Object: "public.orders"}, tc.wantDetail}} {
+				t.Run(output.name, func(t *testing.T) {
+					if got, n := Schema(cat, output.opts); got != output.want || n != 1 {
+						t.Fatalf("matched=%d got:\n%s\nwant:\n%s", n, got, output.want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestPatternMatching(t *testing.T) {
 	cases := []struct {
 		pattern string

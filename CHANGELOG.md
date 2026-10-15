@@ -12,6 +12,10 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 - **MongoDB schema inference allocates less.** Path statistics count each document directly instead of building a presence map per document. Sampled fields, nullability, enums and references are unchanged.
 
+### Fixed
+
+- **Schema text retains every foreign key on a column.** Overviews group multiple targets as `owner_id→{users.id,archive.users.id}`; details list them as `→ users.id, archive.users.id`. A later reference no longer hides an earlier one, including in folded document fields.
+
 ## [1.0.3] - 2026-10-15
 
 ### Added

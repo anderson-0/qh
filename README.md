@@ -16,7 +16,7 @@ Supported now: PostgreSQL 13+, MySQL 8.0.16+, MariaDB 10.6+, SQLite and MongoDB 
 | Rival | Datasets | Fewer tokens per task with qh |
 |---|---|---|
 | Google's MCP Toolbox for Databases 1.14.0 | Postgres, MySQL, SQLite | 83.6% |
-| dbhub 1.5.0 | Postgres, MySQL, SQLite | 40% |
+| [dbhub 1.5.0](bench/results/2026-10-15T140716/report.md) | Postgres, MySQL, SQLite | 40.2% |
 | mongodb-mcp-server 3.0.5 | MongoDB | 95.2% |
 
 ## Install

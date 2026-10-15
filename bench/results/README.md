@@ -2,6 +2,18 @@
 
 Each directory holds one `make bench` run: `report.md` is the report, and `raw.jsonl`, when present, has one line per model conversation. Other local runs are not committed.
 
+## Current dbhub comparison
+
+The [2026-10-15 refresh](dbhub-refresh-2026-10-15.md) measures `main` at `0656d51`: 720 conversations, all correct, with no errors or aborts. qh used **40.2% fewer tokens per task**, with 1.5 tool calls versus dbhub's 1.6. The margin over the 40% target is small; this is one full run. Task wall time was 4.032 s for qh versus 3.982 s for dbhub.
+
+| Run | Tokens per task vs dbhub | Accuracy (qh vs dbhub) | Paired runs |
+|---|---|---|---|
+| [2026-10-15T140716](2026-10-15T140716/report.md) | 40.2% fewer | 100% vs 100% | 360 |
+
+The [two-question smoke run](2026-10-15T140415/report.md) is recorded separately and is not used for the full-run claim. The refresh note states settings, raw totals, timing differences and usage estimates.
+
+## Earlier dbhub measurements
+
 The three runs below measure `main` at e242674 (Plans 1–6 and #9). Each is a full run: 4 datasets × 30 questions × 3 runs × 2 servers, with `claude-sonnet-5-5` at effort high against dbhub 1.5.0.
 
 | Run | Tokens per task vs dbhub | Accuracy (qh vs dbhub) | Tool calls (qh vs dbhub) |

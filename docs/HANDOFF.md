@@ -6,7 +6,7 @@ For a new coding-agent session (Codex or other) taking over from Claude Code. Re
 
 - **Release base:** `main` at `854502f`, tagged `v1.0.3`. Check Git and GitHub for the current branch, PRs and CI.
 - **Released:** [v1.0.3](https://github.com/anderson-0/qh/releases/tag/v1.0.3), including Homebrew, the Postgres improvements and the MySQL work below. The release workflow passed. The native archive checksum/version, container version/labels, generated Homebrew cask checksum and official MCP registry entry were verified.
-- **Current work:** PR #21 merged the MongoDB inference allocation improvement after both CI runs passed. The user then approved free profiling of the remaining MySQL gap. Branch `codex/mysql-catalog-profile` records fresh-connection query timings and two more MCP runs; production code is unchanged. No paid run is authorized. See `bench/results/mysql-catalog-profile-2026-10-15.md` and the prior `bench/results/mongodb-inference-2026-10-15.md`.
+- **Current work:** PR #22 merged the MySQL follow-up reports after both CI runs passed. The user then authorized one paid dbhub refresh. Branch `codex/dbhub-refresh` records the smoke and full run on `main` at `0656d51`: 40.2% fewer tokens, 100% accuracy for both servers, no errors or aborts. Production code is unchanged. Recorded conversation usage gives a conservative $8.82 estimate including smoke; actual billing is not captured. See `bench/results/dbhub-refresh-2026-10-15.md`. Further paid runs need approval.
 - **External:** the Docker MCP catalog entry, [docker/mcp-registry#5680](https://github.com/docker/mcp-registry/pull/5680), waits for Docker's review. Its source is the fork `anderson-0/mcp-registry`, branch `add-qh`, file `servers/qh/server.yaml`. If Docker asks for changes, edit that branch.
 - **Third-party listing:** mcprush.com listed the image unasked as `anderson-0/qh-mcp` and emailed the user a "claim your listing" link.
   - The site is unknown, and its pages refuse automated fetches.
@@ -21,6 +21,7 @@ Most recent first:
 
 | PR | What | Notes |
 |---|---|---|
+| #22 | MySQL catalog follow-up | Merged after explicit approval; both CI runs passed. Columns remain the critical path; no further SQL rewrite justified by the measurements. |
 | #21 | MongoDB inference allocations | Merged after explicit approval; both CI runs passed. Generated samples allocate 25–26% fewer bytes; normal MCP latency improvement remains unestablished. |
 | #20 | SQLite benchmark and SQLite/MongoDB baselines | Merged after explicit approval; both CI runs passed. No engine or MCP surface changes. |
 | #19 | Release 1.0.3 notes | Merged after explicit approval; tag pushed on `main`. Release, container, Homebrew and registry jobs passed. |
@@ -39,7 +40,7 @@ Release 1.0.3 is complete. Roadmap item 2 remains open. MongoDB profiling found 
 
 The MySQL follow-up found `COLUMNS` on the critical path: 13.6 ms as the first query on a fresh MySQL connection, including connecting; 15.8 ms alongside the other catalog queries. Removing the remaining SQL sorts saves roughly 0.5–1.0 ms per isolated query but has no demonstrated end-to-end gain. Two unchanged-code MCP runs measured qh at 22.4 ms, versus Toolbox at 21.3 and 24.2 ms. The initial qh samples were 181.9–215.2 ms before the running database warmed. See [the full profile and timing limits](../bench/results/mysql-catalog-profile-2026-10-15.md).
 
-No further SQL rewrite is justified by these checks. SQLite needs no engine rewrite on current evidence. MongoDB still does more work than the rival's names-only response. Roadmap item 2's fastest-rival acceptance remains open. Any further engine change needs a new measured hypothesis; a separate first-ever catalog metric could make the initial MySQL cost visible. The next ordered item, refreshing dbhub numbers, requires explicit approval for a paid benchmark.
+No further SQL rewrite is justified by these checks. SQLite needs no engine rewrite on current evidence. MongoDB still does more work than the rival's names-only response. Roadmap item 2's fastest-rival acceptance remains open. Any further engine change needs a new measured hypothesis; a separate first-ever catalog metric could make the initial MySQL cost visible. Roadmap item 3 is now measured: the full dbhub refresh passed all criteria on 360 paired tasks, with 40.239% fewer tokens and equal 100% accuracy. Its margin over the 40% target is small, so preserve the MCP surface. The next ordered work is item 4, starting with multiple foreign keys on one column overwriting each other in schema text. Confirm a small design and add a regression test before changing the formatter.
 
 For further profiling, keep using the method that worked for Postgres:
 

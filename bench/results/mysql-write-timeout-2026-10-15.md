@@ -91,3 +91,13 @@ Both runs built qh from the current parent module. Agent runs and token counting
 | Query p95 | 12.6 / 5.5 ms | 5.6 / 5.7 ms |
 
 The qh schema samples were 210.1, 22.6, 20.2 ms and 184.9, 22.4, 23.3 ms. Three fresh processes share one database, so caches warm; medians conceal the initial cost. Toolbox connects before its timed schema call; qh's timing includes connecting. qh builds the full catalog but lists 200 tables with a pattern hint, while Toolbox lists 1,000 names. The schema medians overlap earlier qh measurements around 22.4 ms; no schema speed improvement is claimed. Query timings vary substantially and do not establish a latency win. These read/schema MCP measurements use different workloads and timing boundaries from the controlled engine probe above.
+
+
+## Final verification
+
+- `gofmt -l internal/engine/mysql/*.go` and `git diff --check`: clean.
+- Root `go vet ./...` and full `go test ./...`: pass. MySQL ran fresh in 344.538 s, including Docker cases; several unrelated packages used cached results.
+- Benchmark-module vet/full tests: pass, with cached harness tests.
+- Focused MySQL write/cancellation Docker race suite: pass in 249.244 s. Additional public row-cap/close-error race fixtures pass in 1.779 s; deterministic guard stress ran 20 repetitions.
+- Four-version conformance/cancellation/write compatibility: pass in 256.516 s. Schema and MCP golden files are unchanged; the MCP golden check passed separately.
+- Per-task reviews and a fresh whole-branch review: no remaining critical, important or minor findings. No merge or release is authorized by these checks.

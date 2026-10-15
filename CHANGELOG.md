@@ -8,6 +8,14 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 - **Homebrew.** `brew install anderson-0/tap/qh` installs qh on macOS and Linux. Each release updates the cask in [anderson-0/homebrew-tap](https://github.com/anderson-0/homebrew-tap).
 
+### Changed
+
+- **A faster first schema call on Postgres.** On 1,000 tables it takes about 23 ms instead of 99 ms. The catalog queries no longer do work per row that a new connection pays for in full, such as looking up each comment, privilege and key column on its own. The output is unchanged.
+
+### Fixed
+
+- **A foreign key to a partitioned Postgres table is listed once.** It was listed again for each partition of the referenced table.
+
 ## [1.0.2] - 2026-10-14
 
 Easier to install and to run in a container.

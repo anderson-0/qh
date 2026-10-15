@@ -13,35 +13,55 @@ import (
 const nsFilter = `n.nspname NOT IN ('pg_catalog', 'information_schema')
 	AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'`
 
+// conparentid = 0 skips the copies of a foreign key that Postgres adds for
+// each partition of the table it references.
+//
+// The queries avoid work per row, which a new connection pays for in full
+// (its catalog caches start empty); on 1,000 tables these took the first
+// schema call from about 100 ms to 25:
+//   - comments come from one join on pg_description, not obj_description or
+//     col_description per row;
+//   - key columns come back as attribute numbers that Introspect maps to
+//     names, not a subquery per key;
+//   - has_table_privilege, which loads each table's catalog entry, is skipped
+//     when the user owns a table with default privileges (relacl is null),
+//     which grant the owner SELECT;
+//   - defaults are deparsed with no relation (pg_get_expr with 0), which
+//     needs no relation cache entry; a DEFAULT cannot refer to columns. Only
+//     generated columns, whose expressions can, pass the relation.
+const descJoin = `LEFT JOIN pg_description ds ON ds.objoid = c.oid AND ds.classoid = 'pg_catalog.pg_class'::regclass AND ds.objsubid = `
+
 var (
 	relationsSQL = `SELECT n.nspname::text, c.relname::text, c.relkind::text, c.reltuples::bigint,
-		COALESCE(obj_description(c.oid, 'pg_class'), '')
+		COALESCE(ds.description, '')
 	FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	` + descJoin + `0
 	WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-		AND has_table_privilege(c.oid, 'SELECT') AND ` + nsFilter + `
+		AND CASE WHEN c.relacl IS NULL AND pg_has_role(c.relowner, 'USAGE') THEN true
+			ELSE has_table_privilege(c.oid, 'SELECT') END AND ` + nsFilter + `
 	ORDER BY 1, 2`
 
 	columnsSQL = `SELECT n.nspname::text, c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod),
 		NOT a.attnotnull,
-		CASE WHEN a.attidentity <> '' THEN 'nextval(identity)' ELSE COALESCE(pg_get_expr(d.adbin, d.adrelid), '') END,
-		COALESCE(col_description(c.oid, a.attnum), ''), a.atttypid::bigint
+		CASE WHEN a.attidentity <> '' THEN 'nextval(identity)' ELSE COALESCE(
+			CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, 0) ELSE pg_get_expr(d.adbin, d.adrelid) END, '') END,
+		COALESCE(ds.description, ''), a.atttypid::bigint, c.oid::bigint, a.attnum::int
 	FROM pg_attribute a
 	JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+	` + descJoin + `a.attnum
 	WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 		AND NOT c.relispartition AND ` + nsFilter + `
 	ORDER BY 1, 2, a.attnum`
 
 	constraintsSQL = `SELECT n.nspname::text, c.relname::text, con.contype::text, con.conname::text,
-		ARRAY(SELECT a.attname::text FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord)
-			JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum ORDER BY k.ord),
+		con.conrelid::bigint, con.conkey::int[],
 		COALESCE(fn.nspname::text, ''), COALESCE(fc.relname::text, ''),
-		ARRAY(SELECT a.attname::text FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord)
-			JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum ORDER BY k.ord)
+		con.confrelid::bigint, COALESCE(con.confkey::int[], '{}')
 	FROM pg_constraint con
 	JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN pg_class fc ON fc.oid = con.confrelid LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
-	WHERE con.contype IN ('p', 'f') AND ` + nsFilter + `
+	WHERE con.contype IN ('p', 'f') AND con.conparentid = 0 AND ` + nsFilter + `
 	ORDER BY 1, 2, 4`
 
 	indexesSQL = `SELECT n.nspname::text, c.relname::text, i.relname::text, ix.indisunique,
@@ -53,6 +73,11 @@ var (
 	ORDER BY 1, 2, 3`
 
 	enumsSQL = `SELECT e.enumtypid::bigint, e.enumlabel::text FROM pg_enum e ORDER BY e.enumtypid, e.enumsortorder`
+
+	// attnamesSQL names the columns of relations the columns query leaves
+	// out, such as a partition that a foreign key references.
+	attnamesSQL = `SELECT attrelid::bigint, attnum::int, attname::text FROM pg_attribute
+	WHERE attrelid = ANY($1::oid[]) AND attnum > 0 AND NOT attisdropped`
 )
 
 type relRow struct {
@@ -63,11 +88,14 @@ type relRow struct {
 type colRow struct {
 	ns, table, name, typ, dflt, comment string
 	nullable                            bool
-	typeOID                             int64
+	typeOID, relOID                     int64
+	attnum                              int32
 }
 
 type conRow struct {
 	ns, table, kind, name, refNS, refTable string
+	relOID, refOID                         int64
+	keys, refKeys                          []int32
 	cols, refCols                          []string
 }
 
@@ -113,7 +141,7 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 	g.Go(func() error {
 		return c.queryRows(gctx, columnsSQL, func(r pgx.Rows) error {
 			var x colRow
-			if err := r.Scan(&x.ns, &x.table, &x.name, &x.typ, &x.nullable, &x.dflt, &x.comment, &x.typeOID); err != nil {
+			if err := r.Scan(&x.ns, &x.table, &x.name, &x.typ, &x.nullable, &x.dflt, &x.comment, &x.typeOID, &x.relOID, &x.attnum); err != nil {
 				return err
 			}
 			cols = append(cols, x)
@@ -123,7 +151,7 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 	g.Go(func() error {
 		return c.queryRows(gctx, constraintsSQL, func(r pgx.Rows) error {
 			var x conRow
-			if err := r.Scan(&x.ns, &x.table, &x.kind, &x.name, &x.cols, &x.refNS, &x.refTable, &x.refCols); err != nil {
+			if err := r.Scan(&x.ns, &x.table, &x.kind, &x.name, &x.relOID, &x.keys, &x.refNS, &x.refTable, &x.refOID, &x.refKeys); err != nil {
 				return err
 			}
 			cons = append(cons, x)
@@ -154,7 +182,81 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 	if err := g.Wait(); err != nil {
 		return nil, c.classify(ctx, err)
 	}
+	cons, err := c.nameKeys(ctx, cols, cons)
+	if err != nil {
+		return nil, c.classify(ctx, err)
+	}
 	return assemble(rels, cols, cons, idxs, enums), nil
+}
+
+// nameKeys fills each constraint's column names from its attribute numbers.
+// The names come from the columns already read; a referenced relation the
+// columns query leaves out is looked up in one more query. Constraints on
+// such relations are dropped, as assemble would drop them anyway.
+func (c *conn) nameKeys(ctx context.Context, cols []colRow, cons []conRow) ([]conRow, error) {
+	names := map[int64]map[int32]string{}
+	for _, x := range cols {
+		if names[x.relOID] == nil {
+			names[x.relOID] = map[int32]string{}
+		}
+		names[x.relOID][x.attnum] = x.name
+	}
+	var missing []int64
+	seen := map[int64]bool{}
+	for _, x := range cons {
+		if x.kind == "f" && names[x.relOID] != nil && names[x.refOID] == nil && !seen[x.refOID] {
+			seen[x.refOID] = true
+			missing = append(missing, x.refOID)
+		}
+	}
+	if len(missing) > 0 {
+		rows, err := c.pool.Query(ctx, attnamesSQL, pgx.QueryExecModeExec, missing)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var rel int64
+			var num int32
+			var name string
+			if err := rows.Scan(&rel, &num, &name); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if names[rel] == nil {
+				names[rel] = map[int32]string{}
+			}
+			names[rel][num] = name
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	lookup := func(rel int64, keys []int32) ([]string, bool) {
+		out := make([]string, len(keys))
+		for i, k := range keys {
+			n, ok := names[rel][k]
+			if !ok {
+				return nil, false
+			}
+			out[i] = n
+		}
+		return out, true
+	}
+	kept := cons[:0]
+	for _, x := range cons {
+		var ok bool
+		if x.cols, ok = lookup(x.relOID, x.keys); !ok {
+			continue
+		}
+		if x.kind == "f" {
+			if x.refCols, ok = lookup(x.refOID, x.refKeys); !ok {
+				continue
+			}
+		}
+		kept = append(kept, x)
+	}
+	return kept, nil
 }
 
 func assemble(rels []relRow, cols []colRow, cons []conRow, idxs []idxRow, enums map[int64][]string) *engine.Catalog {

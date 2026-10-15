@@ -90,7 +90,8 @@ make bench ARGS="-rival toolbox-data"               # Pagila and Lendco with Too
   | Tool calls per task | 1.6 | 2.2 | 1.9 | 2.2 |
   | Tool definitions, one Postgres connection | 392 | 6,663 | 392 | 2,054 |
 
-  - The micro-benchmarks favour Toolbox. Its first schema call on 1,000 tables took 28 ms against qh's 99 ms: it lists names only and is already connected, while qh builds a catalogue with keys and foreign keys and connects first. Query latency p50 was 0.4 ms against 0.6 ms.
+  - The micro-benchmarks in that run favour Toolbox. Its first schema call on 1,000 tables took 28 ms against qh's 99 ms, and query latency p50 was 0.4 ms against 0.6 ms.
+  - qh's first schema call was then made faster: re-measured with `-skip-agent -skip-tokens`, it takes 23 ms against Toolbox's 22–26 ms. qh's figure includes connecting and a catalogue with keys and foreign keys; Toolbox lists names only and is already connected.
   - Each task was still quicker end to end with qh: 4.0 s against 4.8 s on average.
   - Lendco, the dataset with unfamiliar names, shows the largest gap. qh used 4,977 tokens per task, `toolbox` 35,604 and `toolbox-data` 22,287.
 

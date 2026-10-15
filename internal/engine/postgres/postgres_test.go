@@ -317,6 +317,100 @@ func TestPipelineRecoversAfterErrors(t *testing.T) {
 	}
 }
 
+func TestCancellationAndRecovery(t *testing.T) {
+	for _, image := range []string{"postgres:13-alpine", "postgres:17-alpine"} {
+		t.Run(image, func(t *testing.T) {
+			dsn := startPostgres(t, image)
+			_, spec := specs(dsn)
+			spec.PoolSize = 1
+			ctx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stop()
+			c, err := Engine{}.Open(ctx, spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			observer, err := pgx.Connect(ctx, dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer observer.Close(context.Background())
+			for _, kind := range []string{"context cancel", "external cancel", "statement timeout", "context deadline"} {
+				t.Run(kind, func(t *testing.T) {
+					qctx, cancel := context.WithCancel(ctx)
+					defer cancel()
+					opts := engine.QueryOpts{MaxRows: 1, Timeout: 5 * time.Second}
+					want := qerr.QueryError
+					switch kind {
+					case "statement timeout":
+						opts.Timeout = 100 * time.Millisecond
+						want = qerr.Timeout
+					case "context deadline":
+						var deadlineCancel context.CancelFunc
+						qctx, deadlineCancel = context.WithTimeout(qctx, 100*time.Millisecond)
+						defer deadlineCancel()
+						want = qerr.Timeout
+					}
+					done := make(chan error, 1)
+					go func() {
+						_, err := c.Query(qctx, "SELECT pg_sleep(10)", opts)
+						done <- err
+					}()
+					if want == qerr.QueryError {
+						// Wait for the actual query to sleep before canceling it.
+						// The observer is outside the one-connection engine pool.
+						var pid int
+						for {
+							err := observer.QueryRow(ctx, `SELECT pid FROM pg_stat_activity
+WHERE application_name = 'qh' AND state = 'active' AND wait_event = 'PgSleep'`).Scan(&pid)
+							if err == nil {
+								break
+							}
+							if !errors.Is(err, pgx.ErrNoRows) {
+								t.Fatal(err)
+							}
+							select {
+							case err := <-done:
+								t.Fatalf("query ended before cancellation: %v", err)
+							case <-ctx.Done():
+								t.Fatal(ctx.Err())
+							case <-time.After(10 * time.Millisecond):
+							}
+						}
+						if kind == "context cancel" {
+							cancel()
+						} else {
+							var sent bool
+							if err := observer.QueryRow(ctx, "SELECT pg_cancel_backend($1)", pid).Scan(&sent); err != nil || !sent {
+								t.Fatalf("cancel request sent = %v: %v", sent, err)
+							}
+						}
+					}
+					var queryErr error
+					select {
+					case queryErr = <-done:
+					case <-ctx.Done():
+						t.Fatal(ctx.Err())
+					}
+					var qe *qerr.Error
+					if !errors.As(queryErr, &qe) || qe.Category != want {
+						t.Errorf("query error = %v; want %s", queryErr, want)
+					} else if want == qerr.QueryError && (qe.Hint != "" || strings.Contains(qe.Message, "timeout")) {
+						t.Errorf("cancellation contains timeout advice: %v", queryErr)
+					}
+					res, err := c.Query(ctx, "SELECT 1", engine.QueryOpts{MaxRows: 1, Timeout: 5 * time.Second})
+					if err != nil {
+						t.Fatalf("query after cancellation: %v", err)
+					}
+					if len(res.Rows) != 1 || res.Rows[0][0].Text != "1" {
+						t.Fatalf("query after cancellation = %+v", res)
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestIntrospectKeysAndComments covers what Introspect resolves itself: key
 // columns by attribute number (shifted by a dropped column, listed out of
 // column order, or on a partition that only a foreign key reaches) and

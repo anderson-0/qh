@@ -1,6 +1,6 @@
 # MySQL write cancellation on the server
 
-Status: written spec approved by the user after commit `65621f1`; the [implementation plan](../plans/2026-10-15-qh-mysql-write-timeout.md) awaits review. Base: `main` at `99b4c39` (PR #27 merged). This document describes intended behavior, not an implemented or measured fix.
+Status: written spec approved by the user after commit `65621f1`; the [implementation plan](../plans/2026-10-15-qh-mysql-write-timeout.md) was approved at `c5fbe91`. Implementation is on `codex/mysql-write-timeout`, pending final checks and review. Base: `main` at `99b4c39` (PR #27 merged). This document defines the contract; [the report](../../../bench/results/mysql-write-timeout-2026-10-15.md) records observed behavior, overhead and limits.
 
 ## Goal and scope
 

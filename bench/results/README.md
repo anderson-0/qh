@@ -36,3 +36,7 @@ The [2026-10-15 measurements](mysql-cold-schema-2026-10-15.md) compare old and n
 ## SQLite and MongoDB cold schema
 
 The [2026-10-15 checks](sqlite-mongodb-cold-schema-2026-10-15.md) record two free runs per engine. SQLite takes 16.0–24.3 ms with qh versus Toolbox's 32.3–34.4 ms on 1,000 tables. MongoDB takes 245.9–248.7 ms with qh versus 33.0–33.5 ms for names-only discovery; qh also samples documents and infers schema. The note links all four reports and explains the differences in work and cache state. No model calls were made.
+
+## MongoDB inference allocations
+
+The [2026-10-15 profiling report](mongodb-inference-2026-10-15.md) separates MongoDB catalog commands from local inference and includes a workload with 999 verified references. Counting path presence directly cuts inference allocation bytes by 25–26% in the generated samples. Controlled introspection medians improve by 5.8–7.5%; the two normal MCP runs overlap the earlier baseline, so they do not establish an overall latency win. Output comparisons and an independent review found no differences. No model calls were made.

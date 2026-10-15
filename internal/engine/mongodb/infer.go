@@ -33,6 +33,7 @@ type pathStat struct {
 	types   map[string]int  // per document; an array counts as "array"
 	elems   map[string]int  // element types of the path's arrays, across documents
 	present int             // documents where the path holds a non-null value
+	lastDoc int             // last document counted in present (one-based)
 	strs    map[string]bool // distinct strings, up to maxEnumValues+1
 	nonStr  bool
 	long    bool // a string longer than maxEnumLen was seen
@@ -56,12 +57,8 @@ func infer(docs []bson.Raw) *inferred {
 		}
 		return s
 	}
-	for _, d := range docs {
-		present := map[string]bool{}
-		walk(d, "", 1, stat, present)
-		for p := range present {
-			stats[p].present++
-		}
+	for i, d := range docs {
+		walk(d, "", 1, stat, i+1)
 	}
 	out := &inferred{samples: map[string][]bson.RawValue{}, types: map[string]string{}}
 	for i, p := range order {
@@ -106,7 +103,7 @@ func (s *pathStat) rendered() map[string]int {
 	return out
 }
 
-func walk(d bson.Raw, prefix string, depth int, stat func(string) *pathStat, present map[string]bool) {
+func walk(d bson.Raw, prefix string, depth int, stat func(string) *pathStat, doc int) {
 	elems, _ := d.Elements()
 	for _, e := range elems {
 		p := prefix + e.Key()
@@ -115,7 +112,10 @@ func walk(d bson.Raw, prefix string, depth int, stat func(string) *pathStat, pre
 		if v.Type == bson.TypeNull || v.Type == bson.TypeUndefined {
 			continue
 		}
-		present[p] = true
+		if s.lastDoc != doc {
+			s.present++
+			s.lastDoc = doc
+		}
 		if v.Type == bson.TypeArray {
 			s.types["array"]++
 			vals, _ := v.Array().Values()
@@ -141,14 +141,14 @@ func walk(d bson.Raw, prefix string, depth int, stat func(string) *pathStat, pre
 		switch v.Type {
 		case bson.TypeEmbeddedDocument:
 			if depth < maxPathDepth {
-				walk(v.Document(), p+".", depth+1, stat, present)
+				walk(v.Document(), p+".", depth+1, stat, doc)
 			}
 		case bson.TypeArray:
 			if depth < maxPathDepth {
 				vals, _ := v.Array().Values()
 				for _, x := range vals {
 					if x.Type == bson.TypeEmbeddedDocument {
-						walk(x.Document(), p+"[].", depth+1, stat, present)
+						walk(x.Document(), p+"[].", depth+1, stat, doc)
 					}
 				}
 			}

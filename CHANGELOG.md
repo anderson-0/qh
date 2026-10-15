@@ -8,6 +8,10 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 - **SQLite cold-schema benchmark.** `-micro-engine sqlite` measures a generated 1,000-table SQLite schema and query latency on Chinook. It runs without Docker when agent runs and token counting are skipped.
 
+### Changed
+
+- **MongoDB schema inference allocates less.** Path statistics count each document directly instead of building a presence map per document. Sampled fields, nullability, enums and references are unchanged.
+
 ## [1.0.3] - 2026-10-15
 
 ### Added

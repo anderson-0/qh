@@ -265,3 +265,38 @@ func rawBinary(t *testing.T, sub byte, data []byte) []byte {
 	t.Helper()
 	return rawDoc(t, bson.D{{Key: "v", Value: bson.Binary{Subtype: sub, Data: data}}}).Lookup("v").Value
 }
+
+// Presence counts documents, even when a path occurs many times in an array.
+// Null, undefined and missing values must not carry presence to the next document.
+func TestInferenceSparseRepeatedPaths(t *testing.T) {
+	var docs []bson.Raw
+	for i := 0; i < 60; i++ {
+		var items bson.A
+		switch {
+		case i < 49:
+			items = bson.A{bson.D{{Key: "user_id", Value: int32(1)}, {Key: "status", Value: "open"}}, bson.D{{Key: "user_id", Value: int32(2)}, {Key: "status", Value: "closed"}}}
+		case i == 49:
+			items = bson.A{bson.D{{Key: "user_id", Value: nil}, {Key: "status", Value: bson.Undefined{}}}}
+		case i == 50:
+			items = bson.A{bson.D{{Key: "status", Value: nil}}}
+		default:
+			items = bson.A{}
+		}
+		docs = append(docs, rawDoc(t, bson.D{{Key: "items", Value: items}}))
+	}
+	got := infer(docs)
+	f := fieldMap(got.fields)
+	if f["items"].Nullable || !f["items[].user_id"].Nullable || !f["items[].status"].Nullable {
+		t.Fatalf("presence: %+v", got.fields)
+	}
+	if f["items[].status"].Enum != nil {
+		t.Fatalf("49 documents must not produce enum values: %v", f["items[].status"].Enum)
+	}
+	samples := got.samples["items[].user_id"]
+	if len(samples) != 2 || samples[0].Int32() != 1 || samples[1].Int32() != 2 {
+		t.Fatalf("reference samples: %v", samples)
+	}
+	if got.types["items[].user_id"] != "int" || f["items[].status"].Type != "string" {
+		t.Fatalf("types: %+v", got.fields)
+	}
+}

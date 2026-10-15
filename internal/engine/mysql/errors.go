@@ -38,8 +38,17 @@ func classify(ctx context.Context, err error) error {
 	var me *gomysql.MySQLError
 	if errors.As(err, &me) {
 		switch me.Number {
-		case 3024, 1969, 1317: // max_execution_time, max_statement_time, interrupted
+		case 3024, 1969: // max_execution_time, max_statement_time
+			// The server's known timeout takes precedence over a later
+			// context cancellation during transaction cleanup.
 			return timeoutErr(err)
+		case 1317: // KILL QUERY also reports interrupted, without a timeout.
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return qerr.Wrap(qerr.QueryError, "query canceled", err)
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return timeoutErr(err)
+			}
 		case 1792: // read-only transaction
 			return readOnlyErr()
 		case 1290: // "running with the --read-only option"; other options (e.g. --secure-file-priv) share the code
@@ -67,6 +76,9 @@ func classify(ctx context.Context, err error) error {
 			return connectErr(err)
 		}
 		return qerr.Wrap(qerr.QueryError, me.Message, err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return qerr.Wrap(qerr.QueryError, "query canceled", err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return timeoutErr(err)

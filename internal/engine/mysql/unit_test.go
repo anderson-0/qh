@@ -3,7 +3,10 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"reflect"
 	"strings"
@@ -170,7 +173,7 @@ func TestClassify(t *testing.T) {
 	if e.Category != qerr.QueryError || e.UnknownTable != "userz" {
 		t.Errorf("1146: %#v", e)
 	}
-	for _, n := range []uint16{3024, 1969, 1317} {
+	for _, n := range []uint16{3024, 1969} {
 		if c := cat(classify(ctx, &gomysql.MySQLError{Number: n, Message: "interrupted"})); c != qerr.Timeout {
 			t.Errorf("%d: %v", n, c)
 		}
@@ -193,6 +196,63 @@ func TestClassify(t *testing.T) {
 	}
 	if c := cat(connectErr(context.DeadlineExceeded)); c != qerr.ConnectionFailed {
 		t.Errorf("connect deadline: %v", c)
+	}
+}
+
+func TestClassifyCancellation(t *testing.T) {
+	active := context.Background()
+	canceled, cancel := context.WithCancel(active)
+	cancel()
+	expired, stop := context.WithDeadline(active, time.Unix(1, 0))
+	defer stop()
+	interrupted := &gomysql.MySQLError{Number: 1317, Message: "Query execution was interrupted"}
+	mysqlTimeout := &gomysql.MySQLError{Number: 3024, Message: "maximum statement execution time exceeded"}
+	mariaTimeout := &gomysql.MySQLError{Number: 1969, Message: "max_statement_time exceeded"}
+	for _, tt := range []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		category qerr.Category
+		message  string
+		hint     string
+	}{
+		{"context canceled", active, context.Canceled, qerr.QueryError, "query canceled", ""},
+		{"wrapped cancellation", active, fmt.Errorf("reading rows: %w", context.Canceled), qerr.QueryError, "query canceled", ""},
+		{"network cancellation", active, &net.OpError{Op: "read", Net: "tcp", Err: context.Canceled}, qerr.QueryError, "query canceled", ""},
+		{"closed socket after cancel", canceled, io.EOF, qerr.QueryError, "query canceled", ""},
+		{"invalid connection after cancel", canceled, gomysql.ErrInvalidConn, qerr.QueryError, "query canceled", ""},
+		{"bad connection after cancel", canceled, driver.ErrBadConn, qerr.QueryError, "query canceled", ""},
+		{"client interruption", canceled, interrupted, qerr.QueryError, "query canceled", ""},
+		{"external interruption", active, interrupted, qerr.QueryError, interrupted.Message, ""},
+		{"wrapped interruption", active, fmt.Errorf("query: %w", interrupted), qerr.QueryError, interrupted.Message, ""},
+		{"localized interruption", active, &gomysql.MySQLError{Number: 1317, Message: "consulta interrumpida"}, qerr.QueryError, "consulta interrumpida", ""},
+		{"deadline interruption", expired, interrupted, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"mysql timeout", active, mysqlTimeout, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"mariadb timeout", active, mariaTimeout, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"mysql timeout before late cancel", canceled, mysqlTimeout, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"mariadb timeout before late cancel", canceled, mariaTimeout, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"context deadline", active, context.DeadlineExceeded, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"deadline socket", expired, io.EOF, qerr.Timeout, "query exceeded the connection timeout", "Add WHERE/LIMIT or narrow the range"},
+		{"server error after cancel", canceled, &gomysql.MySQLError{Number: 1064, Message: "syntax error"}, qerr.QueryError, "syntax error", ""},
+		{"closed socket", active, io.EOF, qerr.ConnectionFailed, "lost the connection to the database: EOF", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := classify(tt.ctx, tt.err)
+			var got *qerr.Error
+			if !errors.As(err, &got) || got.Category != tt.category || got.Message != tt.message || got.Hint != tt.hint {
+				t.Fatalf("classified = %#v; want %s, %q, hint %q", got, tt.category, tt.message, tt.hint)
+			}
+			if !errors.Is(err, tt.err) {
+				t.Fatal("underlying error was lost")
+			}
+		})
+	}
+	prior := qerr.New(qerr.Busy, "all connections are in use")
+	if got := classify(canceled, prior); got != prior {
+		t.Fatalf("classified error changed: %v", got)
+	}
+	if got := qerr.From(connectErr(context.Canceled)); got.Category != qerr.ConnectionFailed {
+		t.Fatalf("connect cancellation category = %s", got.Category)
 	}
 }
 

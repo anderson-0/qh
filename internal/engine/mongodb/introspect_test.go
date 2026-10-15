@@ -2,6 +2,8 @@ package mongodb
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -312,6 +314,86 @@ func TestCutByTimeLimit(t *testing.T) {
 	} {
 		if got := cutByTimeLimit(tc.parent, tc.err); got != tc.want {
 			t.Errorf("%s: %v", tc.name, got)
+		}
+	}
+}
+
+// A chain exercises verification and incoming links across many targets,
+// including repeated nested paths and numerically compatible ID types.
+func TestIntrospectGeneratedReferences(t *testing.T) {
+	uri := mongoURI(t, mongo8)
+	db := "reference_chain"
+	ctx := context.Background()
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Disconnect(ctx)
+	d := client.Database(db)
+	t.Cleanup(func() {
+		c, e := mongo.Connect(options.Client().ApplyURI(uri))
+		if e == nil {
+			defer c.Disconnect(ctx)
+			_ = c.Database(db).Drop(ctx)
+		}
+	})
+	const n = 32
+	for i := 0; i < n; i++ {
+		docs := make([]any, 100)
+		for k := range docs {
+			var id any = int32(k + 1)
+			if i%2 == 1 {
+				id = int64(k + 1)
+			}
+			doc := bson.D{{Key: "_id", Value: id}, {Key: "status", Value: []string{"new", "open"}[k%2]}}
+			if i > 0 {
+				field := fmt.Sprintf("t%04d_id", i-1)
+				doc = append(doc, bson.E{Key: field, Value: int32(k + 1)}, bson.E{Key: "items", Value: bson.A{bson.D{{Key: field, Value: int32(k + 1)}}, bson.D{{Key: field, Value: int32(k + 1)}}}})
+			}
+			docs[k] = doc
+		}
+		if _, err := d.Collection(fmt.Sprintf("t%04d", i)).InsertMany(ctx, docs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := openSpec(t, engine.ConnSpec{Engine: "mongodb", DSN: withDB(uri, db), Mode: engine.ModeRO, PoolSize: 5})
+	cat, err := c.Introspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Count() != n {
+		t.Fatalf("objects: %d", cat.Count())
+	}
+	for i, o := range cat.Namespaces[0].Objects {
+		if o.Name != fmt.Sprintf("t%04d", i) || o.RowEstimate != 100 {
+			t.Fatalf("object %d: %+v", i, o)
+		}
+		if i == 0 {
+			if len(o.ForeignKeys) != 0 {
+				t.Fatalf("root references: %+v", o.ForeignKeys)
+			}
+		} else {
+			field := fmt.Sprintf("t%04d_id", i-1)
+			want := []engine.ForeignKey{
+				{Namespace: db, Object: o.Name, Columns: []string{field}, RefNamespace: db, RefObject: fmt.Sprintf("t%04d", i-1), RefColumns: []string{"_id"}},
+				{Namespace: db, Object: o.Name, Columns: []string{"items[]." + field}, RefNamespace: db, RefObject: fmt.Sprintf("t%04d", i-1), RefColumns: []string{"_id"}},
+			}
+			if !reflect.DeepEqual(o.ForeignKeys, want) {
+				t.Fatalf("%s references: %+v", o.Name, o.ForeignKeys)
+			}
+			if f := fieldMap(o.Fields)["items[]."+field]; f.Nullable || f.Type != "int" {
+				t.Fatalf("%s nested field: %+v", o.Name, f)
+			}
+		}
+		wantIncoming := 2
+		if i == n-1 {
+			wantIncoming = 0
+		}
+		if len(o.ReferencedBy) != wantIncoming {
+			t.Fatalf("%s incoming references: %+v", o.Name, o.ReferencedBy)
+		}
+		if e := fieldMap(o.Fields)["status"].Enum; !reflect.DeepEqual(e, []string{"new", "open", "…"}) {
+			t.Fatalf("%s enum: %v", o.Name, e)
 		}
 	}
 }

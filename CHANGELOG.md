@@ -6,6 +6,8 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 ### Added
 
+- **Password-only connection edits.** `qh conn edit NAME --password-stdin` replaces or clears qh's stored inline database password for PostgreSQL, MySQL, MariaDB and MongoDB. Local and remote modes preserve the other connection settings and test before saving unless `--skip-test` is set. REST patches accept a transient `password` field; passwords stay hidden in responses.
+
 - **SQLite cold-schema benchmark.** `-micro-engine sqlite` measures a generated 1,000-table SQLite schema and query latency on Chinook. It runs without Docker when agent runs and token counting are skipped.
 
 ### Changed
@@ -14,11 +16,14 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 ### Fixed
 
+- **Master-key creation can fall back when hard links are unsupported.** Linux, macOS and Windows try an exclusive rename of the complete key. Existing keys are never replaced, including during concurrent startup. Creation fails if both methods are unsupported.
 - **MySQL writes stop on timeout or cancellation.** A verified control connection interrupts protected read-write statements, including stored programs and side-effecting functions. Confirmed InnoDB rollback releases their locks before returning; unconfirmed interruption/rollback adds a hint to check before retrying. This can use twice `pool_size` connections and add up to ten seconds for interruption and cleanup. Normal read-write calls also cost more; see the [measurements and proxy, advisory-lock and transaction limits](bench/results/mysql-write-timeout-2026-10-15.md).
 - **MySQL/MariaDB cancellation has consistent errors.** Explicit and wrapped cancellation returns `error[query_error]: query canceled`. Server interruption `1317` keeps its message as `query_error` unless a context deadline establishes a timeout. Server timeout codes `3024` and `1969` still return `timeout`, including after late cancellation.
 - **Postgres cancellation is distinguished from timeout.** Explicit cancellation returns `query_error` without timeout advice. Deadlines and recognized statement timeouts still return `timeout`; other SQLSTATE `57014` responses retain the server message as `query_error`. Unrecognized localized messages use that fallback.
 - **MCP argument errors use `error[invalid]`.** Missing fields, wrong types and integer overflow return a single-line tool error with the SDK's validation detail. Existing service error categories and protocol errors are preserved.
+- **Local-only commands respect QH_SERVER.** `mcp`, `serve`, `store copy` and `masterkey rotate` reject an environment-selected remote server before opening local files.
 - **Schema text retains every foreign key on a column.** Overviews group multiple targets as `owner_id→{users.id,archive.users.id}`; details list them as `→ users.id, archive.users.id`. A later reference no longer hides an earlier one, including in folded document fields.
+- **Connection opener panics no longer strand the pool.** Waiting requests receive a safe connection failure, reserved capacity is released, and normal retry backoff applies.
 
 ## [1.0.3] - 2026-10-15
 

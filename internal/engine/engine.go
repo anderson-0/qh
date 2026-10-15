@@ -132,6 +132,15 @@ type SQLEngine interface {
 	Dialect() sqlx.Dialect
 }
 
+// PasswordDSNSetter is an optional engine capability for editing an inline
+// database password. SetPassword is a pure string transformation: it must not
+// connect, read environment variables or files, or resolve references. An empty
+// password clears every inline database-password slot, preserving driver fallback
+// policy. Errors must not include either input.
+type PasswordDSNSetter interface {
+	SetPassword(dsn, password string) (string, error)
+}
+
 // ServerDSNChecker is implemented by engines that restrict what a connection
 // string may contain in server mode. CheckServerDSN must not connect or read
 // files, and its error must not quote dsn.

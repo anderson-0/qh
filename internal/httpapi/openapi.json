@@ -35,6 +35,7 @@
         "max_rows": { "type": "integer" }, "timeout_ms": { "type": "integer" }, "pool_size": { "type": "integer" },
         "allowed_namespaces": { "type": "array", "items": { "type": "string" } } } },
       "ConnectionPatch": { "type": "object", "additionalProperties": false, "properties": {
+        "password": { "type": ["string", "null"], "description": "Replace the inline database password for PostgreSQL, MySQL, MariaDB or MongoDB; SQLite is unsupported. Omitted or null leaves it unchanged; an empty string clears it. Whitespace is preserved. Applies to a new dsn in the same patch when supplied. The resulting dsn_ref and password_ref must be empty. Passwords are never returned." },
         "tls": { "oneOf": [{ "$ref": "#/components/schemas/TLS" }, { "type": "null" }], "description": "An object replaces the TLS settings; null removes them" },
         "dsn_ref": { "type": "string" },
         "password_ref": { "type": "string", "description": "Empty removes it" },

@@ -13,3 +13,15 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: CGO_ENABLED=0 go build -o bin/qh ./cmd/qh
+  secret-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+      - run: go test -race -count=1 ./internal/secret

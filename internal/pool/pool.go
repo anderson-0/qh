@@ -128,7 +128,7 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 		m.mu.Unlock()
 		closeAll(toClose)
 
-		conn, err := m.open(ctx, spec)
+		conn, err := m.openConn(ctx, spec)
 
 		m.mu.Lock()
 		delete(m.opening, key)
@@ -156,6 +156,23 @@ func (m *Manager) Get(ctx context.Context, spec engine.ConnSpec) (engine.Conn, f
 		closeAll(late)
 		return conn, m.releaser(h), nil
 	}
+}
+
+// openConn converts opener panics into failures so Get can release its pending
+// reservation and wake waiters. Panic values may contain secrets: discard them.
+func (m *Manager) openConn(ctx context.Context, spec engine.ConnSpec) (conn engine.Conn, err error) {
+	completed := false
+	defer func() {
+		if !completed {
+			// A nil panic can produce a nil recover value with panicnil=1.
+			_ = recover()
+			conn = nil
+			err = qerr.New(qerr.ConnectionFailed, "could not open the database connection")
+		}
+	}()
+	conn, err = m.open(ctx, spec)
+	completed = true
+	return
 }
 
 // retire marks h as replaced and returns its conn if nobody is using it. A

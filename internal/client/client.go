@@ -222,6 +222,9 @@ func (c *Client) CreateConnection(ctx context.Context, in core.ConnInput, test b
 
 func (c *Client) UpdateConnection(ctx context.Context, name string, p core.ConnPatch, test bool) (*core.ConnInfo, *core.TestResult, error) {
 	body := map[string]any{}
+	if p.Password != nil {
+		body["password"] = *p.Password
+	}
 	if p.DSN != nil {
 		body["dsn"] = *p.DSN
 	}

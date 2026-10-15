@@ -109,11 +109,19 @@ func ParseKey(b64 string) ([]byte, error) {
 }
 
 // LoadOrCreateKeyFile reads a base64 master key from path. When path does not
-// exist it generates a key and publishes it with mode 0600: the key is written
-// to a temp file in the same directory, fsynced, then hard-linked to path, so
-// readers never see a partial file. An existing file is never replaced.
+// exist it generates a key in a same-directory temp file (mode 0600 on POSIX),
+// syncs and closes it, then publishes it without replacement. It uses a hard
+// link, or a native exclusive rename when links are unsupported, so readers
+// never see a partial file. Windows preserves the temp file security descriptor.
+// An existing file is never replaced.
 func LoadOrCreateKeyFile(path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
+	return loadOrCreateKeyFile(path, func(temp, path string) error {
+		return publishKeyFile(temp, path, os.Link, renameKeyFileNoReplace)
+	})
+}
+
+func loadOrCreateKeyFile(path string, publish func(string, string) error) ([]byte, error) {
+	b, err := readKeyFile(path)
 	if err == nil {
 		return parseKeyFile(path, b)
 	}
@@ -142,10 +150,10 @@ func LoadOrCreateKeyFile(path string) ([]byte, error) {
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}
-	if err := os.Link(tmpName, path); err != nil {
+	if err := publish(tmpName, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			// Another process published a key first; use theirs.
-			existing, rerr := os.ReadFile(path)
+			existing, rerr := readKeyFile(path)
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -165,7 +173,7 @@ func parseKeyFile(path string, b []byte) ([]byte, error) {
 	return key, nil
 }
 
-// syncDir fsyncs a directory so a newly linked key survives a crash. It is
+// syncDir fsyncs a directory so a newly published key survives a crash. It is
 // best effort: platforms that cannot sync directories are not an error.
 func syncDir(dir string) {
 	d, err := os.Open(dir)

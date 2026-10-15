@@ -61,3 +61,40 @@ func TestOpenAPIIsServedPublicly(t *testing.T) {
 		t.Fatalf("%d %s", r.status, r.header.Get("Content-Type"))
 	}
 }
+
+// Validate the request/response boundary in the served schema, so generated
+// clients can send null or empty strings without exposing response passwords.
+func TestOpenAPIPasswordPatch(t *testing.T) {
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				AdditionalProperties *bool                      `json:"additionalProperties"`
+				Properties           map[string]json.RawMessage `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(openapiDoc, &doc); err != nil {
+		t.Fatal(err)
+	}
+	patch := doc.Components.Schemas["ConnectionPatch"]
+	if patch.AdditionalProperties == nil || *patch.AdditionalProperties {
+		t.Fatal("patch schema no longer rejects unknown fields")
+	}
+	raw, ok := patch.Properties["password"]
+	if !ok {
+		t.Fatal("ConnectionPatch does not document password")
+	}
+	var password struct {
+		Type []string `json:"type"`
+	}
+	if json.Unmarshal(raw, &password) != nil || len(password.Type) != 2 {
+		t.Fatal("patch password must allow string and null")
+	}
+	sort.Strings(password.Type)
+	if password.Type[0] != "null" || password.Type[1] != "string" {
+		t.Fatal("patch password must allow string and null")
+	}
+	if _, present := doc.Components.Schemas["Connection"].Properties["password"]; present {
+		t.Fatal("response schema exposes password")
+	}
+}

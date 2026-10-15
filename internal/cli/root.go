@@ -71,13 +71,21 @@ func errStoreWithServer() error {
 		WithHint("--server/QH_SERVER talks to a qh server; --store/QH_STORE_DSN opens a store directly")
 }
 
-// refuseRemote stops a local-only command from ignoring --server.
-func refuseRemote(cmd *cobra.Command) error {
+// serverOf returns the nonempty --server value, falling back to $QH_SERVER.
+func serverOf(cmd *cobra.Command) string {
 	if s, _ := cmd.Flags().GetString("server"); s != "" {
+		return s
+	}
+	return os.Getenv("QH_SERVER")
+}
+
+// refuseRemote stops a local-only command from ignoring --server or QH_SERVER.
+func refuseRemote(cmd *cobra.Command) error {
+	if serverOf(cmd) != "" {
 		if storeDSN() != "" {
 			return errStoreWithServer()
 		}
-		return qerr.New(qerr.Invalid, cmd.CommandPath()+" runs locally only").WithHint("Remove --server")
+		return qerr.New(qerr.Invalid, cmd.CommandPath()+" runs locally only").WithHint("Remove --server and QH_SERVER")
 	}
 	return nil
 }
@@ -97,15 +105,12 @@ func newRoot(version string) *cobra.Command {
 	pf.StringVar(&home, "home", "", "data directory (default $QH_HOME, else $XDG_CONFIG_HOME/qh or ~/.config/qh)")
 	pf.String("workspace", store.DefaultWorkspace, "workspace to act on (default $QH_WORKSPACE, else default)")
 	pf.StringVar(&storeFlag, "store", "", "postgres:// URL of a shared store (default $QH_STORE_DSN, else the SQLite file in the data directory)")
-	var server, key string
-	pf.StringVar(&server, "server", "", "qh server URL; commands then use its REST API (default $QH_SERVER)")
+	var key string
+	pf.String("server", "", "qh server URL; commands then use its REST API (default $QH_SERVER)")
 	pf.StringVar(&key, "key", "", "API key for --server (default $QH_KEY)")
 	with := func(fn func(cmd *cobra.Command, b backend, args []string) error) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, args []string) error {
-			srv := server
-			if srv == "" {
-				srv = os.Getenv("QH_SERVER")
-			}
+			srv := serverOf(cmd)
 			if srv != "" && storeDSN() != "" {
 				return errStoreWithServer()
 			}

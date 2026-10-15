@@ -1,6 +1,6 @@
 # qh roadmap
 
-Last updated 2026-10-15, after PR #28 merged at `main` `61831b0`. The latest published release remains v1.0.3 (`854502f`). This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
+Last updated 2026-10-15, after PRs #30–#33 merged; `main` is at `c1de372`. The latest published release remains v1.0.3 (`854502f`). This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
 
 **The goal:** beat other database MCP servers on tokens and speed with equal accuracy, measured by `bench/`. Then make qh easy to find and install.
 
@@ -12,7 +12,7 @@ Last updated 2026-10-15, after PR #28 merged at `main` `61831b0`. The latest pub
 | 1.0.1 | Hardening: store reads survive restarts and failovers, a listener liveness ping, outage logs, SSH key parsing limits, a note for MongoDB databases that could not be listed |
 | 1.0.2 | `QH_DSN` single-connection mode for containers; a listing in the official MCP registry; setup docs for eight editors |
 | 1.0.3 | A Homebrew cask (`brew install anderson-0/tap/qh`), a 4× faster first schema call on Postgres, a Postgres foreign key no longer duplicated per partition, and less work in MySQL schema discovery |
-| Unreleased | SQLite cold-schema benchmark and engine speed checks; less MongoDB inference allocation; all foreign keys retained per column; MCP argument-error formatting; Postgres/MySQL cancellation classification; MySQL server-side write cancellation |
+| Unreleased | SQLite cold-schema benchmark and engine speed checks; less MongoDB inference allocation; all foreign keys retained per column; MCP argument-error formatting; Postgres/MySQL cancellation classification; MySQL server-side write cancellation; pool-opener panic recovery; portable master-key publication; `QH_SERVER` local-only checks; password-only connection edits |
 
 ### Benchmarks so far
 
@@ -48,13 +48,13 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
    - Fixed: MCP SDK argument-validation and decoding errors use single-line `error[invalid]` tool results. Existing service categories, protocol errors and tool definitions are preserved.
    - Fixed: Postgres explicit cancellation returns `query_error` without timeout advice. Deadlines and recognized statement timeouts retain `timeout`; other `57014` messages, including unrecognized localized messages, retain the server detail as `query_error`. PG13/17 tests cover cancellation, timeouts and pool recovery.
    - Fixed: MySQL/MariaDB explicit and wrapped cancellation uses `query_error`, consistent with Postgres. Server interruption `1317` retains its message as `query_error` unless a context deadline establishes a timeout; codes `3024`/`1969` retain `timeout` even after late cancellation. Bare `context.Canceled` already had the intended category; its message is now consistent.
-5. **Robustness:**
+5. **Done: robustness fixes.**
    - Done: [PR #28](https://github.com/anderson-0/qh/pull/28) merged at `61831b0` after explicit approval. Both PR CI runs (6m8s, 7m24s) and post-merge CI passed: MySQL server-side write interruption with observed InnoDB rollback/lock recovery. The [approved spec](../specs/2026-10-15-qh-mysql-write-timeout-design.md) and [plan](2026-10-15-qh-mysql-write-timeout.md) preserve MariaDB/read-only paths and the MCP surface. [Measurements](../../../bench/results/mysql-write-timeout-2026-10-15.md) show higher normal read-write latency and up to twice the pool connections; proxy/advisory-lock/transaction limits are explicit.
-   - Next: recover from a panic in the pool opener so it cannot wedge that connection until restart.
-   - The first run fails on filesystems without hard links (`master.key` is published with `os.Link`).
-   - `QH_SERVER` is not honoured by the local-only check in the CLI.
-   - `conn edit` has no `--password-stdin`.
-   - Execution: assess the four remaining robustness fixes independently. Pool-opener recovery, master-key publication and CLI behavior can be investigated in parallel. The two CLI items share command wiring and tests, so implement them in separate branches with coordination. Each item gets a short approved design, tests first and its own reviewed PR. Merge, release and paid-run approvals remain separate.
+   - Done: [PR #30](https://github.com/anderson-0/qh/pull/30), merged at `992cd5d`. Local-only CLI commands respect `QH_SERVER` and reject remote mode before opening local files.
+   - Done: [PR #31](https://github.com/anderson-0/qh/pull/31), merged at `d2797ac`. An opener panic releases waiting requests and reserved pool capacity, returns a safe connection failure and uses normal retry backoff.
+   - Done: [PR #32](https://github.com/anderson-0/qh/pull/32), merged at `21b463d`. When hard links are unsupported, master-key creation uses an exclusive rename on Linux, macOS and Windows. Existing keys are never replaced; creation fails if neither method is supported. Native checks passed on all three operating systems.
+   - Done: [PR #33](https://github.com/anderson-0/qh/pull/33), merged at `c1de372`. `conn edit --password-stdin` replaces or clears qh's stored inline password locally or through `--server`, preserving other settings. PostgreSQL, MySQL/MariaDB and MongoDB are supported; SQLite rejects password edits. Edits test before saving unless `--skip-test` is set. This changes the stored credential, not the database account.
+   - All four PRs merged after explicit approval, with passing PR CI and independent reviews. Full Docker-backed password-edit tests cover real-engine authentication rotation and rollback. The MCP surface is unchanged. Combined post-merge CI passed, including native Linux/macOS/Windows key-publication checks. All fixes remain unreleased; the documentation refresh in [PR #29](https://github.com/anderson-0/qh/pull/29) stays open for review.
 6. **Security hardening.** There are open server-mode items. Their details are kept out of this public repo, in the maintainer's local handoff notes. Report anything new through `SECURITY.md`.
 7. **Repository hygiene** (ask the user):
    - a tag ruleset for `v*`;

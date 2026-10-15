@@ -128,10 +128,10 @@ func columnList(o *engine.Object) string {
 	for _, c := range o.PrimaryKey {
 		pk[c] = true
 	}
-	fks := map[string]engine.ForeignKey{}
+	fks := map[string][]engine.ForeignKey{}
 	for _, fk := range o.ForeignKeys {
 		if len(fk.Columns) == 1 && len(fk.RefColumns) == 1 {
-			fks[fk.Columns[0]] = fk
+			fks[fk.Columns[0]] = append(fks[fk.Columns[0]], fk)
 		}
 	}
 	// Only sampled (Inferred) fields fold: a SQL column named
@@ -143,7 +143,7 @@ func columnList(o *engine.Object) string {
 		}
 	}
 	children := map[string][]string{}
-	// childRefs holds "→target" for a child that is itself a referencing
+	// childRefs holds reference arrows for a child that is itself a referencing
 	// field, such as product_id in items[].product_id.
 	childRefs := map[string]string{}
 	for _, f := range o.Fields {
@@ -154,8 +154,8 @@ func columnList(o *engine.Object) string {
 		if !contains(children[p], c) {
 			children[p] = append(children[p], c)
 		}
-		if fk, ok := fks[f.Name]; ok && (f.Name == p+"."+c || f.Name == p+"[]."+c) {
-			childRefs[p+"\x00"+c] = arrow(o.Namespace, f, fk)
+		if refs := fks[f.Name]; len(refs) > 0 && (f.Name == p+"."+c || f.Name == p+"[]."+c) {
+			childRefs[p+"\x00"+c] = arrows(o.Namespace, f, refs)
 		}
 	}
 	var cols []string
@@ -170,9 +170,7 @@ func columnList(o *engine.Object) string {
 		if pk[f.Name] {
 			s += " PK"
 		}
-		if fk, ok := fks[f.Name]; ok {
-			s += arrow(o.Namespace, f, fk)
-		}
+		s += arrows(o.Namespace, f, fks[f.Name])
 		if len(f.Enum) > 0 && len(f.Enum) <= 10 {
 			s += " [" + strings.Join(f.Enum, "|") + "]"
 		}
@@ -181,14 +179,31 @@ func columnList(o *engine.Object) string {
 	return strings.Join(cols, ", ")
 }
 
-// arrow renders a single-column reference as →table, →table.column when the
-// names differ, or →collection for a sampled field's reference to _id.
-func arrow(from string, f engine.Field, fk engine.ForeignKey) string {
-	s := "→" + target(from, fk.RefNamespace, fk.RefObject)
-	if fk.RefColumns[0] != f.Name && !(f.Inferred && fk.RefColumns[0] == "_id") {
-		s += "." + fk.RefColumns[0]
+// arrows renders single-column references in catalog order. One reference
+// keeps its compact →table form; multiple targets are grouped as →{a,b}.
+func arrows(from string, f engine.Field, fks []engine.ForeignKey) string {
+	if len(fks) == 0 {
+		return ""
 	}
-	return s
+	var b strings.Builder
+	b.WriteString("→")
+	if len(fks) > 1 {
+		b.WriteByte('{')
+	}
+	for i, fk := range fks {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(target(from, fk.RefNamespace, fk.RefObject))
+		if fk.RefColumns[0] != f.Name && !(f.Inferred && fk.RefColumns[0] == "_id") {
+			b.WriteByte('.')
+			b.WriteString(fk.RefColumns[0])
+		}
+	}
+	if len(fks) > 1 {
+		b.WriteByte('}')
+	}
+	return b.String()
 }
 
 // foldChildren shows up to two child names, then "…". Children that
@@ -373,11 +388,11 @@ func writeObject(b *strings.Builder, o *engine.Object) {
 	for _, c := range o.PrimaryKey {
 		pk[c] = true
 	}
-	single := map[string]engine.ForeignKey{}
+	single := map[string][]engine.ForeignKey{}
 	var multi []engine.ForeignKey
 	for _, fk := range o.ForeignKeys {
 		if len(fk.Columns) == 1 && len(fk.RefColumns) == 1 {
-			single[fk.Columns[0]] = fk
+			single[fk.Columns[0]] = append(single[fk.Columns[0]], fk)
 		} else {
 			multi = append(multi, fk)
 		}
@@ -392,8 +407,13 @@ func writeObject(b *strings.Builder, o *engine.Object) {
 		} else if !f.Nullable {
 			b.WriteString(" NN")
 		}
-		if fk, ok := single[f.Name]; ok {
-			b.WriteString(" → " + target(o.Namespace, fk.RefNamespace, fk.RefObject) + "." + fk.RefColumns[0])
+		for i, fk := range single[f.Name] {
+			if i == 0 {
+				b.WriteString(" → ")
+			} else {
+				b.WriteString(", ")
+			}
+			b.WriteString(target(o.Namespace, fk.RefNamespace, fk.RefObject) + "." + fk.RefColumns[0])
 		}
 		if len(f.Enum) > 0 {
 			b.WriteString(" [" + enumList(f.Enum) + "]")

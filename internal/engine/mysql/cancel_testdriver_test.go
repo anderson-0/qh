@@ -13,11 +13,12 @@ import (
 // scriptConnector uses database/sql's real reservation, waiting and discard
 // behavior. Every SQL operation must be explicitly accepted by the script.
 type scriptConnector struct {
-	mu      sync.Mutex
-	next    int
-	events  []string
-	handle  func(context.Context, int, string, []driver.NamedValue) ([][]driver.Value, error)
-	connect func(context.Context) error
+	rowFactory func(string, [][]driver.Value) driver.Rows
+	mu         sync.Mutex
+	next       int
+	events     []string
+	handle     func(context.Context, int, string, []driver.NamedValue) ([][]driver.Value, error)
+	connect    func(context.Context) error
 }
 
 func (s *scriptConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -71,6 +72,9 @@ func (c *scriptConn) QueryContext(ctx context.Context, q string, args []driver.N
 	v, err := c.run(ctx, q, args)
 	if err != nil {
 		return nil, err
+	}
+	if c.s.rowFactory != nil {
+		return c.s.rowFactory(q, v), nil
 	}
 	return &scriptRows{values: v}, nil
 }

@@ -110,3 +110,48 @@ func connectErr(err error) error {
 	}
 	return qerr.Wrap(qerr.ConnectionFailed, "cannot reach the database: "+err.Error(), err)
 }
+
+// Internal cleanup/control errors remain causes only. The original request and
+// explicit guard reason determine the agent category, never driverCtx.Err().
+func interruptionError(ctx context.Context, stop stopOutcome, cleanup cleanupResult, statementErr error) error {
+	if cleanup.Committed {
+		return nil
+	}
+	cause := errors.Join(statementErr, stop.Err, cleanup.Err, ctx.Err())
+	reason := stop.Reason
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		reason = stopDeadline
+	} else if errors.Is(ctx.Err(), context.Canceled) {
+		reason = stopCallerCancel
+	}
+	unconfirmed := stop.Admitted && (!stop.StatementDone || !cleanup.RolledBack)
+	var qe *qerr.Error
+	var me *gomysql.MySQLError
+	switch {
+	case errors.As(statementErr, &me) && (me.Number == 3024 || me.Number == 1969):
+		qe = timeoutErr(cause)
+	case reason == stopDeadline:
+		qe = timeoutErr(errors.Join(cause, context.DeadlineExceeded))
+	case reason == stopCallerCancel || reason == stopShutdown:
+		qe = qerr.Wrap(qerr.QueryError, "query canceled", errors.Join(cause, context.Canceled))
+	case reason == stopRowCap:
+		if !unconfirmed && (statementErr == nil || errors.As(statementErr, &me) && me.Number == 1317) {
+			return nil
+		}
+		qe = qerr.Wrap(qerr.QueryError, "query interrupted", cause)
+	case statementErr != nil:
+		classified := qerr.From(classify(ctx, statementErr))
+		copy := *classified
+		copy.Err = cause
+		qe = &copy
+	case cleanup.Err != nil:
+		category := qerr.From(classify(ctx, cleanup.Err)).Category
+		qe = qerr.Wrap(category, "could not finish query transaction", cause)
+	default:
+		return nil
+	}
+	if unconfirmed {
+		qe.WithHint(unconfirmedHint)
+	}
+	return qe
+}

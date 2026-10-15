@@ -56,6 +56,7 @@ type writeCall struct {
 	mainDone, guardDone       chan struct{}
 	capRequest                chan struct{}
 	queryBad, controlBad      bool
+	discardAfter              bool
 }
 
 func newWriteCanceler(owner *conn, connector driver.Connector, size int) *writeCanceler {
@@ -168,6 +169,9 @@ func (c *writeCall) Cleanup(commit bool) cleanupResult {
 			c.query.Close()
 		} else if c.query != nil {
 			c.cleanupResult = c.owner.owner.finishContext(ctx, c.query, commit, true)
+			if c.discardAfter {
+				discard(c.query)
+			}
 			c.query.Close()
 		}
 		if c.control != nil {

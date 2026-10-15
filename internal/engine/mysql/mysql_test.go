@@ -58,7 +58,7 @@ func fixture() []string {
 }
 
 // startDB starts image, loads the fixture and returns a go-sql-driver DSN.
-func startDB(t *testing.T, image string) string {
+func startDB(t *testing.T, image string, options ...testcontainers.ContainerCustomizer) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("needs Docker")
@@ -76,7 +76,7 @@ func startDB(t *testing.T, image string) string {
 			t.Fatal(err)
 		}
 	} else {
-		ctr, err := tcmysql.Run(ctx, image, tcmysql.WithDatabase("qh"), tcmysql.WithUsername("qh"), tcmysql.WithPassword("secret-pw-123"))
+		ctr, err := tcmysql.Run(ctx, image, append([]testcontainers.ContainerCustomizer{tcmysql.WithDatabase("qh"), tcmysql.WithUsername("qh"), tcmysql.WithPassword("secret-pw-123")}, options...)...)
 		t.Cleanup(func() { _ = testcontainers.TerminateContainer(ctr) })
 		if err != nil {
 			t.Fatal(err)

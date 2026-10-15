@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Model, Effort                    string
 	Rival, RivalVersion              string // "dbhub" (default), "mongodb-mcp", "toolbox" or "toolbox-data"
+	MicroEngine                      string // postgres (SQL default), mysql or mongodb
 	Datasets, Servers                []string
 	Runs, Limit, Parallel, MaxTurns  int
 	TokenBudget                      int64 // input+output tokens one run may spend; 0 = no ceiling
@@ -35,10 +36,11 @@ func (cfg Config) rival() string {
 
 // Deps are the parts tests replace.
 type Deps struct {
-	Models       ModelFactory
-	StartServer  func(ctx context.Context, server string, conns []Conn) (Server, error)
-	StartDataset func(ctx context.Context, name string) (*Dataset, func(), error)
-	CountTokens  func(ctx context.Context, tools []ToolDef, instructions string) (int64, error)
+	Models         ModelFactory
+	StartServer    func(ctx context.Context, server string, conns []Conn) (Server, error)
+	StartDataset   func(ctx context.Context, name string) (*Dataset, func(), error)
+	StartGenerated func(ctx context.Context, engine string, n int) (*Dataset, func(), error)
+	CountTokens    func(ctx context.Context, tools []ToolDef, instructions string) (int64, error)
 	// Preflight checks the API key, the model id and the request shape once,
 	// before the agent phase; nil skips it.
 	Preflight func(ctx context.Context) error
@@ -129,6 +131,16 @@ func DefaultDeps(cfg Config, qhBin string) Deps {
 	return Deps{
 		Models:       NewAnthropic(cfg.APIKey, cfg.Model, cfg.Effort),
 		StartDataset: StartDataset,
+		StartGenerated: func(ctx context.Context, engine string, n int) (*Dataset, func(), error) {
+			switch engine {
+			case "mysql":
+				return StartGeneratedMySQL(ctx, n)
+			case "mongodb":
+				return StartGeneratedMongo(ctx, n)
+			default:
+				return StartGenerated(ctx, n)
+			}
+		},
 		StartServer: func(ctx context.Context, server string, conns []Conn) (Server, error) {
 			switch server {
 			case "qh":
@@ -161,8 +173,19 @@ func (cfg Config) logf(format string, a ...any) {
 // micro-benchmarks, as configured. Failures of one server or phase are
 // recorded and the rest continues.
 func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
+	if cfg.MicroEngine == "" {
+		cfg.MicroEngine = "postgres"
+		if cfg.rival() == "mongodb-mcp" {
+			cfg.MicroEngine = "mongodb"
+		}
+	}
+	if (cfg.MicroEngine != "postgres" && cfg.MicroEngine != "mysql" && cfg.MicroEngine != "mongodb") ||
+		(cfg.MicroEngine == "mongodb") != (cfg.rival() == "mongodb-mcp") {
+		return nil, fmt.Errorf("micro-engine %q is incompatible with rival %q (SQL: postgres or mysql; mongodb-mcp: mongodb)", cfg.MicroEngine, cfg.rival())
+	}
 	rep := &Report{Date: time.Now().Format("2006-01-02"), Model: cfg.Model, Effort: cfg.Effort, Runs: cfg.Runs, Rival: cfg.rival(), RivalVersion: cfg.RivalVersion,
-		ToolTokens: map[string][]int64{}, ColdSchema: map[string]time.Duration{},
+		MicroEngine: cfg.MicroEngine,
+		ToolTokens:  map[string][]int64{}, ColdSchema: map[string]time.Duration{},
 		LatencyP50: map[string]time.Duration{}, LatencyP95: map[string]time.Duration{}}
 	var mu sync.Mutex
 	record := func(r Result) {
@@ -343,11 +366,14 @@ const coldRuns = 3
 // micro runs the cold-schema and query-latency measurements.
 func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 	docs := cfg.rival() == "mongodb-mcp"
-	startGen, latencyDS := StartGenerated, "pagila"
-	if docs {
-		startGen, latencyDS = StartGeneratedMongo, "pagila-docs"
+	latencyDS := "pagila"
+	if cfg.MicroEngine == "mysql" {
+		latencyDS = "sakila"
 	}
-	gen, stop, err := startGen(ctx, 1000)
+	if docs {
+		latencyDS = "pagila-docs"
+	}
+	gen, stop, err := deps.StartGenerated(ctx, cfg.MicroEngine, 1000)
 	if err != nil {
 		rep.Notes = append(rep.Notes, "cold schema: "+err.Error())
 	} else {
@@ -364,6 +390,7 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 					break
 				}
 				runs = append(runs, d)
+				cfg.logf("cold schema (%s), %s run %d/%d: %s", cfg.MicroEngine, server, i+1, coldRuns, d)
 			}
 			if runs != nil {
 				rep.ColdSchema[server] = Percentile(runs, 0.5)
@@ -379,7 +406,8 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 				note = "Cold schema: qh samples 100 documents from each of 1,000 collections and infers fields and references; mongodb-mcp-server's list-collections returns names only. mongodb-mcp-server connects when it starts, so its figure excludes connecting; qh's includes it."
 			}
 			rep.Notes = append(rep.Notes, note,
-				"Cold schema is the first schema call after process start; it includes any database connection the server makes lazily (qh connects on first use).")
+				"Cold schema is the first schema call after process start; it includes any database connection the server makes lazily (qh connects on first use).",
+				"The three fresh processes use the same database instance; database caches and statistics can warm between runs. The reported median does not measure a database restart.")
 		}
 	}
 	ds, stopP, err := deps.StartDataset(ctx, latencyDS)

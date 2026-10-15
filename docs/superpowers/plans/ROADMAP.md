@@ -1,6 +1,6 @@
 # qh roadmap
 
-Last updated 2026-10-15, at `main` 5c097b9. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
+Last updated 2026-10-15. The MySQL work starts from `main` 80dfb46. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
 
 **The goal:** beat other database MCP servers on tokens and speed with equal accuracy, measured by `bench/`. Then make qh easy to find and install.
 
@@ -11,7 +11,7 @@ Last updated 2026-10-15, at `main` 5c097b9. This file is the plan across feature
 | 1.0.0 | Postgres, MySQL/MariaDB, SQLite and MongoDB engines; two MCP tools; server mode (REST, keys, workspaces, query log); SSH tunnels; `env:`/`file:`/`aws-sm://` secret references; a Postgres store shared by several instances (plans 1–9) |
 | 1.0.1 | Hardening: store reads survive restarts and failovers, a listener liveness ping, outage logs, SSH key parsing limits, a note for MongoDB databases that could not be listed |
 | 1.0.2 | `QH_DSN` single-connection mode for containers; a listing in the official MCP registry; setup docs for eight editors |
-| Unreleased on `main` | A Homebrew cask (`brew install anderson-0/tap/qh`), a 4× faster first schema call on Postgres, and a Postgres foreign key no longer duplicated per partition |
+| Unreleased | A Homebrew cask (`brew install anderson-0/tap/qh`), a 4× faster first schema call on Postgres, a Postgres foreign key no longer duplicated per partition, and less work in MySQL schema discovery |
 
 ### Benchmarks so far
 
@@ -34,9 +34,9 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
 
 ## Next, in order
 
-1. **Release 1.0.3.** It ships the unreleased changes above and is the first real test of the Homebrew step in the release workflow. Ask the user first, then follow `AGENTS.md` → Releasing.
-2. **Speed on the other engines.** The benchmark's micro-benchmarks cover Postgres only.
-   - Add a cold-schema micro-benchmark for MySQL (Sakila is small, so generate 1,000 tables as `StartGenerated` does for Postgres).
+1. **Release 1.0.3.** The user wants the MySQL changes included before this release. It also ships the other unreleased changes above and is the first real test of the Homebrew step in the release workflow. Ask the user first, then follow `AGENTS.md` → Releasing.
+2. **Speed on the other engines.** The micro-benchmarks now cover Postgres and MySQL.
+   - Done: a generated 1,000-table MySQL workload, selected with `-micro-engine mysql`. Streaming columns and using a map for foreign-key links preserve schema output. A controlled comparison measured 29.5 ms before and 24.6 ms after. See the [measurements and caveats](../../../bench/results/mysql-cold-schema-2026-10-15.md). The target below remains open; this is one measured improvement.
    - Profile MySQL/MariaDB introspection the way Postgres was profiled. Time each catalog query as the first query on a new connection, and look for work done once per row. `information_schema` views are often slow on MySQL.
    - Then check SQLite and MongoDB cold schema.
    - Acceptance: qh's first schema call is at or below the fastest rival on each engine, with byte-identical output (the golden conformance tests pass).

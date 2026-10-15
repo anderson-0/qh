@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -14,11 +15,55 @@ import (
 
 	"github.com/testcontainers/testcontainers-go"
 	tcmongodb "github.com/testcontainers/testcontainers-go/modules/mongodb"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
+
+// StartGeneratedMySQL mirrors StartGenerated on MySQL 8.4: seven columns,
+// a primary key, a comment and a foreign key to the previous table.
+func StartGeneratedMySQL(ctx context.Context, n int) (*Dataset, func(), error) {
+	ctr, err := tcmysql.Run(ctx, "mysql:8.4", tcmysql.WithDatabase("gen"),
+		tcmysql.WithUsername("bench"), tcmysql.WithPassword("bench-pw"))
+	stop := func() { _ = testcontainers.TerminateContainer(ctr) }
+	if err != nil {
+		stop()
+		return nil, nil, err
+	}
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		stop()
+		return nil, nil, err
+	}
+	port, err := ctr.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		stop()
+		return nil, nil, err
+	}
+	addr := net.JoinHostPort(host, port.Port())
+	db, err := sql.Open("mysql", "bench:bench-pw@tcp("+addr+")/gen")
+	if err != nil {
+		stop()
+		return nil, nil, err
+	}
+	cleanup := func() { db.Close(); stop() }
+	for i := 0; i < n; i++ {
+		fk := ""
+		if i > 0 {
+			fk = fmt.Sprintf(", FOREIGN KEY (parent_id) REFERENCES t_%04d(id)", i-1)
+		}
+		q := fmt.Sprintf("CREATE TABLE t_%04d (id bigint PRIMARY KEY, name varchar(255) NOT NULL, status text, amount numeric(12,2), "+
+			"created_at timestamp DEFAULT CURRENT_TIMESTAMP, parent_id bigint, note text%s) COMMENT='generated table %d'", i, fk, i)
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("generate MySQL table %d: %w", i, err)
+		}
+	}
+	return &Dataset{Name: "gen", Engine: "mysql", DSN: "mysql://bench:bench-pw@" + addr + "/gen", DB: db,
+		Description: fmt.Sprintf("Generated schema with %d tables", n)}, cleanup, nil
+}
 
 // StartGenerated starts Postgres 17 with n generated tables t_0000…, each
 // with 7 columns, a foreign key to the previous table and a comment.

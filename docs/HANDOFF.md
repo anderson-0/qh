@@ -4,9 +4,8 @@ For a new coding-agent session (Codex or other) taking over from Claude Code. Re
 
 ## State
 
-- **`main`** is at `5c097b9`; CI is green and the working tree is clean.
-- **Released:** v1.0.2. `main` also carries unreleased changes, listed under `## [Unreleased]` in `CHANGELOG.md`: the Homebrew cask, the faster Postgres schema call, and the partition foreign-key fix.
-- **No open PRs in this repo.**
+- **Base for the MySQL work:** `main` at `80dfb46`, after #17 refreshed this handoff. Check Git and GitHub for the current branch, PRs and CI.
+- **Released:** v1.0.2. Unreleased work, listed under `## [Unreleased]` in `CHANGELOG.md`, includes the Homebrew cask, the faster Postgres schema call, the partition foreign-key fix, and the MySQL changes below. The user wants MySQL included in the next release.
 - **Not yet decided by the user:** whether to release 1.0.3 (roadmap item 1). Do not tag without a clear yes.
 - **External:** the Docker MCP catalog entry, [docker/mcp-registry#5680](https://github.com/docker/mcp-registry/pull/5680), waits for Docker's review. Its source is the fork `anderson-0/mcp-registry`, branch `add-qh`, file `servers/qh/server.yaml`. If Docker asks for changes, edit that branch.
 - **Third-party listing:** mcprush.com listed the image unasked as `anderson-0/qh-mcp` and emailed the user a "claim your listing" link.
@@ -32,7 +31,9 @@ Most recent first:
 
 ## Next step
 
-Roadmap item 1, **release 1.0.3**, needs the user's go-ahead. If they prefer to keep building, start on item 2, **MySQL cold-schema speed**. The method that worked for Postgres:
+Roadmap item 1, **release 1.0.3**, still needs the user's go-ahead. The first MySQL speed improvement is ready for that release: stream columns without SQL sorting, restore ordinal order in Go, and reuse the object map for foreign-key links. A controlled comparison measured 29.5 ms before and 24.6 ms after. Independent checks found byte-identical output on MySQL 8.0/8.4 and MariaDB 10.11/11.4. See [the measurements and caveats](../bench/results/mysql-cold-schema-2026-10-15.md). The roadmap's fastest-rival target remains open.
+
+For further MySQL profiling, keep using the method that worked for Postgres:
 
 1. **Measure first.**
    - Write a throwaway test in the engine package; don't commit it.
@@ -51,7 +52,7 @@ Roadmap item 1, **release 1.0.3**, needs the user's go-ahead. If they prefer to 
    cd bench && go run ./cmd/bench -rival toolbox -skip-agent -skip-tokens
    ```
 
-   It's free; run it twice. For MySQL, the micro-benchmark first needs a generated MySQL dataset, because today it is Postgres only.
+   It's free; run it twice. For MySQL, add `-micro-engine mysql`: the benchmark now generates 1,000 tables and measures query latency on Sakila. Three fresh processes share one database instance, so its caches can warm between samples.
 5. **Get an independent review of any SQL rewrite** before opening the PR.
 
 ## Saving time and money

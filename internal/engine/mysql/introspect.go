@@ -38,6 +38,7 @@ type tableRow struct {
 type columnRow struct {
 	schema, table, name, colType, dataType, nullable, extra, comment string
 	dflt                                                             sql.NullString
+	ordinal                                                          int
 }
 
 type keyRow struct {
@@ -86,11 +87,13 @@ func (c *conn) Introspect(ctx context.Context) (*engine.Catalog, error) {
 	})
 	g.Go(func() error {
 		f, args := c.filter("TABLE_SCHEMA")
+		// ORDER BY forces MySQL to materialize the COLUMNS view before it
+		// can stream rows. Fetch positions and restore column order in Go.
 		return c.queryRows(gctx, `SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, IS_NULLABLE,
-				COLUMN_DEFAULT, EXTRA, COALESCE(COLUMN_COMMENT, '')
-			FROM information_schema.COLUMNS WHERE `+f+` ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`, args, func(r *sql.Rows) error {
+				COLUMN_DEFAULT, EXTRA, COALESCE(COLUMN_COMMENT, ''), ORDINAL_POSITION
+			FROM information_schema.COLUMNS WHERE `+f, args, func(r *sql.Rows) error {
 			var x columnRow
-			if err := r.Scan(&x.schema, &x.table, &x.name, &x.colType, &x.dataType, &x.nullable, &x.dflt, &x.extra, &x.comment); err != nil {
+			if err := r.Scan(&x.schema, &x.table, &x.name, &x.colType, &x.dataType, &x.nullable, &x.dflt, &x.extra, &x.comment, &x.ordinal); err != nil {
 				return err
 			}
 			columns = append(columns, x)
@@ -160,6 +163,9 @@ func (c *conn) assemble(tables []tableRow, columns []columnRow, keys []keyRow, i
 		cat.Namespaces[i].Objects = append(cat.Namespaces[i].Objects, o)
 		objs[key(t.schema, t.name)] = o
 	}
+	// Positions are unique within each object. Rows from different objects
+	// may interleave; their relative order does not matter.
+	slices.SortFunc(columns, func(a, b columnRow) int { return a.ordinal - b.ordinal })
 	for _, col := range columns {
 		o := objs[key(col.schema, col.table)]
 		if o == nil {
@@ -257,6 +263,16 @@ func (c *conn) assemble(tables []tableRow, columns []columnRow, keys []keyRow, i
 			})
 		}
 	}
-	cat.Link()
+	// Reuse the object map instead of searching the catalogue for each FK.
+	// Link after sorting so incoming references retain their original order.
+	for _, ns := range cat.Namespaces {
+		for _, o := range ns.Objects {
+			for _, fk := range o.ForeignKeys {
+				if target := objs[key(fk.RefNamespace, fk.RefObject)]; target != nil {
+					target.ReferencedBy = append(target.ReferencedBy, fk)
+				}
+			}
+		}
+	}
 	return cat
 }

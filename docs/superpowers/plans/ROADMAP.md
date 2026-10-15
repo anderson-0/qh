@@ -1,6 +1,6 @@
 # qh roadmap
 
-Last updated 2026-10-14, at `main` 6e3fd2a. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
+Last updated 2026-10-15, at `main` 5c097b9. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
 
 **The goal:** beat other database MCP servers on tokens and speed with equal accuracy, measured by `bench/`. Then make qh easy to find and install.
 
@@ -30,6 +30,7 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
 
 - **Live:** GitHub releases with binaries; the image `ghcr.io/anderson-0/qh`; `go install`; the official MCP registry (`io.github.anderson-0/qh`); the Homebrew tap.
 - **Pending:** the Docker MCP catalog, [docker/mcp-registry#5680](https://github.com/docker/mcp-registry/pull/5680), waiting for Docker's review.
+- **Listed by others, unclaimed:** mcprush.com (`anderson-0/qh-mcp`), added without being asked. Claiming it is optional.
 
 ## Next, in order
 

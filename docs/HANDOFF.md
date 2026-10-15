@@ -1,13 +1,18 @@
-# Handoff: qh, 2026-10-14
+# Handoff: qh, 2026-10-15
 
 For a new coding-agent session (Codex or other) taking over from Claude Code. Read this file, then [AGENTS.md](../AGENTS.md) (standing rules) and the [roadmap](superpowers/plans/ROADMAP.md) (what is next). Together they should save you rediscovering anything below.
 
 ## State
 
-- **`main`** is at `6e3fd2a`; CI is green and the working tree is clean.
+- **`main`** is at `5c097b9`; CI is green and the working tree is clean.
 - **Released:** v1.0.2. `main` also carries unreleased changes, listed under `## [Unreleased]` in `CHANGELOG.md`: the Homebrew cask, the faster Postgres schema call, and the partition foreign-key fix.
 - **No open PRs in this repo.**
+- **Not yet decided by the user:** whether to release 1.0.3 (roadmap item 1). Do not tag without a clear yes.
 - **External:** the Docker MCP catalog entry, [docker/mcp-registry#5680](https://github.com/docker/mcp-registry/pull/5680), waits for Docker's review. Its source is the fork `anderson-0/mcp-registry`, branch `add-qh`, file `servers/qh/server.yaml`. If Docker asks for changes, edit that branch.
+- **Third-party listing:** mcprush.com listed the image unasked as `anderson-0/qh-mcp` and emailed the user a "claim your listing" link.
+  - The site is unknown, and its pages refuse automated fetches.
+  - Advice given: don't use the email's links; claiming is optional.
+  - If the user wants it checked, open the listing directly without signing in and compare its description and install steps with the README.
 - **Local leftovers:** six untracked directories, `bench/results/2026-10-10T*`, are trial benchmark runs from before the published ones. Ask the user before deleting them; do not commit them.
 - **Local-only notes:** `.handoff/` is git-ignored and exists only on the maintainer's machine. It holds the full audit of deferred review findings, including the security-relevant ones that the public roadmap leaves out. Read `.handoff/README.md` if it is there.
 
@@ -17,6 +22,8 @@ Most recent first:
 
 | PR | What | Notes |
 |---|---|---|
+| #16 | Flaky test fix in `internal/core` | Test helpers never closed the `Service`, so the background query-log writer could write into a test's temp dir while it was being removed ("TempDir RemoveAll cleanup: directory not empty"). Every test service now registers `t.Cleanup(svc.Close)`. If that error shows up again in another package, look for the same cause. |
+| #15 | This handoff, `AGENTS.md` and the roadmap | |
 | #14 | Postgres first schema call: 99 ms → 23 ms on 1,000 tables | The cause was catalog work done once per row, which every new backend pays for cold. See the comment at the top of `internal/engine/postgres/introspect.go`. An independent review ran the old and new SQL side by side on PG13 and PG17 and found 0 differences. |
 | #13 | Homebrew cask | GoReleaser `homebrew_casks` pushes to `anderson-0/homebrew-tap` over SSH with a deploy key (secret `HOMEBREW_TAP_DEPLOY_KEY`; the user created it). The tap already has a hand-made v1.0.2 cask. Homebrew warns that `postflight` is deprecated; see roadmap item 7. |
 | #12 | Benchmark against Google's MCP Toolbox for Databases | Adds `-rival toolbox` and `toolbox-data`. qh used 83.6% and 76.4% fewer tokens, with equal accuracy. |

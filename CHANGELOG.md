@@ -20,6 +20,7 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 - **MCP argument errors use `error[invalid]`.** Missing fields, wrong types and integer overflow return a single-line tool error with the SDK's validation detail. Existing service error categories and protocol errors are preserved.
 - **Local-only commands respect QH_SERVER.** `mcp`, `serve`, `store copy` and `masterkey rotate` reject an environment-selected remote server before opening local files.
 - **Schema text retains every foreign key on a column.** Overviews group multiple targets as `owner_id→{users.id,archive.users.id}`; details list them as `→ users.id, archive.users.id`. A later reference no longer hides an earlier one, including in folded document fields.
+- **Connection opener panics no longer strand the pool.** Waiting requests receive a safe connection failure, reserved capacity is released, and normal retry backoff applies.
 
 ## [1.0.3] - 2026-10-15
 

@@ -1,6 +1,6 @@
 # qh roadmap
 
-Last updated 2026-10-15. The MySQL work starts from `main` 80dfb46. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
+Last updated 2026-10-15, after v1.0.3 at `main` 854502f. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
 
 **The goal:** beat other database MCP servers on tokens and speed with equal accuracy, measured by `bench/`. Then make qh easy to find and install.
 
@@ -11,7 +11,8 @@ Last updated 2026-10-15. The MySQL work starts from `main` 80dfb46. This file is
 | 1.0.0 | Postgres, MySQL/MariaDB, SQLite and MongoDB engines; two MCP tools; server mode (REST, keys, workspaces, query log); SSH tunnels; `env:`/`file:`/`aws-sm://` secret references; a Postgres store shared by several instances (plans 1–9) |
 | 1.0.1 | Hardening: store reads survive restarts and failovers, a listener liveness ping, outage logs, SSH key parsing limits, a note for MongoDB databases that could not be listed |
 | 1.0.2 | `QH_DSN` single-connection mode for containers; a listing in the official MCP registry; setup docs for eight editors |
-| Unreleased | A Homebrew cask (`brew install anderson-0/tap/qh`), a 4× faster first schema call on Postgres, a Postgres foreign key no longer duplicated per partition, and less work in MySQL schema discovery |
+| 1.0.3 | A Homebrew cask (`brew install anderson-0/tap/qh`), a 4× faster first schema call on Postgres, a Postgres foreign key no longer duplicated per partition, and less work in MySQL schema discovery |
+| Unreleased | A generated SQLite cold-schema benchmark and recorded SQLite/MongoDB speed checks |
 
 ### Benchmarks so far
 
@@ -34,11 +35,11 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
 
 ## Next, in order
 
-1. **Release 1.0.3.** The user wants the MySQL changes included before this release. It also ships the other unreleased changes above and is the first real test of the Homebrew step in the release workflow. Ask the user first, then follow `AGENTS.md` → Releasing.
-2. **Speed on the other engines.** The micro-benchmarks now cover Postgres and MySQL.
+2. **Speed on the other engines.** The micro-benchmarks now cover Postgres, MySQL, SQLite and MongoDB.
    - Done: a generated 1,000-table MySQL workload, selected with `-micro-engine mysql`. Streaming columns and using a map for foreign-key links preserve schema output. A controlled comparison measured 29.5 ms before and 24.6 ms after. See the [measurements and caveats](../../../bench/results/mysql-cold-schema-2026-10-15.md). The target below remains open; this is one measured improvement.
    - Profile MySQL/MariaDB introspection the way Postgres was profiled. Time each catalog query as the first query on a new connection, and look for work done once per row. `information_schema` views are often slow on MySQL.
-   - Then check SQLite and MongoDB cold schema.
+   - Done: two free SQLite and MongoDB checks. SQLite took 16.0–24.3 ms versus Toolbox's 32.3–34.4 ms on 1,000 tables. MongoDB took 245.9–248.7 ms versus 33.0–33.5 ms for names only; qh also samples and infers schema. See the [reports and caveats](../../../bench/results/sqlite-mongodb-cold-schema-2026-10-15.md).
+   - Next: profile MongoDB counting, index listing, sampling and inference separately before choosing a change. The generated workload has no cross-collection reference fields; include those before changing reference inference. SQLite needs no engine rewrite on this evidence. MySQL still has a small gap to Toolbox.
    - Acceptance: qh's first schema call is at or below the fastest rival on each engine, with byte-identical output (the golden conformance tests pass).
 3. **Refresh the dbhub numbers.** The 40% figure predates 1.0.0. A golden test pins the SQL tool surface, so it should hold, but re-measure once on current `main`.
 4. **Agent-facing correctness:**

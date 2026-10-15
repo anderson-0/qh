@@ -32,3 +32,7 @@ The first run includes the micro-benchmarks. Toolbox's first schema call on 1,00
 ## MySQL cold schema
 
 The [2026-10-15 measurements](mysql-cold-schema-2026-10-15.md) compare old and new qh binaries on a generated 1,000-table MySQL schema, then run the free benchmark against Toolbox twice. The controlled comparison measured 29.5 ms before and 24.6 ms after. These are fresh-process measurements against a running database, not database-restart timings. qh still trails Toolbox slightly; the report states the output and connection-timing differences. No model calls were made.
+
+## SQLite and MongoDB cold schema
+
+The [2026-10-15 checks](sqlite-mongodb-cold-schema-2026-10-15.md) record two free runs per engine. SQLite takes 16.0–24.3 ms with qh versus Toolbox's 32.3–34.4 ms on 1,000 tables. MongoDB takes 245.9–248.7 ms with qh versus 33.0–33.5 ms for names-only discovery; qh also samples documents and infers schema. The note links all four reports and explains the differences in work and cache state. No model calls were made.

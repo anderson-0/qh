@@ -15,7 +15,7 @@ import (
 type Config struct {
 	Model, Effort                    string
 	Rival, RivalVersion              string // "dbhub" (default), "mongodb-mcp", "toolbox" or "toolbox-data"
-	MicroEngine                      string // postgres (SQL default), mysql or mongodb
+	MicroEngine                      string // postgres (SQL default), mysql, sqlite or mongodb
 	Datasets, Servers                []string
 	Runs, Limit, Parallel, MaxTurns  int
 	TokenBudget                      int64 // input+output tokens one run may spend; 0 = no ceiling
@@ -135,6 +135,8 @@ func DefaultDeps(cfg Config, qhBin string) Deps {
 			switch engine {
 			case "mysql":
 				return StartGeneratedMySQL(ctx, n)
+			case "sqlite":
+				return StartGeneratedSQLite(ctx, n)
 			case "mongodb":
 				return StartGeneratedMongo(ctx, n)
 			default:
@@ -179,9 +181,9 @@ func RunBenchmark(ctx context.Context, cfg Config, deps Deps) (*Report, error) {
 			cfg.MicroEngine = "mongodb"
 		}
 	}
-	if (cfg.MicroEngine != "postgres" && cfg.MicroEngine != "mysql" && cfg.MicroEngine != "mongodb") ||
+	if (cfg.MicroEngine != "postgres" && cfg.MicroEngine != "mysql" && cfg.MicroEngine != "sqlite" && cfg.MicroEngine != "mongodb") ||
 		(cfg.MicroEngine == "mongodb") != (cfg.rival() == "mongodb-mcp") {
-		return nil, fmt.Errorf("micro-engine %q is incompatible with rival %q (SQL: postgres or mysql; mongodb-mcp: mongodb)", cfg.MicroEngine, cfg.rival())
+		return nil, fmt.Errorf("micro-engine %q is incompatible with rival %q (SQL: postgres, mysql or sqlite; mongodb-mcp: mongodb)", cfg.MicroEngine, cfg.rival())
 	}
 	rep := &Report{Date: time.Now().Format("2006-01-02"), Model: cfg.Model, Effort: cfg.Effort, Runs: cfg.Runs, Rival: cfg.rival(), RivalVersion: cfg.RivalVersion,
 		MicroEngine: cfg.MicroEngine,
@@ -369,6 +371,9 @@ func micro(ctx context.Context, cfg Config, deps Deps, rep *Report) {
 	latencyDS := "pagila"
 	if cfg.MicroEngine == "mysql" {
 		latencyDS = "sakila"
+	}
+	if cfg.MicroEngine == "sqlite" {
+		latencyDS = "chinook"
 	}
 	if docs {
 		latencyDS = "pagila-docs"

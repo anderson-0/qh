@@ -1,6 +1,6 @@
 # MySQL cold-schema measurements, 2026-10-15
 
-Workload: MySQL 8.4, 1,000 generated tables, seven columns per table, a primary key, a comment and 999 foreign keys. Host: Apple M5 Max (darwin/arm64), Go 1.27.2, Docker Desktop 29.8.0. These runs used no model API.
+Workload: MySQL 8.4, 1,000 generated tables, seven columns per table, a primary key, a comment and 999 foreign keys. Host: Apple M5 Max (darwin/arm64), Go 1.27.2, Docker Engine 29.8.0 under Docker Desktop. These runs used no model API.
 
 ## Controlled comparison
 

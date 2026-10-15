@@ -33,7 +33,7 @@ func main() {
 	flag.BoolVar(&cfg.SkipAgent, "skip-agent", false, "skip the model runs")
 	flag.BoolVar(&cfg.SkipTokens, "skip-tokens", false, "skip tool-definition token counting")
 	flag.BoolVar(&cfg.SkipMicro, "skip-micro", false, "skip the micro-benchmarks")
-	flag.StringVar(&cfg.MicroEngine, "micro-engine", "", "micro-benchmark engine: postgres (SQL default), mysql or mongodb (mongodb-mcp default)")
+	flag.StringVar(&cfg.MicroEngine, "micro-engine", "", "micro-benchmark engine: postgres (SQL default), mysql, sqlite or mongodb (mongodb-mcp default)")
 	flag.StringVar(&out, "out", "results", "results directory")
 	flag.Parse()
 	sqlSets, docSets := []string{"pagila", "sakila", "chinook", "lendco"}, []string{"pagila-docs", "lendco-docs"}

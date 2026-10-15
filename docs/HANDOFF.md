@@ -4,9 +4,9 @@ For a new coding-agent session (Codex or other) taking over from Claude Code. Re
 
 ## State
 
-- **Base for the MySQL work:** `main` at `80dfb46`, after #17 refreshed this handoff. Check Git and GitHub for the current branch, PRs and CI.
-- **Released:** v1.0.2. Unreleased work, listed under `## [Unreleased]` in `CHANGELOG.md`, includes the Homebrew cask, the faster Postgres schema call, the partition foreign-key fix, and the MySQL changes below. The user wants MySQL included in the next release.
-- **Not yet decided by the user:** whether to release 1.0.3 (roadmap item 1). Do not tag without a clear yes.
+- **Release base:** `main` at `854502f`, tagged `v1.0.3`. Check Git and GitHub for the current branch, PRs and CI.
+- **Released:** [v1.0.3](https://github.com/anderson-0/qh/releases/tag/v1.0.3), including Homebrew, the Postgres improvements and the MySQL work below. The release workflow passed. The native archive checksum/version, container version/labels, generated Homebrew cask checksum and official MCP registry entry were verified.
+- **Current work:** the user chose free SQLite/MongoDB speed checks next. The SQLite benchmark and four measured reports are ready on `codex/sqlite-cold-schema`; engines and MCP tool text are unchanged. No paid run is authorized. New results are under `bench/results/sqlite-mongodb-cold-schema-2026-10-15.md`.
 - **External:** the Docker MCP catalog entry, [docker/mcp-registry#5680](https://github.com/docker/mcp-registry/pull/5680), waits for Docker's review. Its source is the fork `anderson-0/mcp-registry`, branch `add-qh`, file `servers/qh/server.yaml`. If Docker asks for changes, edit that branch.
 - **Third-party listing:** mcprush.com listed the image unasked as `anderson-0/qh-mcp` and emailed the user a "claim your listing" link.
   - The site is unknown, and its pages refuse automated fetches.
@@ -21,6 +21,8 @@ Most recent first:
 
 | PR | What | Notes |
 |---|---|---|
+| #19 | Release 1.0.3 notes | Merged after explicit approval; tag pushed on `main`. Release, container, Homebrew and registry jobs passed. |
+| #18 | MySQL cold-schema benchmark and optimization | Streams column rows, restores ordinal order in Go and reuses the object map for FK links. Controlled median: 29.5 ms → 24.6 ms. Independent old/new checks found byte-identical output on four MySQL/MariaDB versions. |
 | #16 | Flaky test fix in `internal/core` | Test helpers never closed the `Service`, so the background query-log writer could write into a test's temp dir while it was being removed ("TempDir RemoveAll cleanup: directory not empty"). Every test service now registers `t.Cleanup(svc.Close)`. If that error shows up again in another package, look for the same cause. |
 | #15 | This handoff, `AGENTS.md` and the roadmap | |
 | #14 | Postgres first schema call: 99 ms → 23 ms on 1,000 tables | The cause was catalog work done once per row, which every new backend pays for cold. See the comment at the top of `internal/engine/postgres/introspect.go`. An independent review ran the old and new SQL side by side on PG13 and PG17 and found 0 differences. |
@@ -31,9 +33,9 @@ Most recent first:
 
 ## Next step
 
-Roadmap item 1, **release 1.0.3**, still needs the user's go-ahead. The first MySQL speed improvement is ready for that release: stream columns without SQL sorting, restore ordinal order in Go, and reuse the object map for foreign-key links. A controlled comparison measured 29.5 ms before and 24.6 ms after. Independent checks found byte-identical output on MySQL 8.0/8.4 and MariaDB 10.11/11.4. See [the measurements and caveats](../bench/results/mysql-cold-schema-2026-10-15.md). The roadmap's fastest-rival target remains open.
+Release 1.0.3 is complete. Roadmap item 2 remains open: SQLite is ahead of Toolbox in the new checks, while MongoDB builds a richer schema than the rival's names-only response. Profile its count, index-listing, sampling and inference stages separately before proposing an optimization. The generated MongoDB workload has no cross-collection reference fields, so add that coverage before changing inference. See [the new measurements and caveats](../bench/results/sqlite-mongodb-cold-schema-2026-10-15.md). The small MySQL gap to Toolbox also remains open; [its controlled comparison](../bench/results/mysql-cold-schema-2026-10-15.md) measured 29.5 ms → 24.6 ms.
 
-For further MySQL profiling, keep using the method that worked for Postgres:
+For further profiling, keep using the method that worked for Postgres:
 
 1. **Measure first.**
    - Write a throwaway test in the engine package; don't commit it.
@@ -52,7 +54,7 @@ For further MySQL profiling, keep using the method that worked for Postgres:
    cd bench && go run ./cmd/bench -rival toolbox -skip-agent -skip-tokens
    ```
 
-   It's free; run it twice. For MySQL, add `-micro-engine mysql`: the benchmark now generates 1,000 tables and measures query latency on Sakila. Three fresh processes share one database instance, so its caches can warm between samples.
+   It's free; run it twice. Use `-micro-engine mysql` for MySQL/Sakila, `-micro-engine sqlite` for SQLite/Chinook, or `-rival mongodb-mcp` for MongoDB. Three fresh processes share one database instance, so its caches can warm between samples.
 5. **Get an independent review of any SQL rewrite** before opening the PR.
 
 ## Saving time and money

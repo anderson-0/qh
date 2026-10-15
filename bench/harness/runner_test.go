@@ -48,7 +48,7 @@ type namedServer struct {
 }
 
 func TestMicroUsesSelectedEngine(t *testing.T) {
-	for _, selection := range []string{"postgres", "mysql", "mongodb", "default-sql", "default-mongo"} {
+	for _, selection := range []string{"postgres", "mysql", "sqlite", "mongodb", "default-sql", "default-mongo"} {
 		engine := selection
 		if selection == "default-sql" {
 			engine = "postgres"
@@ -64,6 +64,9 @@ func TestMicroUsesSelectedEngine(t *testing.T) {
 			latency := "pagila"
 			if engine == "mysql" {
 				latency = "sakila"
+			}
+			if engine == "sqlite" {
+				latency = "chinook"
 			}
 			if engine == "mongodb" {
 				cfg.Rival = "mongodb-mcp"
@@ -103,7 +106,7 @@ func TestMicroUsesSelectedEngine(t *testing.T) {
 }
 
 func TestMicroRejectsIncompatibleEngine(t *testing.T) {
-	for _, cfg := range []Config{{MicroEngine: "sqlite"}, {MicroEngine: "mongodb", Rival: "toolbox"}, {MicroEngine: "mysql", Rival: "mongodb-mcp"}} {
+	for _, cfg := range []Config{{MicroEngine: "unsupported"}, {MicroEngine: "mongodb", Rival: "toolbox"}, {MicroEngine: "mysql", Rival: "mongodb-mcp"}} {
 		if _, err := RunBenchmark(context.Background(), cfg, Deps{}); err == nil {
 			t.Fatalf("accepted %+v", cfg)
 		}

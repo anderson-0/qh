@@ -1,6 +1,6 @@
 # MySQL write cancellation on the server
 
-Status: proposed; direction approved, written spec awaiting review. Base: `main` at `99b4c39` (PR #27 merged). This document describes intended behavior, not an implemented or measured fix.
+Status: written spec approved by the user after commit `65621f1`; the [implementation plan](../plans/2026-10-15-qh-mysql-write-timeout.md) awaits review. Base: `main` at `99b4c39` (PR #27 merged). This document describes intended behavior, not an implemented or measured fix.
 
 ## Goal and scope
 

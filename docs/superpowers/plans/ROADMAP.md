@@ -49,7 +49,7 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
    - Fixed: Postgres explicit cancellation returns `query_error` without timeout advice. Deadlines and recognized statement timeouts retain `timeout`; other `57014` messages, including unrecognized localized messages, retain the server detail as `query_error`. PG13/17 tests cover cancellation, timeouts and pool recovery.
    - Fixed: MySQL/MariaDB explicit and wrapped cancellation uses `query_error`, consistent with Postgres. Server interruption `1317` retains its message as `query_error` unless a context deadline establishes a timeout; codes `3024`/`1969` retain `timeout` even after late cancellation. Bare `context.Canceled` already had the intended category; its message is now consistent.
 5. **Robustness:**
-   - MySQL writes are not stopped on the server after a timeout (no `KILL QUERY`).
+   - MySQL writes are not stopped on the server after a timeout (no `KILL QUERY`). A [proposed spec](../specs/2026-10-15-qh-mysql-write-timeout-design.md) covers server interruption, connection lifecycle and measurable rollback/recovery; it awaits user approval.
    - A panic in the pool opener wedges that connection until restart.
    - The first run fails on filesystems without hard links (`master.key` is published with `os.Link`).
    - `QH_SERVER` is not honoured by the local-only check in the CLI.

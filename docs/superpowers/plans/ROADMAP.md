@@ -45,7 +45,7 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
 3. **Done: refresh the dbhub numbers.** The [2026-10-15 full run](../../../bench/results/dbhub-refresh-2026-10-15.md) at `0656d51` measured 40.2% fewer tokens, equal 100% accuracy and 1.5 versus 1.6 tool calls on 360 paired tasks. There were no errors, aborts or truncated outputs. The 40% target passed by only 0.239 percentage points; one full run is not a guaranteed saving. Production code and MCP tool text are unchanged.
 4. **Agent-facing correctness:**
    - Fixed: schema overview and detail text retain every single-column foreign key in catalog order. Multiple targets appear as `owner_id→{users.id,archive.users.id}` in an overview and `→ users.id, archive.users.id` in details. Regression tests cover SQL, composite references and folded inferred fields.
-   - MCP argument-validation errors from the SDK do not use the `error[category]` format.
+   - Fixed: MCP SDK argument-validation and decoding errors use single-line `error[invalid]` tool results. Existing service categories, protocol errors and tool definitions are preserved.
    - Postgres reports a client cancel (57014) as `timeout`.
    - MySQL reports `context.Canceled` as `query_error`.
 5. **Robustness:**

@@ -100,6 +100,22 @@ func withConnections(svc *core.Service, ws WorkspaceFunc) mcp.Middleware {
 	}
 }
 
+// withArgumentErrors formats failures from the SDK's input validation and
+// decoding, which run before our typed handlers. Our handlers return service
+// errors through text, without setting the SDK's underlying result error.
+func withArgumentErrors(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		res, err := next(ctx, method, req)
+		if err != nil || method != "tools/call" {
+			return res, err
+		}
+		if r, ok := res.(*mcp.CallToolResult); ok && r != nil && r.IsError && r.GetError() != nil {
+			r.Content = []mcp.Content{&mcp.TextContent{Text: qerr.Wrap(qerr.Invalid, r.GetError().Error(), r.GetError()).Error()}}
+		}
+		return res, nil
+	}
+}
+
 // WorkspaceFunc returns the workspace a request belongs to.
 type WorkspaceFunc func(ctx context.Context) string
 
@@ -127,7 +143,7 @@ func New(svc *core.Service, ws WorkspaceFunc, version string) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "qh", Version: version}, &mcp.ServerOptions{Instructions: instructions})
 	closed := false
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &closed}
-	s.AddReceivingMiddleware(withConnections(svc, ws))
+	s.AddReceivingMiddleware(withConnections(svc, ws), withArgumentErrors)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "schema",

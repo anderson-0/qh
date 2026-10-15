@@ -1,0 +1,67 @@
+# qh roadmap
+
+Last updated 2026-10-14, at `main` 6e3fd2a. This file is the plan across features. Each feature still gets its own spec in `docs/superpowers/specs/` and plan in this folder.
+
+**The goal:** beat other database MCP servers on tokens and speed with equal accuracy, measured by `bench/`. Then make qh easy to find and install.
+
+## Done
+
+| Version | What shipped |
+|---|---|
+| 1.0.0 | Postgres, MySQL/MariaDB, SQLite and MongoDB engines; two MCP tools; server mode (REST, keys, workspaces, query log); SSH tunnels; `env:`/`file:`/`aws-sm://` secret references; a Postgres store shared by several instances (plans 1–9) |
+| 1.0.1 | Hardening: store reads survive restarts and failovers, a listener liveness ping, outage logs, SSH key parsing limits, a note for MongoDB databases that could not be listed |
+| 1.0.2 | `QH_DSN` single-connection mode for containers; a listing in the official MCP registry; setup docs for eight editors |
+| Unreleased on `main` | A Homebrew cask (`brew install anderson-0/tap/qh`), a 4× faster first schema call on Postgres, and a Postgres foreign key no longer duplicated per partition |
+
+### Benchmarks so far
+
+All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accuracy (100%) in every comparison.
+
+| Rival | Datasets | Tokens per task |
+|---|---|---|
+| MCP Toolbox 1.14.0, prebuilt config | Postgres, MySQL, SQLite | 83.6% fewer with qh |
+| MCP Toolbox 1.14.0, `data` toolset | Postgres | 76.4% fewer |
+| dbhub 1.5.0 | Postgres, MySQL, SQLite | 40.3–40.4% fewer (measured at e242674, before 1.0.0) |
+| mongodb-mcp-server 3.0.5 | MongoDB | 95.2% fewer |
+
+**Speed:** the first schema call on 1,000 Postgres tables takes 23 ms, against Toolbox's 22–26 ms and dbhub's 2.08 s. Query latency p50 is about 0.5 ms; Toolbox's is 0.4 ms.
+
+### Distribution
+
+- **Live:** GitHub releases with binaries; the image `ghcr.io/anderson-0/qh`; `go install`; the official MCP registry (`io.github.anderson-0/qh`); the Homebrew tap.
+- **Pending:** the Docker MCP catalog, [docker/mcp-registry#5680](https://github.com/docker/mcp-registry/pull/5680), waiting for Docker's review.
+
+## Next, in order
+
+1. **Release 1.0.3.** It ships the unreleased changes above and is the first real test of the Homebrew step in the release workflow. Ask the user first, then follow `AGENTS.md` → Releasing.
+2. **Speed on the other engines.** The benchmark's micro-benchmarks cover Postgres only.
+   - Add a cold-schema micro-benchmark for MySQL (Sakila is small, so generate 1,000 tables as `StartGenerated` does for Postgres).
+   - Profile MySQL/MariaDB introspection the way Postgres was profiled. Time each catalog query as the first query on a new connection, and look for work done once per row. `information_schema` views are often slow on MySQL.
+   - Then check SQLite and MongoDB cold schema.
+   - Acceptance: qh's first schema call is at or below the fastest rival on each engine, with byte-identical output (the golden conformance tests pass).
+3. **Refresh the dbhub numbers.** The 40% figure predates 1.0.0. A golden test pins the SQL tool surface, so it should hold, but re-measure once on current `main`.
+4. **Agent-facing correctness:**
+   - Two foreign keys on one column overwrite each other in the schema text.
+   - MCP argument-validation errors from the SDK do not use the `error[category]` format.
+   - Postgres reports a client cancel (57014) as `timeout`.
+   - MySQL reports `context.Canceled` as `query_error`.
+5. **Robustness:**
+   - MySQL writes are not stopped on the server after a timeout (no `KILL QUERY`).
+   - A panic in the pool opener wedges that connection until restart.
+   - The first run fails on filesystems without hard links (`master.key` is published with `os.Link`).
+   - `QH_SERVER` is not honoured by the local-only check in the CLI.
+   - `conn edit` has no `--password-stdin`.
+6. **Security hardening.** There are open server-mode items. Their details are kept out of this public repo, in the maintainer's local handoff notes. Report anything new through `SECURITY.md`.
+7. **Repository hygiene** (ask the user):
+   - a tag ruleset for `v*`;
+   - immutable releases;
+   - switch the cask's `postflight` to `postflight_steps` once GoReleaser releases `hooks.post.install_steps` (after 2.18.3).
+8. **Optional reach:** Glama (needs the user's sign-in) and then an awesome-mcp-servers PR, whose bot requires a Glama badge. Smithery needs a per-platform MCPB bundle and an account; skipped for now.
+
+About 40 further minor items (test gaps, error-message wording, edge-case input validation) remain from the review rounds of plans 1–5. The `*-deferred-findings.md` files list them, though some of those entries are now fixed.
+
+## Not planned
+
+- **SQL Server and Oracle:** the user ruled these not a priority.
+- From the spec's "Not in v1" list: cloud IAM auth, a web UI (the OpenAPI spec is published), multi-statement scripts, write approval workflows, restricting a key to some connections, Prometheus metrics, and importing dbhub TOML.
+- **decisionkit** (closed-form decisions for agents): tried on 58 past review findings. It scored 88% on fix-or-defer against a 78% baseline, but rated both critical security bypasses as merely important. Not adopted for reviews.

@@ -632,7 +632,21 @@ func (c *conn) classify(ctx context.Context, err error) error {
 	if errors.As(err, &pe) {
 		switch pe.Code {
 		case "57014":
-			return timeout
+			// A known server timeout wins over a later context cancellation
+			// during pipeline cleanup.
+			if pe.Message == "canceling statement due to statement timeout" {
+				return timeout
+			}
+			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+				return qerr.Wrap(qerr.QueryError, "query canceled", err)
+			}
+			// query_canceled also covers CancelRequest / pg_cancel_backend.
+			// Without a deadline, only the recognized statement-timeout
+			// message establishes a timeout. Unknown/localized messages keep
+			// the server's detail below rather than guessing the cause.
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+				return timeout
+			}
 		case "25006":
 			return qerr.Wrap(qerr.ReadOnly, "connection is read-only; only statements that read data are allowed", err).
 				WithHint("Use a read-write connection to change data")
@@ -654,6 +668,9 @@ func (c *conn) classify(ctx context.Context, err error) error {
 			msg += " (" + pe.Detail + ")"
 		}
 		return qerr.Wrap(qerr.QueryError, msg, err).WithHint(pe.Hint)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return qerr.Wrap(qerr.QueryError, "query canceled", err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return timeout

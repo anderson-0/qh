@@ -14,6 +14,7 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 ### Fixed
 
+- **Postgres cancellation is distinguished from timeout.** Explicit cancellation returns `query_error` without timeout advice. Deadlines and recognized statement timeouts still return `timeout`; other SQLSTATE `57014` responses retain the server message as `query_error`. Unrecognized localized messages use that fallback.
 - **MCP argument errors use `error[invalid]`.** Missing fields, wrong types and integer overflow return a single-line tool error with the SDK's validation detail. Existing service error categories and protocol errors are preserved.
 - **Schema text retains every foreign key on a column.** Overviews group multiple targets as `owner_id→{users.id,archive.users.id}`; details list them as `→ users.id, archive.users.id`. A later reference no longer hides an earlier one, including in folded document fields.
 

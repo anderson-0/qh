@@ -46,7 +46,7 @@ All runs: `claude-sonnet-5-5` at effort high, 3 runs per question, equal accurac
 4. **Agent-facing correctness:**
    - Fixed: schema overview and detail text retain every single-column foreign key in catalog order. Multiple targets appear as `owner_id→{users.id,archive.users.id}` in an overview and `→ users.id, archive.users.id` in details. Regression tests cover SQL, composite references and folded inferred fields.
    - Fixed: MCP SDK argument-validation and decoding errors use single-line `error[invalid]` tool results. Existing service categories, protocol errors and tool definitions are preserved.
-   - Postgres reports a client cancel (57014) as `timeout`.
+   - Fixed: Postgres explicit cancellation returns `query_error` without timeout advice. Deadlines and recognized statement timeouts retain `timeout`; other `57014` messages, including unrecognized localized messages, retain the server detail as `query_error`. PG13/17 tests cover cancellation, timeouts and pool recovery.
    - MySQL reports `context.Canceled` as `query_error`.
 5. **Robustness:**
    - MySQL writes are not stopped on the server after a timeout (no `KILL QUERY`).

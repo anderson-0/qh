@@ -7,7 +7,7 @@ Standing instructions for coding agents (Codex, Claude Code and others). For the
 qh is a database server for AI agents, written in Go. It serves two MCP tools, `schema` and `query`, for PostgreSQL, MySQL, MariaDB, SQLite and MongoDB. Its goal is to beat other database MCP servers on tokens and speed with equal accuracy, as measured by `bench/`.
 
 - `qh mcp` serves MCP over stdio. `qh serve` adds Streamable HTTP, a REST API, API keys and workspaces.
-- `docs/superpowers/specs/` holds the design specs and `docs/superpowers/plans/` the plans built from them. The [roadmap](docs/superpowers/plans/ROADMAP.md) lists what is done and what is open.
+- `docs/superpowers/` holds historical design artifacts. Never commit contents of any `superpowers/` directory. Use [docs/HANDOFF.md](docs/HANDOFF.md) for current progress; keep new private specs and plans in git-ignored `.handoff/`. The [historical roadmap](docs/superpowers/plans/ROADMAP.md) may lag the handoff.
 
 ## Layout
 
@@ -50,7 +50,8 @@ make lint         # go vet
 ## How the user wants work done
 
 - **Branches and merging:** one branch and one PR per piece of work. **Ask before merging to `main`, before tagging and before any release.** The repository does not allow auto-merge.
-- **Size of process:** larger work goes spec → plan → implementation with a review per task and a final review. A small, bounded change gets a short design that the user approves, then tests first, then an independent review when the change is subtle. For example, the Postgres catalog rewrite was checked by running the old and new SQL side by side.
+- **Development workflow:** use spec-driven development only: approved spec → plan → implementation, with acceptance-based regression coverage, a review per task and a final review. Do not use TDD or test-first red-green-refactor workflows. A small, bounded change gets an approved short design and verification appropriate to its risk. For example, compare old and new catalog output for a subtle SQL rewrite.
+- **Design artifacts:** never commit contents of any `superpowers/` directory, including changes to tracked files. Keep new specs, plans and security handoffs in git-ignored `.handoff/`. Historical tracked artifacts remain as references. Direct user instructions override conflicting skill workflows.
 - **Commits:** the author is `Anderson <anderson.consultant.it@outlook.com>`, set in this repository's git config. Messages say what changed and why.
 - **Docs and changelog:** plain, short sentences. User-visible changes go under `## [Unreleased]` in `CHANGELOG.md`. The release workflow needs a `## [X.Y.Z] - YYYY-MM-DD` section for the tag.
 

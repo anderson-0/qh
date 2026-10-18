@@ -11,6 +11,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/redact"
 	"github.com/anderson-0/qh/internal/secretref"
 	"github.com/anderson-0/qh/internal/store"
 )
@@ -309,36 +310,54 @@ func refsOf(s string) (dsnRef, passwordRef string) {
 	return "", ""
 }
 
-// inspect checks and parses in's connection string; a dsn_ref connection's
-// string is only known when the pool opens.
-func (s *Service) inspect(eng engine.Engine, in ConnInput) (engine.DSNInfo, error) {
+// inspect checks and parses in's connection string and returns the secrets
+// in's own settings carry. A dsn_ref connection's string is only known when
+// its pool opens.
+func (s *Service) inspect(eng engine.Engine, in ConnInput) (engine.DSNInfo, *redact.Set, error) {
+	secrets := inlineSecrets(eng, in.DSN, in.Password, in.SSH, in.TLS)
 	if in.DSNRef != "" {
-		return engine.DSNInfo{Redacted: "(from " + in.DSNRef + ")"}, nil
+		return engine.DSNInfo{Redacted: "(from " + in.DSNRef + ")"}, redact.New(secrets...), nil
 	}
-	if err := s.checkDSN(eng, in.DSN); err != nil {
-		return engine.DSNInfo{}, err
+	// Extraction is a pure parse, so every secret is known before the
+	// server-mode check can fail.
+	creds, cerr := credentials(eng, in.DSN)
+	set := redact.New(append(secrets, creds...)...)
+	// The steps below can echo the caller's own connection string. Their
+	// errors are redacted with its secrets only: hiding a stored SSH or TLS
+	// secret there would confirm a guess of it.
+	own := redact.New(append(inlineSecrets(eng, in.DSN, in.Password, nil, nil), creds...)...)
+	if err := s.checkDSN(eng, in.DSN); err != nil { // before any parser that may read files
+		return engine.DSNInfo{}, set, own.Error(err)
+	}
+	if cerr != nil {
+		// Inspect's own fixed text says how to fix the string (D3).
+		if _, ierr := eng.Inspect(in.DSN); ierr != nil {
+			return engine.DSNInfo{}, set, inspectFailed(eng, ierr, own)
+		}
+		return engine.DSNInfo{}, set, cerr
 	}
 	info, err := eng.Inspect(in.DSN)
 	if err != nil {
-		return info, scrub(err, in.DSN)
+		return info, set, inspectFailed(eng, err, own)
 	}
-	return info, nil
+	return info, set, nil
 }
 
-// testConn opens spec once (resolving its references and tunnel) and pings it.
-func (s *Service) testConn(ctx context.Context, spec engine.ConnSpec, info engine.DSNInfo) (*TestResult, error) {
+// testConn opens spec once (resolving its references and tunnel) and pings
+// it. set holds the secrets of the settings spec was built from.
+func (s *Service) testConn(ctx context.Context, spec engine.ConnSpec, set *redact.Set) (*TestResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	spec.ID, spec.Version, spec.PoolSize = "test", 0, 1
 	start := time.Now()
 	conn, err := OpenConn(ctx, spec)
 	if err != nil {
-		return nil, scrub(err, secretsOf(spec.DSN, info)...)
+		return nil, set.Error(err)
 	}
 	defer conn.Close()
 	v, err := conn.Ping(ctx)
 	if err != nil {
-		return nil, scrub(err, secretsOf(spec.DSN, info)...)
+		return nil, set.Error(err)
 	}
 	return &TestResult{ServerVersion: v, Connect: time.Since(start)}, nil
 }
@@ -357,12 +376,13 @@ func toInfo(rec *store.Connection, info engine.DSNInfo) *ConnInfo {
 
 // CreateConnection validates, optionally tests, seals and stores a connection.
 func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput, test bool) (*ConnInfo, *TestResult, error) {
+	pre := inputSecrets(in)
 	if err := s.denySSH(in); err != nil {
 		return nil, nil, err
 	}
 	in, err := normalize(in, s.server())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, pre.Error(err)
 	}
 	if err := s.allowEngine(in.Engine); err != nil {
 		return nil, nil, err
@@ -371,13 +391,13 @@ func (s *Service) CreateConnection(ctx context.Context, ws string, in ConnInput,
 		return nil, nil, err
 	}
 	eng, _ := engine.Get(in.Engine)
-	info, err := s.inspect(eng, in)
+	info, set, err := s.inspect(eng, in)
 	if err != nil {
 		return nil, nil, err
 	}
 	var tr *TestResult
 	if test {
-		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
+		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), set); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -416,6 +436,7 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 	if err != nil {
 		return nil, nil, err
 	}
+	pre := patchSecrets(in.Engine, p)
 	if p.DSN != nil && p.DSNRef != nil {
 		return nil, nil, qerr.New(qerr.Invalid, "give dsn or dsn_ref, not both")
 	}
@@ -474,21 +495,21 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 		}
 		// A setter must not turn a missing target into driver defaults.
 		if in.DSN, err = connString(eng, in); err != nil {
-			return nil, nil, err
+			return nil, nil, pre.Error(err)
 		}
 		setter, ok := eng.(engine.PasswordDSNSetter)
 		if !ok {
 			return nil, nil, qerr.New(qerr.Invalid, "this engine does not support inline password edits")
 		}
 		if in.DSN, err = setter.SetPassword(in.DSN, *p.Password); err != nil {
-			return nil, nil, qerr.New(qerr.Invalid, "invalid connection string for password edit")
+			return nil, nil, pre.Error(qerr.New(qerr.Invalid, "invalid connection string for password edit"))
 		}
 	}
 	if err := s.denySSH(in); err != nil {
 		return nil, nil, err
 	}
 	if in, err = normalize(in, s.server()); err != nil {
-		return nil, nil, err
+		return nil, nil, pre.Error(err)
 	}
 	if err := s.allowEngine(in.Engine); err != nil {
 		return nil, nil, err
@@ -497,13 +518,13 @@ func (s *Service) UpdateConnection(ctx context.Context, ws, name string, p ConnP
 		return nil, nil, err
 	}
 	eng, _ := engine.Get(in.Engine)
-	info, err := s.inspect(eng, in)
+	info, set, err := s.inspect(eng, in)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err // redacted with the secrets of the final connection string and password
 	}
 	var tr *TestResult
 	if test && (p.Password != nil || p.DSN != nil || p.DSNRef != nil || p.PasswordRef != nil || p.SSH != nil || p.ClearSSH || p.Mode != nil || p.TLS != nil || p.ClearTLS) {
-		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), info); err != nil {
+		if tr, err = s.testConn(ctx, s.connSpec(ws, "test", 0, in), set); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -547,8 +568,11 @@ func (s *Service) info(rec *store.Connection) *ConnInfo {
 	if in, err := s.load(rec); err == nil {
 		if eng, err := engine.Get(rec.Engine); err == nil {
 			var err error
-			if di, err = s.inspect(eng, in); err != nil && s.checkDSN(eng, in.DSN) != nil {
-				di.Redacted = "<connection string refused by this server>"
+			if di, _, err = s.inspect(eng, in); err != nil {
+				di.Redacted = "<connection string cannot be parsed>"
+				if s.checkDSN(eng, in.DSN) != nil {
+					di.Redacted = "<connection string refused by this server>"
+				}
 			}
 		}
 	}
@@ -589,7 +613,7 @@ func (s *Service) TestConnection(ctx context.Context, ws, name string) (*TestRes
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, t.spec, t.info)
+	return s.testConn(ctx, t.spec, t.set)
 }
 
 // RefreshSchema rebuilds a connection's cached schema.
@@ -602,13 +626,13 @@ func (s *Service) RefreshSchema(ctx context.Context, ws, name string) (int, time
 	s.invalidate(ctx, t.rec.ID)
 	conn, release, err := s.pools.Get(ctx, t.spec)
 	if err != nil {
-		return 0, 0, t.scrub(err)
+		return 0, 0, t.set.Error(err)
 	}
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
 		s.dropIfBroken(t, err)
-		return 0, 0, t.scrub(err)
+		return 0, 0, t.clean(conn, err)
 	}
 	return cat.Count(), time.Since(start), nil
 }
@@ -619,12 +643,13 @@ func (s *Service) TestInput(ctx context.Context, ws string, in ConnInput) (*Test
 	if strings.TrimSpace(in.Name) == "" {
 		in.Name = "test"
 	}
+	pre := inputSecrets(in)
 	if err := s.denySSH(in); err != nil {
 		return nil, err
 	}
 	in, err := normalize(in, s.server())
 	if err != nil {
-		return nil, err
+		return nil, pre.Error(err)
 	}
 	if err := s.allowEngine(in.Engine); err != nil {
 		return nil, err
@@ -633,9 +658,9 @@ func (s *Service) TestInput(ctx context.Context, ws string, in ConnInput) (*Test
 		return nil, err
 	}
 	eng, _ := engine.Get(in.Engine)
-	info, err := s.inspect(eng, in)
+	_, set, err := s.inspect(eng, in)
 	if err != nil {
 		return nil, err
 	}
-	return s.testConn(ctx, s.connSpec(ws, "test", 0, in), info)
+	return s.testConn(ctx, s.connSpec(ws, "test", 0, in), set)
 }

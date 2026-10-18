@@ -19,6 +19,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/testutil"
 )
 
 const testPassword = "mongo-secret-pw"
@@ -186,8 +187,28 @@ func TestPasswordReplacesAndIsNeverShown(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Engine{}.Open(context.Background(), engine.ConnSpec{Engine: "mongodb", DSN: noPW + "&serverSelectionTimeoutMS=3000", Password: "wrong-pw-xyz", Mode: engine.ModeRO})
-	if e := qerr.From(err); err == nil || e.Category != qerr.ConnectionFailed || strings.Contains(err.Error(), "wrong-pw-xyz") {
-		t.Fatalf("wrong password: %v", err)
+	if err == nil {
+		t.Fatal("wrong password: no error")
+	}
+	if e := qerr.From(err); e.Category != qerr.ConnectionFailed {
+		t.Errorf("wrong password: category %s", e.Category)
+	}
+	testutil.RequireNoSecret(t, "wrong password", err.Error(), "wrong-pw-xyz")
+	// A 3-byte wrong password, as the override and inline. "ent" occurs in
+	// the driver's authentication error, so the check is not vacuous.
+	const short = "ent"
+	for name, spec := range map[string]engine.ConnSpec{
+		"override": {Engine: "mongodb", DSN: noPW + "&serverSelectionTimeoutMS=3000", Password: short, Mode: engine.ModeRO},
+		"inline":   {Engine: "mongodb", DSN: strings.Replace(uri, ":"+testPassword+"@", ":"+short+"@", 1) + "&serverSelectionTimeoutMS=3000", Mode: engine.ModeRO},
+	} {
+		_, err := Engine{}.Open(context.Background(), spec)
+		if err == nil {
+			t.Fatalf("short wrong password (%s): no error", name)
+		}
+		if e := qerr.From(err); e.Category != qerr.ConnectionFailed || !strings.Contains(e.Message, "***") {
+			t.Errorf("short wrong password (%s): category %s, redacted %v", name, e.Category, strings.Contains(e.Message, "***"))
+		}
+		testutil.RequireNoSecret(t, "short wrong password ("+name+")", err.Error(), short)
 	}
 }
 

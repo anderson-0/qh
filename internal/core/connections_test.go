@@ -31,6 +31,16 @@ func (leakyEngine) Inspect(dsn string) (engine.DSNInfo, error) {
 	pw, _ := u.User.Password()
 	return engine.DSNInfo{Host: u.Host, User: u.User.Username(), Password: pw, Redacted: "leaky://" + u.User.Username() + ":***@" + u.Host}, nil
 }
+func (leakyEngine) Credentials(dsn string) ([]string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return nil, qerr.New(qerr.Invalid, "bad leaky dsn")
+	}
+	if pw, ok := u.User.Password(); ok {
+		return []string{pw}, nil
+	}
+	return nil, nil
+}
 func (leakyEngine) Open(_ context.Context, s engine.ConnSpec) (engine.Conn, error) {
 	return nil, qerr.New(qerr.ConnectionFailed, "cannot connect with "+s.DSN+" (password hunter22)")
 }

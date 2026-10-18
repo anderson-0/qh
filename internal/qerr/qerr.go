@@ -12,7 +12,9 @@ import (
 // lineBreaks matches whitespace runs containing a line break or tab.
 var lineBreaks = regexp.MustCompile(`[ \t\r\n]*[\r\n\t][ \t\r\n]*`)
 
-func oneLine(s string) string { return lineBreaks.ReplaceAllString(s, " ") }
+// OneLine replaces each whitespace run that holds a line break or tab with
+// one space, as Error does for the message and hint.
+func OneLine(s string) string { return lineBreaks.ReplaceAllString(s, " ") }
 
 // Category is the machine-readable error class.
 type Category string
@@ -57,9 +59,9 @@ func (e *Error) WithHint(h string) *Error {
 }
 
 func (e *Error) Error() string {
-	msg := strings.TrimRight(strings.TrimSpace(oneLine(e.Message)), ".")
+	msg := strings.TrimRight(strings.TrimSpace(OneLine(e.Message)), ".")
 	s := fmt.Sprintf("error[%s]: %s", e.Category, msg)
-	if h := strings.TrimSpace(oneLine(e.Hint)); h != "" {
+	if h := strings.TrimSpace(OneLine(e.Hint)); h != "" {
 		s += ". " + h
 	}
 	return s

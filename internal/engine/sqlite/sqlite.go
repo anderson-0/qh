@@ -38,6 +38,10 @@ func (Engine) Dialect() sqlx.Dialect                    { return sqlx.SQLite }
 func (Engine) Classify(q string) (engine.Access, error) { return sqlx.Classify(q, sqlx.SQLite) }
 func (Engine) ReferencedObjects(q string) []string      { return sqlx.ReferencedTables(q, sqlx.SQLite) }
 
+// DisplayableDSN implements engine.DisplayableDSN: a SQLite connection
+// string is a file path, which qh already displays.
+func (Engine) DisplayableDSN() {}
+
 // BuildDSN implements engine.DSNBuilder: a SQLite database is a file path.
 func (Engine) BuildDSN(f engine.DSNFields) (string, error) {
 	if f.Host != "" || f.Port != 0 || f.User != "" || f.Password != "" || len(f.Params) > 0 {

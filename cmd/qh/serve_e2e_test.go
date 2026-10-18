@@ -132,7 +132,7 @@ func TestServeEndToEnd(t *testing.T) {
 	if code, body := call("POST", "/api/v1/connections", k.Key, map[string]any{"name": "shop", "engine": "sqlite", "dsn": db}); code != 201 {
 		t.Fatalf("sqlite inside root: %d %s", code, body)
 	}
-	if code, body := call("POST", "/api/v1/connections", k.Key, map[string]any{"name": "evil", "engine": "postgres", "dsn": "postgres://u:p@127.0.0.1:5432/db?connect_timeout=2"}); code != 502 || !strings.Contains(body, "not allowed by this server's network policy") {
+	if code, body := call("POST", "/api/v1/connections", k.Key, map[string]any{"name": "evil", "engine": "postgres", "dsn": "postgres://u:pw-e2e!@127.0.0.1:5432/db?connect_timeout=2"}); code != 502 || !strings.Contains(body, "not allowed by this server's network policy") {
 		t.Fatalf("loopback postgres: %d %s", code, body)
 	}
 	if code, body := call("POST", "/api/v1/connections/shop/query", k.Key, map[string]any{"query": "SELECT count(*) AS n FROM orders"}); code != 200 || !strings.Contains(body, `"rows":[["250"]]`) {

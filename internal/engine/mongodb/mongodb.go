@@ -279,6 +279,10 @@ var serverOptions = []string{
 // settings.
 var serverMechanisms = []string{"SCRAM-SHA-1", "SCRAM-SHA-256", "PLAIN", "MONGODB-X509"}
 
+// maxEchoedKey is the longest refused option key, in bytes, that
+// CheckServerDSN names in its error.
+const maxEchoedKey = 64
+
 const serverOptionsHint = "TLS certificates, keys and CAs go in the connection's tls settings, and the password in the connection string's user info or password_ref"
 
 // CheckServerDSN implements engine.ServerDSNChecker. Server mode accepts
@@ -290,11 +294,13 @@ func (Engine) CheckServerDSN(dsn string) error {
 	}
 	for _, o := range u.options {
 		if !isASCII(o.key) || !contains(serverOptions, o.lkey) {
-			key := o.key
-			if len(key) > 64 {
-				key = key[:64] + "…"
+			// A long key is not echoed: cutting it could leave part of a
+			// secret, or of a character, that redaction no longer matches.
+			if len(o.key) > maxEchoedKey {
+				return qerr.New(qerr.Invalid, "this server does not accept an option longer than "+strconv.Itoa(maxEchoedKey)+" bytes in a mongodb connection string").
+					WithHint(serverOptionsHint)
 			}
-			return qerr.New(qerr.Invalid, "this server does not accept the option "+key+" in a mongodb connection string").
+			return qerr.New(qerr.Invalid, "this server does not accept the option "+o.key+" in a mongodb connection string").
 				WithHint(serverOptionsHint)
 		}
 		if o.lkey == "authmechanism" && !contains(serverMechanisms, o.value) {
@@ -377,7 +383,12 @@ func clientOptions(spec engine.ConnSpec) (*options.ClientOptions, *uri, error) {
 	}
 	opts := options.Client().ApplyURI(dsn)
 	if err := opts.Validate(); err != nil {
-		return nil, nil, qerr.New(qerr.Invalid, "invalid mongodb connection string: "+scrubText(err.Error(), spec.DSN, u.password, spec.Password))
+		// The driver's text can quote the connection string.
+		clean, cerr := cleaner(spec)
+		if cerr != nil {
+			return nil, nil, cerr
+		}
+		return nil, nil, qerr.New(qerr.Invalid, "invalid mongodb connection string: "+clean(err.Error()))
 	}
 	if tlsCfg != nil {
 		opts.SetTLSConfig(tlsCfg)
@@ -410,12 +421,17 @@ func clientOptions(spec engine.ConnSpec) (*options.ClientOptions, *uri, error) {
 }
 
 func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
+	clean, err := cleaner(spec)
+	if err != nil {
+		return nil, err
+	}
+	spec.Redact = clean // so clientOptions cleans with the same function
 	opts, u, err := clientOptions(spec)
 	if err != nil {
 		return nil, err
 	}
 	c := &conn{defaultDB: u.db, pinned: u.db != "", namespaces: spec.Namespaces,
-		readOnly: spec.Mode != engine.ModeRW, password: u.password, extra: spec.Password}
+		readOnly: spec.Mode != engine.ModeRW, clean: clean}
 	c.setConcerns(opts)
 	if c.defaultDB == "" {
 		c.defaultDB = "test"
@@ -441,9 +457,10 @@ type conn struct {
 	namespaces []string
 	readOnly   bool
 	concerns
-	// password and extra are scrubbed from every error, in case the driver
-	// quotes them.
-	password, extra string
+	// clean removes the connection's secrets from text, in case the driver
+	// quotes them (see cleaner). Use cleanText, which also works on a conn
+	// that Open did not build.
+	clean func(string) string
 }
 
 func (c *conn) Close() error {
@@ -464,20 +481,20 @@ func (c *conn) Ping(ctx context.Context) (string, error) {
 	return "MongoDB " + info.Version, nil
 }
 
-// err maps a driver error and removes the passwords from its text.
+// err maps a driver error and removes the connection's secrets from its
+// text. mapErr cleans driver text before cutting it; the message and hint are
+// then cleaned whole.
 func (c *conn) err(err error) error {
-	e := qerr.From(mapErr(err))
-	out := *e
-	out.Message = scrubText(out.Message, c.password, c.extra)
-	out.Hint = scrubText(out.Hint, c.password, c.extra)
-	return &out
+	e := *qerr.From(mapErr(err, c.cleanText))
+	e.Message, e.Hint = c.cleanText(e.Message), c.cleanText(e.Hint)
+	return &e
 }
 
-func scrubText(s string, secrets ...string) string {
-	for _, sec := range secrets {
-		if len(sec) >= 4 {
-			s = strings.ReplaceAll(s, sec, "***")
-		}
+// cleanText removes the connection's secrets from s. A conn that Open did
+// not build (in tests) has no clean function and returns s unchanged.
+func (c *conn) cleanText(s string) string {
+	if c.clean == nil {
+		return s
 	}
-	return s
+	return c.clean(s)
 }

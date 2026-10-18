@@ -25,6 +25,20 @@ func TestErrorFormat(t *testing.T) {
 	}
 }
 
+func TestOneLine(t *testing.T) {
+	cases := map[string]string{
+		"a\n\tb":       "a b",
+		"a \r\n  b\nc": "a b c",
+		"a  b":         "a  b",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := OneLine(in); got != want {
+			t.Errorf("OneLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFrom(t *testing.T) {
 	base := New(ReadOnly, "connection is read-only")
 	wrapped := fmt.Errorf("context: %w", base)

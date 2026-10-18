@@ -88,11 +88,13 @@ func collectNamespaces(dbs []string, build func(string) (engine.Namespace, error
 const maxNoteLen = 100
 
 // unlistedNote is the Note of a database whose collections could not be
-// listed: "not listed: <category>: <message>", on one line, short and with
-// the password scrubbed.
+// listed: "not listed: <category>: <message>", on one line and short. It is
+// part of a successful catalog, which no caller redacts, so it removes the
+// connection's secrets itself, before cutting the message.
 func (c *conn) unlistedNote(err error) string {
 	e := qerr.From(c.err(err))
-	msg := strings.Join(strings.Fields(e.Message), " ")
+	// Joining the lines can bring a secret's parts together: clean again.
+	msg := c.cleanText(strings.Join(strings.Fields(e.Message), " "))
 	if r := []rune(msg); len(r) > maxNoteLen {
 		msg = string(r[:maxNoteLen]) + "…"
 	}

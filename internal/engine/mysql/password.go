@@ -32,21 +32,10 @@ func (Engine) SetPassword(dsn, password string) (string, error) {
 		return "", invalidDSN()
 	}
 
-	// Match go-sql-driver/mysql v1.10.1's delimiter grammar: the last slash
-	// separates the database, and the last @ before it separates credentials.
-	// Passwords can contain '/', '@', and ':' without escaping in this format.
-	if trimmed == "" {
-		dsn = "/"
-	} else {
-		// Match the engine's leading whitespace handling, but retain all suffix
-		// bytes, including trailing whitespace that normal validation may trim.
-		dsn = strings.TrimLeftFunc(dsn, unicode.IsSpace)
+	dsn, at, slash, err := splitNative(dsn)
+	if err != nil {
+		return "", err
 	}
-	slash := strings.LastIndexByte(dsn, '/')
-	if slash < 0 {
-		return "", invalidDSN()
-	}
-	at := strings.LastIndexByte(dsn[:slash], '@')
 	username := ""
 	if at >= 0 {
 		username, _, _ = strings.Cut(dsn[:at], ":")
@@ -61,4 +50,26 @@ func (Engine) SetPassword(dsn, password string) (string, error) {
 		return "", invalidDSN()
 	}
 	return username + ":" + password + "@" + suffix, nil
+}
+
+// splitNative locates the credentials of a go-sql-driver DSN. It returns dsn
+// without leading whitespace (or "/" for a blank dsn), the offset of the @
+// that ends the credentials (-1 without credentials) and the offset of the
+// slash before the database.
+func splitNative(dsn string) (trimmed string, at, slash int, err error) {
+	// Match go-sql-driver/mysql v1.10.1's delimiter grammar: the last slash
+	// separates the database, and the last @ before it separates credentials.
+	// Passwords can contain '/', '@', and ':' without escaping in this format.
+	if strings.TrimSpace(dsn) == "" {
+		trimmed = "/"
+	} else {
+		// Match the engine's leading whitespace handling, but retain all suffix
+		// bytes, including trailing whitespace that normal validation may trim.
+		trimmed = strings.TrimLeftFunc(dsn, unicode.IsSpace)
+	}
+	slash = strings.LastIndexByte(trimmed, '/')
+	if slash < 0 {
+		return "", 0, 0, invalidDSN()
+	}
+	return trimmed, strings.LastIndexByte(trimmed[:slash], '@'), slash, nil
 }

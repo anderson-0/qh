@@ -66,13 +66,15 @@ func TestSwitchingBetweenDSNAndRef(t *testing.T) {
 func TestRefAndSSHValidation(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
+	// SSH passwords are redacted from the errors, so none occurs in the
+	// expected text.
 	for want, in := range map[string]ConnInput{
 		"give dsn_ref or dsn":       {Name: "a", Engine: "postgres", DSN: "postgres://x@y/z", DSNRef: "env:X"},
 		"invalid secret reference":  {Name: "a", Engine: "postgres", DSNRef: "env:"},
 		"password_ref applies only": {Name: "a", Engine: "sqlite", DSN: "/tmp/x.db", PasswordRef: "env:X"},
-		"ssh applies only":          {Name: "a", Engine: "sqlite", DSN: "/tmp/x.db", SSH: &engine.SSH{Host: "b", User: "u", HostKey: fp, Password: "p"}},
-		"ssh.user is required":      {Name: "a", Engine: "postgres", DSN: "postgres://x@y/z", SSH: &engine.SSH{Host: "b", HostKey: fp, Password: "p"}},
-		"ssh.host_key is required":  {Name: "a", Engine: "postgres", DSN: "postgres://x@y/z", SSH: &engine.SSH{Host: "b", User: "u", Password: "p"}},
+		"ssh applies only":          {Name: "a", Engine: "sqlite", DSN: "/tmp/x.db", SSH: &engine.SSH{Host: "b", User: "u", HostKey: fp, Password: "p-!x"}},
+		"ssh.user is required":      {Name: "a", Engine: "postgres", DSN: "postgres://x@y/z", SSH: &engine.SSH{Host: "b", HostKey: fp, Password: "p-!x"}},
+		"ssh.host_key is required":  {Name: "a", Engine: "postgres", DSN: "postgres://x@y/z", SSH: &engine.SSH{Host: "b", User: "u", Password: "p-!x"}},
 	} {
 		_, _, err := h.svc.CreateConnection(ctx, ws, in, false)
 		if qerr.From(err).Category != qerr.Invalid || !strings.Contains(err.Error(), want) {

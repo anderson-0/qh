@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/anderson-0/qh/internal/engine"
+	"github.com/anderson-0/qh/internal/redact"
 )
 
 func fieldMap(fs []engine.Field) map[string]engine.Field {
@@ -236,7 +237,7 @@ func TestCollectNamespacesSkipsFailedDatabase(t *testing.T) {
 }
 
 func TestUnlistedNote(t *testing.T) {
-	c := &conn{password: "s3cret-pw"}
+	c := &conn{clean: redact.New("s3cret-pw").Text}
 	cmdErr := mongo.CommandError{Code: 13, Name: "Unauthorized", Message: "not authorized on shop to execute command { listCollections: 1, pwd: \"s3cret-pw\" }"}
 	got := c.unlistedNote(cmdErr)
 	if !strings.HasPrefix(got, "not listed: query_error: not authorized") || strings.Contains(got, "s3cret-pw") {

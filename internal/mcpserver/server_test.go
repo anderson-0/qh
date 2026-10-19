@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -17,9 +20,11 @@ import (
 
 	"github.com/anderson-0/qh/internal/catalog"
 	"github.com/anderson-0/qh/internal/core"
+	"github.com/anderson-0/qh/internal/engine"
 	_ "github.com/anderson-0/qh/internal/engine/mongodb"
 	_ "github.com/anderson-0/qh/internal/engine/sqlite"
 	"github.com/anderson-0/qh/internal/pool"
+	"github.com/anderson-0/qh/internal/qerr"
 	"github.com/anderson-0/qh/internal/secret"
 	"github.com/anderson-0/qh/internal/store"
 	"github.com/anderson-0/qh/internal/testutil"
@@ -336,4 +341,81 @@ func TestInstructionsMentionMongoshOnlyWithMongo(t *testing.T) {
 	if strings.Count(in, mongoHint) != 1 || !strings.HasSuffix(in, mongoHint) {
 		t.Fatalf("instructions: %q", in)
 	}
+}
+
+// echoEngine is a fake engine whose connection strings are
+// echo://user:password@host. It extracts the userinfo password, opens
+// without connecting, and fails every query quoting the connection string,
+// the resolved password and the userinfo password, with a hint quoting the
+// resolved password.
+type echoEngine struct{}
+
+var registerEcho sync.Once
+
+func (echoEngine) Name() string                           { return "qhtest-echo" }
+func (echoEngine) Classify(string) (engine.Access, error) { return engine.Read, nil }
+func (echoEngine) ReferencedObjects(string) []string      { return nil }
+
+func (echoEngine) Inspect(dsn string) (engine.DSNInfo, error) {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme != "echo" {
+		return engine.DSNInfo{}, qerr.New(qerr.Invalid, "bad echo connection string")
+	}
+	return engine.DSNInfo{Host: u.Host, User: u.User.Username(), Redacted: "echo://" + u.User.Username() + ":***@" + u.Host}, nil
+}
+
+func (echoEngine) Credentials(dsn string) ([]string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return nil, errors.New("echo: cannot locate the password")
+	}
+	if pw, ok := u.User.Password(); ok {
+		return []string{pw}, nil
+	}
+	return nil, nil
+}
+
+func (echoEngine) Open(_ context.Context, spec engine.ConnSpec) (engine.Conn, error) {
+	u, err := url.Parse(spec.DSN)
+	if err != nil {
+		return nil, qerr.New(qerr.ConnectionFailed, "bad echo connection string")
+	}
+	pw, _ := u.User.Password()
+	return &echoConn{dsn: spec.DSN, password: spec.Password, userinfo: pw}, nil
+}
+
+type echoConn struct{ dsn, password, userinfo string }
+
+func (c *echoConn) Query(context.Context, string, engine.QueryOpts) (*engine.Result, error) {
+	return nil, qerr.New(qerr.QueryError, fmt.Sprintf("dsn %q, password %q, userinfo password %q", c.dsn, c.password, c.userinfo)).
+		WithHint(fmt.Sprintf("the server expected %q", c.password))
+}
+
+func (c *echoConn) Explain(ctx context.Context, q string, o engine.QueryOpts) (*engine.Result, error) {
+	return c.Query(ctx, q, o)
+}
+
+func (c *echoConn) Introspect(context.Context) (*engine.Catalog, error) {
+	return &engine.Catalog{}, nil
+}
+func (c *echoConn) Ping(context.Context) (string, error) { return "echo 1", nil }
+func (c *echoConn) Close() error                         { return nil }
+
+// A query error that quotes the connection string, a resolved password_ref
+// and the connection string's password reaches the agent redacted.
+func TestQueryToolErrorRedacted(t *testing.T) {
+	registerEcho.Do(func() { engine.Register(echoEngine{}) })
+	const dsn, inline, resolved = "echo://u:q7z!@h", "q7z!", "k9w!"
+	t.Setenv("QH_TEST_ECHO_PW", resolved)
+	s, svc := connectSvc(t)
+	if _, _, err := svc.CreateConnection(context.Background(), store.DefaultWorkspace, core.ConnInput{
+		Name: "echo", Engine: "qhtest-echo", DSN: dsn, PasswordRef: "env:QH_TEST_ECHO_PW",
+	}, true); err != nil {
+		t.Fatalf("create: %s", qerr.From(err).Category)
+	}
+	out, isErr := call(t, s, "query", map[string]any{"source": "echo", "query": "SELECT 1"})
+	if !isErr || out != `error[query_error]: dsn "***", password "***", userinfo password "***". the server expected "***"` {
+		t.Error("query: not the expected redacted error")
+	}
+	testutil.RequireNoSecret(t, "query", out, dsn, inline, resolved)
 }

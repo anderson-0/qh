@@ -1,5 +1,5 @@
 // Package core applies qh's policy (read-only enforcement, row caps,
-// suggestions, secret scrubbing) on top of the engines. The MCP server and
+// suggestions, secret redaction) on top of the engines. The MCP server and
 // the CLI are thin adapters over Service.
 package core
 
@@ -21,6 +21,7 @@ import (
 	"github.com/anderson-0/qh/internal/format"
 	"github.com/anderson-0/qh/internal/pool"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/redact"
 	"github.com/anderson-0/qh/internal/secret"
 	"github.com/anderson-0/qh/internal/secretref"
 	"github.com/anderson-0/qh/internal/store"
@@ -195,10 +196,17 @@ type target struct {
 	rec  *store.Connection
 	eng  engine.Engine
 	spec engine.ConnSpec
-	info engine.DSNInfo
+	set  *redact.Set // inline secrets; resolved values live with each opened conn
 }
 
-func (t *target) scrub(err error) error { return scrub(err, secretsOf(t.spec.DSN, t.info)...) }
+// clean removes secrets from err: those of the connection generation that
+// opened conn, else t's inline secrets.
+func (t *target) clean(conn engine.Conn, err error) error {
+	if rc, ok := conn.(*redactedConn); ok {
+		return rc.set.Error(err)
+	}
+	return t.set.Error(err)
+}
 
 // resolve finds connection name in ws. An empty name means the workspace's
 // only connection.
@@ -240,15 +248,12 @@ func (s *Service) resolve(ctx context.Context, ws, name string) (*target, error)
 	if err := s.checkInput(in); err != nil {
 		return nil, err
 	}
-	var info engine.DSNInfo
-	if in.DSNRef == "" { // a dsn_ref connection's string is only known when the pool opens
-		if err := s.checkDSN(eng, in.DSN); err != nil {
-			return nil, err
-		}
-		info, _ = eng.Inspect(in.DSN)
+	_, set, err := s.inspect(eng, in)
+	if err != nil {
+		return nil, err
 	}
 	t := &target{
-		rec: rec, eng: eng, info: info,
+		rec: rec, eng: eng, set: set,
 		spec: s.connSpec(ws, rec.ID, rec.Version, in),
 	}
 	// Every change to a connection bumps its version, so the unsealed
@@ -311,13 +316,13 @@ func (s *Service) Schema(ctx context.Context, ws string, in SchemaInput) (string
 	}
 	conn, release, err := s.pools.Get(ctx, t.spec)
 	if err != nil {
-		return "", t.scrub(err)
+		return "", t.set.Error(err)
 	}
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
 		s.dropIfBroken(t, err)
-		return "", t.scrub(err)
+		return "", t.clean(conn, err)
 	}
 	out, n := format.Schema(cat, format.SchemaOpts{Pattern: in.Pattern, Object: in.Object})
 	if n == 0 && (strings.TrimSpace(in.Pattern) != "" || strings.TrimSpace(in.Object) != "") {
@@ -363,7 +368,7 @@ func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engi
 	}
 	conn, release, err := s.pools.Get(ctx, t.spec)
 	if err != nil {
-		return nil, t.scrub(err)
+		return nil, t.set.Error(err)
 	}
 	defer release()
 	opts := engine.QueryOpts{
@@ -379,7 +384,9 @@ func (s *Service) runQuery(ctx context.Context, t *target, in QueryInput) (*engi
 	}
 	if err != nil {
 		s.dropIfBroken(t, err) // reopen next time: re-resolves secrets and reconnects the tunnel
-		return nil, t.scrub(s.withSuggestions(ctx, conn, t, in.Query, err))
+		// The hint quotes the catalog conn read, so conn's generation
+		// redacts it too.
+		return nil, t.clean(conn, s.withSuggestions(ctx, conn, t, in.Query, err))
 	}
 	// Any statement that is not a plain read may change the schema (DDL, but
 	// also a DO block or a function call), so drop the cached catalog.
@@ -406,13 +413,13 @@ func (s *Service) Catalog(ctx context.Context, ws, name string) (*engine.Catalog
 	}
 	conn, release, err := s.pools.Get(ctx, t.spec)
 	if err != nil {
-		return nil, t.scrub(err)
+		return nil, t.set.Error(err)
 	}
 	defer release()
 	cat, err := s.catalog(ctx, conn, t)
 	if err != nil {
 		s.dropIfBroken(t, err)
-		return nil, t.scrub(err)
+		return nil, t.clean(conn, err)
 	}
 	return cat, nil
 }
@@ -459,31 +466,4 @@ func (s *Service) withSuggestions(ctx context.Context, conn engine.Conn, t *targ
 		out.Hint = suggest.TableHint(cat, out.UnknownTable)
 	}
 	return &out
-}
-
-// secretsOf returns the strings to scrub from errors: the password, and the
-// whole connection string when it contains one.
-func secretsOf(dsn string, info engine.DSNInfo) []string {
-	if info.Password == "" {
-		return nil
-	}
-	return []string{dsn, info.Password}
-}
-
-// scrub returns err as a *qerr.Error with every secret replaced by ***. The
-// underlying error is dropped so it cannot leak through Unwrap.
-func scrub(err error, secrets ...string) error {
-	if err == nil {
-		return nil
-	}
-	e := *qerr.From(err)
-	e.Err = nil
-	for _, sec := range secrets {
-		if len(sec) < 4 {
-			continue
-		}
-		e.Message = strings.ReplaceAll(e.Message, sec, "***")
-		e.Hint = strings.ReplaceAll(e.Hint, sec, "***")
-	}
-	return &e
 }

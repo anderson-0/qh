@@ -7,6 +7,7 @@ import (
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/netguard"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/redact"
 	"github.com/anderson-0/qh/internal/sshkey"
 	"github.com/anderson-0/qh/internal/tunnel"
 )
@@ -14,45 +15,52 @@ import (
 // OpenConn opens spec with its registered engine. It is the production
 // pool.Opener. It resolves the spec's secret references, builds its SSH
 // tunnel, and returns a connection that closes the tunnel with it.
-// Resolved values never reach errors.
+// Every secret it knows of, inline or resolved, is removed from its errors
+// and from the errors of the connection it returns.
 func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 	e, err := engine.Get(spec.Engine)
 	if err != nil {
 		return nil, err
 	}
-	var secrets []string
-	fail := func(err error) (engine.Conn, error) {
-		if len(secrets) == 0 {
-			return nil, err
-		}
-		return nil, scrub(err, secrets...)
+	// Every secret is collected before the step that could fail with it.
+	secrets := inlineSecrets(e, spec.DSN, spec.Password, spec.SSH, spec.TLS)
+	fail := func(err error) (engine.Conn, error) { return nil, redact.New(secrets...).Error(err) }
+	creds, err := credentials(e, spec.DSN) // inline string; a dsn_ref one is empty here
+	if err != nil {
+		return fail(err)
 	}
+	secrets = append(secrets, creds...)
 	resolve := func(ref string) (string, error) {
 		if spec.Resolve == nil {
 			return "", qerr.New(qerr.ConnectionFailed, "secret reference "+ref+": no resolver")
 		}
 		v, err := spec.Resolve(ctx, ref)
-		if err == nil {
-			secrets = append(secrets, v)
-		}
+		secrets = append(secrets, v) // also on error: a resolver may return both
 		return v, err
 	}
 	if spec.DSNRef != "" {
 		if spec.DSN, err = resolve(spec.DSNRef); err != nil {
 			return fail(err)
 		}
-		// The server-mode check comes first: parsing a connection string
-		// (Inspect) may read the files it names.
+		// Extraction is a pure parse, so its secrets are known before the
+		// server-mode check can fail.
+		var cerr error
+		creds, cerr = credentials(e, spec.DSN)
+		secrets = append(secrets, creds...)
+		// The server-mode check comes before Inspect: parsing a connection
+		// string may read the files it names.
 		if c, ok := e.(engine.ServerDSNChecker); ok && spec.Server {
 			if err := c.CheckServerDSN(spec.DSN); err != nil {
 				return fail(err)
 			}
 		}
-		info, err := e.Inspect(spec.DSN)
-		if err != nil {
-			return fail(qerr.New(qerr.ConnectionFailed, "secret reference "+spec.DSNRef+": not a valid "+spec.Engine+" connection string"))
+		invalid := qerr.New(qerr.ConnectionFailed, "secret reference "+spec.DSNRef+": not a valid "+spec.Engine+" connection string")
+		if cerr != nil {
+			return fail(invalid)
 		}
-		secrets = append(secrets, info.Password)
+		if _, err := e.Inspect(spec.DSN); err != nil {
+			return fail(invalid)
+		}
 	}
 	if spec.PasswordRef != "" {
 		if spec.Password, err = resolve(spec.PasswordRef); err != nil {
@@ -90,7 +98,6 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 		if s.PasswordRef != "" && cfg.Password == "" {
 			return fail(qerr.New(qerr.ConnectionFailed, "ssh: password_ref resolved to an empty value"))
 		}
-		secrets = append(secrets, cfg.Password, cfg.Passphrase)
 		if tun, err = tunnel.New(cfg); err != nil {
 			return fail(tunnelErr(err, cfg.Addr))
 		}
@@ -100,17 +107,22 @@ func OpenConn(ctx context.Context, spec engine.ConnSpec) (engine.Conn, error) {
 		}
 		spec.Dial = tun.Dial
 	}
+	// Every secret is known now. This generation keeps its own set, so a
+	// later rotation cannot change what an older pool redacts. The engine
+	// sees raw errors; they are redacted only once it returns them.
+	set := redact.New(secrets...)
+	spec.Redact = set.Text
 	c, err := e.Open(ctx, spec)
 	if err != nil {
 		if tun != nil {
 			tun.Close()
 		}
-		return fail(err)
+		return nil, set.Error(err)
 	}
-	if tun == nil {
-		return c, nil
+	if tun != nil {
+		c = &tunneledConn{Conn: c, tun: tun}
 	}
-	return &tunneledConn{Conn: c, tun: tun}, nil
+	return &redactedConn{conn: c, set: set}, nil
 }
 
 // tunnelErr classifies an error from building or connecting the tunnel to

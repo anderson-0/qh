@@ -14,6 +14,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/testutil"
 )
 
 func TestInspect(t *testing.T) {
@@ -62,6 +63,33 @@ func TestCheckServerDSN(t *testing.T) {
 		err := (Engine{}).CheckServerDSN(d)
 		if err == nil || qerr.From(err).Category != qerr.Invalid || strings.Contains(err.Error(), "/etc/ssl") || strings.Contains(err.Error(), d) {
 			t.Errorf("CheckServerDSN(%q) = %v", d, err)
+		}
+	}
+}
+
+// A refused key of up to 64 bytes is named; a longer one is not echoed,
+// since cutting it could leave part of a secret or of a character.
+func TestCheckServerDSNLongKey(t *testing.T) {
+	const canary = "canary-pw-7f3!"
+	const long = "error[invalid]: this server does not accept an option longer than 64 bytes in a mongodb connection string. " + serverOptionsHint
+	key64 := strings.Repeat("k", 64)
+	for i, tc := range []struct{ dsn, want string }{
+		{"mongodb://h/db?" + key64 + "=1",
+			"error[invalid]: this server does not accept the option " + key64 + " in a mongodb connection string. " + serverOptionsHint},
+		{"mongodb://h/db?" + key64 + "x=1", long},
+		{"mongodb://u:" + canary + "@h/db?" + strings.Repeat("k", 60) + canary + "=1", long},
+		{"mongodb://h/db?" + strings.Repeat("k", 63) + "雪=1", long},
+	} {
+		err := (Engine{}).CheckServerDSN(tc.dsn)
+		if err == nil || err.Error() != tc.want || errors.Unwrap(err) != nil {
+			t.Errorf("case %d: not the expected fixed text", i)
+		}
+		if err != nil {
+			testutil.RequireNoSecret(t, fmt.Sprintf("case %d", i), err.Error(), canary[:4])
+		}
+		// clientOptions applies the same check in server mode.
+		if _, _, err := clientOptions(engine.ConnSpec{DSN: tc.dsn, Server: true}); err == nil || err.Error() != tc.want {
+			t.Errorf("case %d: clientOptions: not the expected fixed text", i)
 		}
 	}
 }
@@ -329,15 +357,15 @@ func TestMapErr(t *testing.T) {
 		"command":          {mongo.CommandError{Code: 2, Name: "BadValue", Message: "bad"}, qerr.QueryError},
 		"qerr":             {qerr.New(qerr.Invalid, "x"), qerr.Invalid},
 	} {
-		got := qerr.From(mapErr(tc.err))
+		got := qerr.From(mapErr(tc.err, same))
 		if got.Category != tc.want {
 			t.Errorf("%s: %v, want %s", name, got, tc.want)
 		}
 	}
-	if !strings.Contains(qerr.From(mapErr(mongo.WriteException{WriteErrors: mongo.WriteErrors{{Code: 11000, Message: "E11000 duplicate key"}}})).Message, "E11000") {
+	if !strings.Contains(qerr.From(mapErr(mongo.WriteException{WriteErrors: mongo.WriteErrors{{Code: 11000, Message: "E11000 duplicate key"}}}, same)).Message, "E11000") {
 		t.Error("write error message lost")
 	}
-	if mapErr(nil) != nil {
+	if mapErr(nil, same) != nil {
 		t.Error("mapErr(nil) != nil")
 	}
 }

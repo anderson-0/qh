@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -37,10 +38,12 @@ func portOf(t *testing.T, addr string) int {
 }
 
 func TestOpenConnUnknownHostKeyNamesFingerprint(t *testing.T) {
-	srv := sshtest.Start(t, sshtest.Options{User: "u", Password: "pw"})
+	// The SSH password is redacted from the error, so it holds a character
+	// that a base64 fingerprint cannot.
+	srv := sshtest.Start(t, sshtest.Options{User: "u", Password: "pw-!ssh"})
 	h := newHarness(t)
 	_, err := h.svc.TestInput(context.Background(), ws, ConnInput{Engine: "postgres", DSN: "postgres://u:dbpw@db.internal:5432/app?sslmode=disable",
-		SSH: &engine.SSH{Host: "127.0.0.1", Port: portOf(t, srv.Addr), User: "u", Password: "pw"}})
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: portOf(t, srv.Addr), User: "u", Password: "pw-!ssh"}})
 	if err == nil || !strings.Contains(err.Error(), "unknown host key") || !strings.Contains(err.Error(), "--ssh-host-key "+srv.Fingerprint) {
 		t.Fatalf("%v", err)
 	}
@@ -367,5 +370,221 @@ func TestServerModeRefusesDSAKeys(t *testing.T) {
 	spec.Server, spec.Dial, spec.CheckTarget = false, nil, nil
 	if _, err := OpenConn(context.Background(), spec); err == nil || strings.Contains(err.Error(), "DSA") {
 		t.Fatalf("local: %v", err)
+	}
+}
+
+// OpenConn passes the engine a redaction function that knows every secret
+// of the generation, inline and resolved, SSH ones included.
+func TestOpenConnPassesRedactToEngine(t *testing.T) {
+	ctx := context.Background()
+	const pp = "probe-passphrase-!"
+	key, pub := sshtest.Key(t, pp)
+	srv := sshtest.Start(t, sshtest.Options{User: "jump", AuthorizedKey: pub})
+	bastion := func() *engine.SSH {
+		return &engine.SSH{Host: "127.0.0.1", Port: portOf(t, srv.Addr), User: "jump", HostKey: srv.Fingerprint}
+	}
+	probe := func(t *testing.T, e *redactEngine, spec engine.ConnSpec, secrets []string) {
+		t.Helper()
+		c, err := OpenConn(ctx, spec)
+		if err != nil {
+			t.Fatalf("open failed: %s", qerr.From(err).Category)
+		}
+		t.Cleanup(func() { c.Close() })
+		got, _ := e.last()
+		if got.Redact == nil {
+			t.Fatal("the engine got no Redact")
+		}
+		want := strings.TrimSuffix(strings.Repeat("*** | ", len(secrets)), " | ")
+		if got.Redact(strings.Join(secrets, " | ")) != want {
+			t.Fatal("spec.Redact left a secret")
+		}
+	}
+	t.Run("inline", func(t *testing.T) {
+		e := newRedactEngine(false)
+		s := bastion()
+		s.PrivateKey, s.Passphrase, s.Password = key, pp, "probe-ssh-pw-!"
+		spec := engine.ConnSpec{Engine: e.name, DSN: "redact://app:probe%40db-pw@db", Password: "probe-override-pw", SSH: s,
+			TLS: &engine.TLS{Mode: engine.TLSRequire, Key: syntheticTLSKey}}
+		probe(t, e, spec, []string{spec.DSN, "probe%40db-pw", "probe@db-pw", spec.Password, key, pp, s.Password, syntheticTLSKey})
+	})
+	t.Run("resolved", func(t *testing.T) {
+		e := newRedactEngine(false)
+		const dsn = "redact://app:probe-resolved%2Bdb@db"
+		dsnFile := filepath.Join(t.TempDir(), "dsn")
+		if err := os.WriteFile(dsnFile, []byte(dsn), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("QH_TEST_PROBE_PW", "probe-resolved-pw")
+		t.Setenv("QH_TEST_PROBE_KEY", key)
+		t.Setenv("QH_TEST_PROBE_PP", pp)
+		t.Setenv("QH_TEST_PROBE_SSH_PW", "probe-resolved-ssh-pw-!")
+		s := bastion()
+		s.PrivateKeyRef, s.PassphraseRef, s.PasswordRef = "env:QH_TEST_PROBE_KEY", "env:QH_TEST_PROBE_PP", "env:QH_TEST_PROBE_SSH_PW"
+		spec := engine.ConnSpec{Engine: e.name, DSNRef: "file:" + dsnFile, PasswordRef: "env:QH_TEST_PROBE_PW", SSH: s,
+			Resolve: secretref.NewSet(false, nil).Resolve}
+		probe(t, e, spec, []string{dsn, "probe-resolved%2Bdb", "probe-resolved+db", "probe-resolved-pw", key, pp, "probe-resolved-ssh-pw-!"})
+	})
+}
+
+// An engine that quotes the inline SSH private key, passphrase and password
+// and the TLS key when it fails to open shows none of them.
+func TestOpenConnRedactsInlineSSHAndTLSSecrets(t *testing.T) {
+	const pp = "inline-passphrase-!"
+	key, pub := sshtest.Key(t, pp)
+	srv := sshtest.Start(t, sshtest.Options{User: "jump", AuthorizedKey: pub})
+	e := newRedactEngine(true)
+	_, err := OpenConn(context.Background(), engine.ConnSpec{Engine: e.name, DSN: "redact://app:inline-db-pw-!@db",
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: portOf(t, srv.Addr), User: "jump", HostKey: srv.Fingerprint,
+			PrivateKey: key, Passphrase: pp, Password: "inline-ssh-pw-!"},
+		TLS: &engine.TLS{Mode: engine.TLSRequire, Key: syntheticTLSKey}})
+	if _, opens := e.last(); opens != 1 {
+		t.Fatalf("engine opened %d times; the tunnel did not connect", opens)
+	}
+	if err == nil || err.Error() != "error[connection_failed]: cannot open "+markers(6) || errors.Unwrap(err) != nil {
+		t.Fatal("open error not redacted as expected")
+	}
+	requireTunnelClosed(t, e) // a failed open closes its tunnel
+}
+
+// Closing the connection OpenConn returns closes the engine connection once,
+// then the tunnel.
+func TestOpenConnCloseClosesTunnel(t *testing.T) {
+	srv := sshtest.Start(t, sshtest.Options{User: "jump", Password: "close-ssh-pw-!"})
+	e := newRedactEngine(false)
+	c, err := OpenConn(context.Background(), engine.ConnSpec{Engine: e.name, DSN: "redact://app:close-db-pw-!@db",
+		SSH: &engine.SSH{Host: "127.0.0.1", Port: portOf(t, srv.Addr), User: "jump", HostKey: srv.Fingerprint, Password: "close-ssh-pw-!"}})
+	if err != nil {
+		t.Fatalf("open failed: %s", qerr.From(err).Category)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close failed: %s", qerr.From(err).Category)
+	}
+	if n := e.echo().closes.Load(); n != 1 {
+		t.Fatalf("engine connection closed %d times", n)
+	}
+	requireTunnelClosed(t, e)
+}
+
+// requireTunnelClosed fails t unless the dialer that e's latest Open got
+// belongs to a closed tunnel. A live tunnel would ask the bastion instead.
+func requireTunnelClosed(t *testing.T, e *redactEngine) {
+	t.Helper()
+	spec, _ := e.last()
+	if spec.Dial == nil {
+		t.Fatal("the engine got no tunnel dialer")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := spec.Dial(ctx, "tcp", "127.0.0.1:1")
+	if err == nil {
+		nc.Close()
+		t.Fatal("the tunnel still dials")
+	}
+	if qerr.From(err).Message != "ssh: the tunnel is closed" {
+		t.Fatal("the tunnel is not closed")
+	}
+}
+
+// Secrets known when a step fails are redacted, even when a later step was
+// to add more: a failed password_ref after a resolved dsn_ref, and a
+// resolver that returns a value together with an error quoting it.
+func TestOpenConnRedactsPartialProgress(t *testing.T) {
+	ctx := context.Background()
+	e := newRedactEngine(true)
+	const dsn = "redact://app:partial%2Fdb-pw@db"
+	resolve := func(_ context.Context, ref string) (string, error) {
+		if ref == "env:QH_TEST_PARTIAL_DSN" {
+			return dsn, nil
+		}
+		return "", qerr.New(qerr.ConnectionFailed, "cannot resolve "+ref+" next to partial/db-pw in "+dsn).WithHint("raw partial%2Fdb-pw")
+	}
+	_, err := OpenConn(ctx, engine.ConnSpec{Engine: e.name, DSNRef: "env:QH_TEST_PARTIAL_DSN", PasswordRef: "env:QH_TEST_PARTIAL_PW", Resolve: resolve})
+	if err == nil || err.Error() != "error[connection_failed]: cannot resolve env:QH_TEST_PARTIAL_PW next to *** in ***. raw ***" {
+		t.Fatal("password_ref failure not redacted as expected")
+	}
+	both := func(_ context.Context, ref string) (string, error) {
+		return "both-value-!", qerr.New(qerr.ConnectionFailed, "rejected both-value-! from "+ref)
+	}
+	_, err = OpenConn(ctx, engine.ConnSpec{Engine: e.name, DSN: "redact://app@db", PasswordRef: "env:QH_TEST_BOTH", Resolve: both})
+	if err == nil || err.Error() != "error[connection_failed]: rejected *** from env:QH_TEST_BOTH" {
+		t.Fatal("value returned with an error not redacted as expected")
+	}
+	if _, opens := e.last(); opens != 0 {
+		t.Fatal("the engine was opened after a failed reference")
+	}
+}
+
+// fakeSecretsManager resolves aws-sm:// references from a map, without AWS.
+type fakeSecretsManager map[string]string
+
+func (f fakeSecretsManager) Resolve(_ context.Context, r secretref.Ref) (string, error) {
+	return f[r.Name], nil
+}
+
+// Values resolved through each reference scheme are redacted from the
+// engine's error.
+func TestOpenConnRedactsEveryReferenceScheme(t *testing.T) {
+	const dsn, pw = "redact://app:scheme%3Bdb-pw@db", "scheme-pw-value-!"
+	dir := t.TempDir()
+	file := func(name, v string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return "file:" + p
+	}
+	t.Setenv("QH_TEST_SCHEME_DSN", dsn)
+	t.Setenv("QH_TEST_SCHEME_PW", pw)
+	refs := secretref.NewSet(false, nil).With("aws-sm", fakeSecretsManager{"qh/test/dsn": dsn, "qh/test/pw": pw})
+	for _, c := range []struct{ scheme, dsnRef, pwRef string }{
+		{"env", "env:QH_TEST_SCHEME_DSN", "env:QH_TEST_SCHEME_PW"},
+		{"file", file("dsn", dsn), file("pw", pw)},
+		{"aws-sm", "aws-sm://qh/test/dsn", "aws-sm://qh/test/pw"},
+	} {
+		t.Run(c.scheme, func(t *testing.T) {
+			e := newRedactEngine(true)
+			_, err := OpenConn(context.Background(), engine.ConnSpec{Engine: e.name, DSNRef: c.dsnRef, PasswordRef: c.pwRef, Resolve: refs.Resolve})
+			if spec, _ := e.last(); spec.DSN != dsn || spec.Password != pw {
+				t.Fatal("the engine did not get the resolved values")
+			}
+			if err == nil || err.Error() != "error[connection_failed]: cannot open "+markers(3)+". tried ***" {
+				t.Fatal("resolved values not redacted as expected")
+			}
+		})
+	}
+}
+
+// Secrets of one or two bytes are redacted too.
+func TestOpenConnRedactsShortSecrets(t *testing.T) {
+	e := newRedactEngine(true)
+	t.Setenv("QH_TEST_SHORT_PW", "x")
+	_, err := OpenConn(context.Background(), engine.ConnSpec{Engine: e.name, DSN: "redact://app:pw@db", PasswordRef: "env:QH_TEST_SHORT_PW",
+		Resolve: secretref.NewSet(false, nil).Resolve})
+	if err == nil || err.Error() != "error[connection_failed]: cannot open *** / *** / ***. tried ***" {
+		t.Fatal("short secrets not redacted as expected")
+	}
+}
+
+// An inline connection string whose secrets the engine cannot locate fails
+// with fixed text. An unparseable resolved dsn_ref keeps its own message.
+func TestOpenConnFailsClosedOnUnparseableDSN(t *testing.T) {
+	ctx := context.Background()
+	e := newRedactEngine(true)
+	_, err := OpenConn(ctx, engine.ConnSpec{Engine: e.name, DSN: "redact://app:canary-db-pw@db?unparseable"})
+	if err == nil || err.Error() != "error[invalid]: invalid "+e.name+" connection string" {
+		t.Fatal("inline: not the fixed text")
+	}
+	for name, v := range map[string]string{
+		"inspect fails": "redact://app:canary-db-pw@db?uninspectable",
+		"extract fails": "redact://app:canary-db-pw@db?unparseable",
+	} {
+		t.Setenv("QH_TEST_BAD_DSN", v)
+		_, err := OpenConn(ctx, engine.ConnSpec{Engine: e.name, DSNRef: "env:QH_TEST_BAD_DSN", Resolve: secretref.NewSet(false, nil).Resolve})
+		if err == nil || err.Error() != "error[connection_failed]: secret reference env:QH_TEST_BAD_DSN: not a valid "+e.name+" connection string" {
+			t.Fatalf("dsn_ref, %s: not the expected text", name)
+		}
+	}
+	if _, opens := e.last(); opens != 0 {
+		t.Fatal("the engine was opened with an unparseable connection string")
 	}
 }

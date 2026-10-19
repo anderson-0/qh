@@ -70,6 +70,10 @@ type ConnSpec struct {
 	Resolve func(ctx context.Context, ref string) (string, error)
 	// CheckTarget is the network policy's address check in server mode.
 	CheckTarget func(netip.Addr) bool
+	// Redact, set by core.OpenConn, removes every secret known for this
+	// connection from text. Engines that cut or reformat driver text apply it
+	// first. Nil means the engine relies on its own redaction.
+	Redact func(string) string
 }
 
 // QueryOpts controls one query.
@@ -108,14 +112,18 @@ type DSNInfo struct {
 	Port     int
 	Database string
 	User     string
-	Password string // only for scrubbing error messages; never displayed
+	// Password is never displayed. It may come from driver defaults
+	// (Postgres reads PGPASSWORD and ~/.pgpass); never use it for
+	// redaction. Use CredentialExtractor.
+	Password string
 	Redacted string // the connection string with the password replaced by ***
 }
 
 // Engine is a database type.
 type Engine interface {
 	Name() string
-	// Inspect parses dsn without connecting.
+	// Inspect parses dsn without connecting. Errors are fixed text: they
+	// never include dsn or any part of it.
 	Inspect(dsn string) (DSNInfo, error)
 	Open(ctx context.Context, spec ConnSpec) (Conn, error)
 	// Classify returns what q needs from the database, without connecting.
@@ -139,6 +147,23 @@ type SQLEngine interface {
 // policy. Errors must not include either input.
 type PasswordDSNSetter interface {
 	SetPassword(dsn, password string) (string, error)
+}
+
+// CredentialExtractor is an optional engine capability for redaction.
+// Credentials returns every secret value written in dsn, both as written
+// and decoded as the driver would use it, and nothing else. It is a pure
+// string parse: it must not connect, read environment variables or files,
+// or resolve references. It fails when it cannot tell where the secrets
+// are. Errors are fixed text and never include dsn.
+type CredentialExtractor interface {
+	Credentials(dsn string) ([]string, error)
+}
+
+// DisplayableDSN marks an engine whose connection strings are file paths
+// that qh displays, not secrets. Every other engine's whole connection
+// string is treated as a secret.
+type DisplayableDSN interface {
+	DisplayableDSN()
 }
 
 // ServerDSNChecker is implemented by engines that restrict what a connection

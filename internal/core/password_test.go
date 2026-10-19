@@ -416,12 +416,12 @@ func TestPasswordPatchLifecycle(t *testing.T) {
 				if newer == old {
 					t.Fatal("new version reused old pool")
 				}
-				passwordWant(t, e, newer.(*passwordConn).dsn, next)
-				if old.(*passwordConn).closed.Load() {
+				passwordWant(t, e, innerConn(newer).(*passwordConn).dsn, next)
+				if innerConn(old).(*passwordConn).closed.Load() {
 					t.Fatal("old in-flight pool retired too early")
 				}
 				release()
-				if !old.(*passwordConn).closed.Load() {
+				if !innerConn(old).(*passwordConn).closed.Load() {
 					t.Fatal("old pool not closed after last release")
 				}
 			})

@@ -19,9 +19,11 @@ const (
 	codeMaxTimeExpired    = 50
 )
 
-// mapErr classifies a driver error. Callers scrub passwords from the
-// message (conn.err).
-func mapErr(err error) error {
+// mapErr classifies a driver error. Driver text that it cuts to one line goes
+// through clean first, which removes the connection's secrets, so the cut
+// never leaves part of a secret behind. Callers clean the whole message and
+// hint again (conn.err).
+func mapErr(err error, clean func(string) string) error {
 	if err == nil {
 		return nil
 	}
@@ -41,7 +43,7 @@ func mapErr(err error) error {
 		isWrite && we.HasErrorCode(codeMaxTimeExpired) {
 		// Server selection times out when no server answers.
 		if strings.Contains(err.Error(), "server selection error") {
-			return qerr.Wrap(qerr.ConnectionFailed, "cannot reach MongoDB: "+firstLine(err.Error()), err)
+			return qerr.Wrap(qerr.ConnectionFailed, "cannot reach MongoDB: "+firstLine(clean(err.Error())), err)
 		}
 		return qerr.Wrap(qerr.Timeout, "the query timed out", err).WithHint("Narrow the filter, add an index, or raise the connection's timeout")
 	}
@@ -53,9 +55,9 @@ func mapErr(err error) error {
 		return qerr.Wrap(qerr.QueryError, fmt.Sprintf("%s (code %d)", w.Message, w.Code), err)
 	}
 	if isConnErr(err) {
-		return qerr.Wrap(qerr.ConnectionFailed, "cannot reach MongoDB: "+firstLine(err.Error()), err)
+		return qerr.Wrap(qerr.ConnectionFailed, "cannot reach MongoDB: "+firstLine(clean(err.Error())), err)
 	}
-	return qerr.Wrap(qerr.QueryError, firstLine(err.Error()), err)
+	return qerr.Wrap(qerr.QueryError, firstLine(clean(err.Error())), err)
 }
 
 // isConnErr reports whether err means qh could not reach or log in to the

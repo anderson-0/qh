@@ -197,10 +197,14 @@ curl -s -X POST localhost:8080/api/v1/connections -H "Authorization: Bearer $TEA
 claude mcp add --transport http qh http://localhost:8080/mcp --header "Authorization: Bearer $TEAM"
 ```
 
-Server mode refuses database addresses on loopback and link-local ranges (including cloud metadata at
-169.254.169.254), and Unix sockets. Use `--allow-cidr 127.0.0.0/8` to allow a local database (this does not help
-when qh runs in a container, because the host's databases are not on the container's loopback; see the
-`host.docker.internal` note under Install), and `--deny-cidr` to block more (for example your private ranges). SQLite is off unless you pass `--sqlite-root DIR`; files must
+Server mode refuses database addresses on loopback and link-local ranges, including cloud metadata at
+169.254.169.254. It also refuses three IPv6 ranges that embed IPv4 addresses: `64:ff9b::/96`, `64:ff9b:1::/48`
+and `::/96`. It accepts only TCP connections. If you reach IPv4 databases through NAT64, allow the translated
+addresses you need: `203.0.113.0/24` becomes `--allow-cidr 64:ff9b::cb00:7100/120`. Refuse other translation
+prefixes your network uses, such as 6to4 or Teredo, with `--deny-cidr`. Use `--allow-cidr 127.0.0.0/8` to
+allow a local database (this does not help when qh runs in a container, because the host's databases are not
+on the container's loopback; see the `host.docker.internal` note under Install), and `--deny-cidr` to block
+more (for example your private ranges). SQLite is off unless you pass `--sqlite-root DIR`; files must
 then live under `DIR/<workspace>/`, so each workspace sees only its own directory. Each API key may run 4
 queries at once; an extra request waits up to 10 s for a free slot, then gets HTTP 429.
 
@@ -325,7 +329,7 @@ Use them with `--dsn-ref`, `--password-ref`, `--ssh-key-ref`, `--ssh-passphrase-
 - References are refused unless the operator allows them: `qh serve --http :8765 --allow-secret-ref 'env:TENANT_DB_*' --allow-secret-ref 'aws-sm://arn:aws:secretsmanager:us-east-1:123456789012:secret:qh/*'`.
 - An allowed reference can be used by every tenant with a manage key on that server, and a tenant can read its value (for example by pointing a connection at a server it controls, which then receives the password). Allow only secrets you would hand to all tenants. Tenants who must not share secrets need separate servers.
 - For `file:` patterns, a mounted secret that is a symlink (as in Kubernetes secret volumes) must be allowed with a directory pattern such as `file:/var/run/secrets/db/*`, because the real path behind the symlink must also match.
-- Both the bastion and the database behind it are checked against the server's network policy (`--allow-cidr`/`--deny-cidr`). By default only loopback, unspecified and link-local addresses (including the cloud metadata addresses) are refused, so private ranges such as `10.0.0.0/8` stay reachable; add `--deny-cidr 10.0.0.0/8 …` to keep tenants out of them. A database on the bastion's own loopback is allowed.
+- Both the bastion and the database behind it are checked against the server's network policy (`--allow-cidr`/`--deny-cidr`). By default only loopback, unspecified and link-local addresses (including the cloud metadata addresses) and `64:ff9b::/96`, `64:ff9b:1::/48` and `::/96` are refused, so private ranges such as `10.0.0.0/8` stay reachable; add `--deny-cidr 10.0.0.0/8 …` to keep tenants out of them. On a DNS64 network, give the database's IP address: a name with a translated answer is refused. A database on the bastion's own loopback is allowed.
 - A tenant's encrypted SSH private key may use at most 128 KDF rounds (`ssh-keygen -a`; the default is 16). Re-encrypt one with more using `ssh-keygen -p -a 100 -f KEY`. RSA keys may be at most 8192 bits, and DSA keys are refused. The key is decrypted when qh connects, so a wrong passphrase is reported by the connection test, not when the connection is saved without one.
 - `--deny-ssh` turns tunnels off.
 

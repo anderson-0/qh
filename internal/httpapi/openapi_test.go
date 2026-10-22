@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/anderson-0/qh/internal/auth"
 )
 
 func TestOpenAPIMatchesRoutes(t *testing.T) {
@@ -96,5 +98,38 @@ func TestOpenAPIPasswordPatch(t *testing.T) {
 	}
 	if _, present := doc.Components.Schemas["Connection"].Properties["password"]; present {
 		t.Fatal("response schema exposes password")
+	}
+}
+
+// The revoke response documents QH-Warning with exactly the text the handler
+// sends, and no other response of that operation has headers.
+func TestOpenAPIRevokeWarning(t *testing.T) {
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(openapiDoc, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var op struct {
+		Responses map[string]struct {
+			Headers map[string]struct {
+				Schema struct {
+					Type  string `json:"type"`
+					Const string `json:"const"`
+				} `json:"schema"`
+			} `json:"headers"`
+		} `json:"responses"`
+	}
+	if err := json.Unmarshal(doc.Paths["/api/v1/keys/{id}"]["delete"], &op); err != nil {
+		t.Fatal(err)
+	}
+	h, ok := op.Responses["204"].Headers["QH-Warning"]
+	if !ok || h.Schema.Type != "string" || h.Schema.Const != auth.RevocationWarning {
+		t.Fatalf("204 QH-Warning: %+v present=%v", h, ok)
+	}
+	for code, r := range op.Responses {
+		if code != "204" && len(r.Headers) > 0 {
+			t.Fatalf("response %s documents headers", code)
+		}
 	}
 }

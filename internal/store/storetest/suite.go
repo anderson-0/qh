@@ -22,6 +22,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 		"StaleUpdateDoesNotHitRecreatedConnection": testStaleUpdateDoesNotHitRecreatedConnection,
 		"Workspaces":                               testWorkspaces,
 		"Keys":                                     testKeys,
+		"DeleteKeyKeepsDescendants":                testDeleteKeyKeepsDescendants,
 		"QueryLog":                                 testQueryLog,
 		"ConnectionTLSSummary":                     testConnectionTLSSummary,
 		"ConnectionSSHAndRefsSummaries":            testConnectionSSHAndRefsSummaries,
@@ -240,6 +241,44 @@ func testKeys(t *testing.T, s store.Store) {
 	}
 	if err := s.Ping(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// DeleteKey removes exactly one row. Keys that name it as their creator keep
+// their rows, expiry and created_by.
+func testDeleteKeyKeepsDescendants(t *testing.T, s store.Store) {
+	ctx := context.Background()
+	exp := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	parent := &store.APIKey{ID: store.NewID(), WorkspaceID: "default", Prefix: "parent01", Hash: []byte{1}, Scopes: []string{"query", "manage"}, ExpiresAt: &exp}
+	child := &store.APIKey{ID: store.NewID(), WorkspaceID: "default", Prefix: "child001", Hash: []byte{2}, Scopes: []string{"query", "manage"}, ExpiresAt: &exp, CreatedBy: parent.ID}
+	grand := &store.APIKey{ID: store.NewID(), WorkspaceID: "default", Prefix: "grand001", Hash: []byte{3}, Scopes: []string{"query"}, ExpiresAt: &exp, CreatedBy: child.ID}
+	other := &store.APIKey{ID: store.NewID(), WorkspaceID: "default", Prefix: "other001", Hash: []byte{4}, Scopes: []string{"query"}}
+	for _, k := range []*store.APIKey{parent, child, grand, other} {
+		if err := s.CreateKey(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := map[string]*store.APIKey{}
+	for _, p := range []string{"child001", "grand001", "other001"} {
+		k, err := s.GetKeyByPrefix(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[p] = k
+	}
+	if err := s.DeleteKey(ctx, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetKeyByPrefix(ctx, "parent01"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("parent survived: %v", err)
+	}
+	for p, want := range before {
+		if got, err := s.GetKeyByPrefix(ctx, p); err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s changed: %+v %v", p, got, err)
+		}
+	}
+	if n, err := s.CountKeys(ctx); err != nil || n != 3 {
+		t.Fatalf("count = %d %v", n, err)
 	}
 }
 

@@ -142,8 +142,13 @@ func (a *api) createKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
-// deleteKey: manage keys may revoke only their own workspace's keys, and
-// other workspaces' keys look like they do not exist.
+// warningHeader carries a fixed notice on a successful response.
+const warningHeader = "QH-Warning"
+
+// deleteKey revokes the selected key only; keys it created stay valid. Manage
+// keys may revoke only their own workspace's keys, and other workspaces' keys
+// look like they do not exist. Success is 204 with auth.RevocationWarning in
+// the QH-Warning header.
 func (a *api) deleteKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if p := principal(r); !p.IsAdmin() {
@@ -165,5 +170,6 @@ func (a *api) deleteKey(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
+	w.Header().Set(warningHeader, auth.RevocationWarning)
 	w.WriteHeader(http.StatusNoContent)
 }

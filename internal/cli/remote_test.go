@@ -114,3 +114,62 @@ func TestRemotePasswordEdit(t *testing.T) {
 		return run(t, home, stdin, append([]string{"--server", url, "--key", admin, "--workspace", "passwords"}, args...)...)
 	})
 }
+
+// With --server, key rm prints the same success line and stderr notice as
+// locally; failures print neither, and a foreign key looks like a missing one.
+func TestRemoteKeyRevokeWarning(t *testing.T) {
+	url, admin := remoteServer(t)
+	home := t.TempDir()
+	as := func(key string, args ...string) (string, string, int) {
+		return run(t, home, "", append([]string{"--server", url, "--key", key}, args...)...)
+	}
+	for _, ws := range []string{"team", "other"} {
+		if out, errOut, code := as(admin, "workspace", "create", ws); code != 0 {
+			t.Fatalf("workspace %s: %d %q %q", ws, code, out, errOut)
+		}
+	}
+	tokenRE := regexp.MustCompile(`(?m)^qh_\S+$`)
+	create := func(name, key string, args ...string) (tok, id string) {
+		t.Helper()
+		out, errOut, code := as(key, append([]string{"key", "create", "--name", name}, args...)...)
+		m := createdKeyID.FindStringSubmatch(out)
+		tok = tokenRE.FindString(out)
+		if code != 0 || m == nil || tok == "" {
+			t.Fatalf("create %s: %d %q", name, code, errOut) // out holds the key; do not print it
+		}
+		return tok, m[1]
+	}
+	team, teamID := create("team", admin, "--workspace", "team", "--scopes", "query,manage")
+	child, childID := create("child", team, "--scopes", "query")
+	stranger, _ := create("stranger", admin, "--workspace", "other", "--scopes", "query,manage")
+	childWorks := func(when string) {
+		t.Helper()
+		if _, errOut, code := as(child, "conn", "ls"); code != 0 {
+			t.Fatalf("child %s: %d %q", when, code, errOut)
+		}
+	}
+
+	if out, errOut, code := as(admin, "key", "rm", teamID); code != 0 || out != "revoked key "+teamID+"\n" || errOut != auth.RevocationWarning+"\n" {
+		t.Fatalf("revoke team: %d %q %q", code, out, errOut)
+	}
+	childWorks("after its creator was revoked")
+
+	fails := func(name, wantPrefix, key string, args ...string) string {
+		t.Helper()
+		out, errOut, code := as(key, args...)
+		if code != 1 || out != "" || !strings.HasPrefix(errOut, wantPrefix) || strings.Contains(errOut, auth.RevocationWarning) {
+			t.Fatalf("%s: %d %q %q", name, code, out, errOut)
+		}
+		return errOut
+	}
+	fails("revoke team twice", `error[unknown_source]: no API key with id "`+teamID+`"`, admin, "key", "rm", teamID)
+	fails("query key revokes", "error[forbidden]: this API key lacks the manage scope", child, "key", "rm", childID)
+	fails("revoked key revokes", "error[auth]: invalid API key", team, "key", "rm", childID)
+	missing := store.NewID()
+	foreign := fails("stranger revokes child", `error[unknown_source]: no API key with id "`+childID+`"`, stranger, "key", "revoke", childID)
+	absent := fails("stranger revokes missing id", `error[unknown_source]: no API key with id "`+missing+`"`, stranger, "key", "revoke", missing)
+	if strings.ReplaceAll(foreign, childID, "ID") != strings.ReplaceAll(absent, missing, "ID") {
+		t.Fatalf("foreign and missing keys differ: %q %q", foreign, absent)
+	}
+	childWorks("after a foreign revocation attempt")
+}

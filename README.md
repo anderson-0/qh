@@ -185,6 +185,10 @@ if you set it; that must be a `qh_` key whose secret has at least 32 characters 
 - **Scopes:** `query` (MCP tools, schema, query), `manage` (create, change and delete connections; create
   query/manage keys for the same workspace, which expire no later than the key that creates them), `admin`
   (everything).
+- **Revoking a key** (`qh key rm ID` or `DELETE /api/v1/keys/{id}`) deletes only that key. Keys it created, and
+  keys those created, keep working until they are revoked or expire: qh checks each key on its own, never the key
+  that created it. `qh key rm` says so on stderr, and the API sends the same notice in a `QH-Warning` header. A
+  request already accepted with the revoked key may still finish.
 - **MCP** is served at `/mcp` (Streamable HTTP). The REST API is under `/api/v1`; see `/api/v1/openapi.json`.
 - **`qh key` and `qh workspace`** act on the local store at `--home`, or on a server with `--server`/`--key` (see Remote CLI).
 

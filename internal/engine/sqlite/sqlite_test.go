@@ -89,11 +89,20 @@ func TestOpenMissingFileDoesNotEchoSecrets(t *testing.T) {
 }
 
 func TestPath(t *testing.T) {
+	// abs is the absolute form of a rooted path: itself on Unix, on the
+	// current drive on Windows.
+	abs := func(p string) string {
+		a, err := filepath.Abs(filepath.FromSlash(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
 	cases := map[string]string{
-		"/tmp/a b.db":        "/tmp/a b.db",
-		"sqlite:///tmp/a.db": "/tmp/a.db",
-		"file:/tmp/a.db":     "/tmp/a.db",
-		"file:///tmp/a.db":   "/tmp/a.db",
+		"/tmp/a b.db":        abs("/tmp/a b.db"),
+		"sqlite:///tmp/a.db": abs("/tmp/a.db"),
+		"file:/tmp/a.db":     abs("/tmp/a.db"),
+		"file:///tmp/a.db":   abs("/tmp/a.db"),
 	}
 	for in, want := range cases {
 		if got, err := Path(in); err != nil || got != want {
@@ -120,13 +129,13 @@ func TestPath(t *testing.T) {
 		}
 	}
 	// Paths that merely contain an @ stay valid.
-	for in, want := range map[string]string{"/tmp/me@x/a.db": "/tmp/me@x/a.db", "/tmp/a@2x.db": "/tmp/a@2x.db", "SQLITE:///tmp/a.db": "/tmp/a.db", "FILE:/tmp/a.db": "/tmp/a.db"} {
+	for in, want := range map[string]string{"/tmp/me@x/a.db": abs("/tmp/me@x/a.db"), "/tmp/a@2x.db": abs("/tmp/a@2x.db"), "SQLITE:///tmp/a.db": abs("/tmp/a.db"), "FILE:/tmp/a.db": abs("/tmp/a.db")} {
 		if got, err := Path(in); err != nil || got != want {
 			t.Errorf("Path(%q) = %q, %v", in, got, err)
 		}
 	}
 	info, err := Engine{}.Inspect("sqlite:///tmp/a.db")
-	if err != nil || info.Database != "/tmp/a.db" || info.Redacted != "/tmp/a.db" || info.Password != "" {
+	if err != nil || info.Database != abs("/tmp/a.db") || info.Redacted != abs("/tmp/a.db") || info.Password != "" {
 		t.Fatalf("Inspect = %+v, %v", info, err)
 	}
 }

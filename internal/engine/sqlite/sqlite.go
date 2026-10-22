@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/anderson-0/qh/internal/engine"
 	"github.com/anderson-0/qh/internal/qerr"
+	"github.com/anderson-0/qh/internal/sqliteuri"
 	"github.com/anderson-0/qh/internal/sqlx"
 )
 
@@ -157,8 +157,7 @@ func (Engine) Open(ctx context.Context, spec engine.ConnSpec) (engine.Conn, erro
 	if readOnly {
 		q = "mode=ro&_busy_timeout=5000&_query_only=1"
 	}
-	u := url.URL{Scheme: "file", Path: path, RawQuery: q}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", sqliteuri.File(path, q))
 	if err != nil {
 		return nil, qerr.Wrap(qerr.ConnectionFailed, "cannot open database", err)
 	}

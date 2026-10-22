@@ -34,7 +34,14 @@ var SQLiteFixtureStatements = []string{
 // a space, and returns the database path.
 func SQLiteFixture(t testing.TB) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "with space")
+	return SQLiteFixtureIn(t, filepath.Join(t.TempDir(), "with space"))
+}
+
+// SQLiteFixtureIn creates the fixture database shop.db in dir, creating dir
+// if needed, and returns the database path. The path must not contain ?: the
+// driver opens it as a plain file name.
+func SQLiteFixtureIn(t testing.TB, dir string) string {
+	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +13,8 @@ import (
 
 	msqlite "modernc.org/sqlite"
 	sqlitelib "modernc.org/sqlite/lib"
+
+	"github.com/anderson-0/qh/internal/sqliteuri"
 )
 
 // migrations[i] moves the schema from user_version i to i+1.
@@ -125,8 +126,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 }
 
 func openSQLiteOnce(abs string) (*SQLite, error) {
-	u := url.URL{Scheme: "file", Path: abs, RawQuery: "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", sqliteuri.File(abs, "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1"))
 	if err != nil {
 		return nil, err
 	}

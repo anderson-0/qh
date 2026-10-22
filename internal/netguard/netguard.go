@@ -14,10 +14,14 @@ import (
 )
 
 // DefaultDeny covers loopback, unspecified, link-local (including cloud
-// metadata at 169.254.169.254) and the AWS and Alibaba metadata addresses.
+// metadata at 169.254.169.254), the AWS and Alibaba metadata addresses, and
+// three IPv6 ranges that embed IPv4 addresses: the NAT64 prefixes
+// 64:ff9b::/96 and 64:ff9b:1::/48 and the IPv4-compatible ::/96. The
+// embedded address is not interpreted; to reach one, allow its IPv6 range.
 var DefaultDeny = []string{
 	"127.0.0.0/8", "::1/128", "0.0.0.0/8", "::/128",
 	"169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128", "100.100.100.200/32",
+	"64:ff9b::/96", "64:ff9b:1::/48", "::/96",
 }
 
 // Policy allows an address when it is inside an allow range, or outside
@@ -26,6 +30,8 @@ type Policy struct {
 	allow, deny []netip.Prefix
 	// Resolve looks up a host name; tests replace it.
 	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
+	// dial opens the transport connection to a checked IP; tests replace it.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // DeniedError reports a refused target.
@@ -66,9 +72,13 @@ func New(allow, deny []string) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Policy{allow: a, deny: d, Resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
-		return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	}}, nil
+	return &Policy{
+		allow: a, deny: d,
+		Resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		},
+		dial: (&net.Dialer{}).DialContext,
+	}, nil
 }
 
 // Allowed reports whether ip may be dialled.
@@ -92,10 +102,20 @@ func (p *Policy) Allowed(ip netip.Addr) bool {
 	return true
 }
 
-// DialContext dials addr through the policy. Unix sockets are refused.
+// DialContext dials addr through the policy. Only TCP (tcp, tcp4, tcp6) is
+// accepted: any other network is refused before addr is parsed or looked
+// up. A host name is looked up once, and the answers the policy allows are
+// dialled in order, as IP addresses. Every refusal is a *DeniedError; an
+// empty answer is a not-found *net.DNSError; if every allowed answer fails,
+// the last dial error is returned.
 func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	if strings.HasPrefix(network, "unix") {
-		return nil, &DeniedError{Target: "unix socket " + addr}
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	default:
+		if strings.HasPrefix(network, "unix") {
+			return nil, &DeniedError{Target: "unix socket " + addr}
+		}
+		return nil, &DeniedError{Target: "non-TCP networks"}
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -108,14 +128,16 @@ func (p *Policy) DialContext(ctx context.Context, network, addr string) (net.Con
 		ips = []netip.Addr{ip4}
 	} else if ips, err = p.Resolve(ctx, host); err != nil {
 		return nil, err
+	} else if len(ips) == 0 {
+		// No address is not a refusal: report it as the resolver does.
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 	}
-	var d net.Dialer
 	var lastErr error = &DeniedError{Target: host}
 	for _, ip := range ips {
 		if !p.Allowed(ip) {
 			continue
 		}
-		c, err := d.DialContext(ctx, network, net.JoinHostPort(ip.Unmap().String(), port))
+		c, err := p.dial(ctx, network, net.JoinHostPort(ip.Unmap().String(), port))
 		if err == nil {
 			return c, nil
 		}

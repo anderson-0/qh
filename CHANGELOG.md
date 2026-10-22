@@ -12,6 +12,7 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 ### Changed
 
+- **Server mode refuses more address ranges and accepts only TCP.** `64:ff9b::/96`, `64:ff9b:1::/48` and `::/96` are denied by default; `--allow-cidr` re-allows them. Other translation prefixes need `--deny-cidr`.
 - **MongoDB schema inference allocates less.** Path statistics count each document directly instead of building a presence map per document. Sampled fields, nullability, enums and references are unchanged.
 
 ### Fixed

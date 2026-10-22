@@ -268,6 +268,80 @@ func TestServerModeTargetPolicy(t *testing.T) {
 	}
 }
 
+// Under the default server-mode policy, targets are checked against the same
+// policy as direct dials, except that the bastion's own loopback stays
+// allowed and a name is refused when any of its answers is.
+func TestTargetUnderDefaultPolicy(t *testing.T) {
+	resolve := func(_ context.Context, host string) ([]netip.Addr, error) {
+		switch host {
+		case "loop.test":
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		case "mixed.test":
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("64:ff9b::7f00:1")}, nil
+		case "nat.test":
+			return []netip.Addr{netip.MustParseAddr("64:ff9b::7f00:1")}, nil
+		case "dns64.test":
+			return []netip.Addr{netip.MustParseAddr("64:ff9b::cb00:7105"), netip.MustParseAddr("203.0.113.5")}, nil
+		}
+		return nil, errors.New("no such host")
+	}
+	policy, err := netguard.New(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun, err := New(Config{User: "u", Password: "pw", CheckTarget: policy.Allowed, Resolve: resolve})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tun.Close()
+	ctx := context.Background()
+	for _, c := range []struct{ host, want string }{ // want "" means refused
+		{"127.0.0.1", "127.0.0.1:5432"},
+		{"127.0.0.2", "127.0.0.2:5432"},
+		{"::1", "[::1]:5432"}, // inside the denied ::/96, but loopback
+		{"::ffff:127.0.0.1", "127.0.0.1:5432"},
+		// Translated and IPv4-compatible addresses, even of loopback, are
+		// checked like any other.
+		{"64:ff9b::7f00:1", ""},
+		{"::7f00:1", ""},
+		{"64:ff9b:1::1", ""},
+		{"64:ff9b::cb00:7105", ""},
+		{"169.254.169.254", ""},
+		{"loop.test", "127.0.0.1:5432"},
+		// A name is refused when any of its answers is.
+		{"mixed.test", ""},
+		{"nat.test", ""},
+		// A DNS64 resolver adds a translated answer to an IPv4-only name, so
+		// the name is refused. Use the database's IP address instead.
+		{"dns64.test", ""},
+	} {
+		got, err := tun.target(ctx, c.host, "5432")
+		if c.want != "" {
+			if err != nil || got != c.want {
+				t.Errorf("%s: %q, %v; want %q", c.host, got, err, c.want)
+			}
+			continue
+		}
+		var de *netguard.DeniedError
+		if !errors.As(err, &de) || de.Target != net.JoinHostPort(c.host, "5432") || got != "" {
+			t.Errorf("%s: %q, %v; want a policy refusal", c.host, got, err)
+		}
+	}
+	// An explicit allow applies to targets too.
+	allow, err := netguard.New([]string{"64:ff9b::/96"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun2, err := New(Config{User: "u", Password: "pw", CheckTarget: allow.Allowed, Resolve: resolve})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tun2.Close()
+	if got, err := tun2.target(ctx, "64:ff9b::7f00:1", "5432"); err != nil || got != "[64:ff9b::7f00:1]:5432" {
+		t.Errorf("allowed 64:ff9b::/96: %q, %v", got, err)
+	}
+}
+
 func TestBastionDialUsesPolicy(t *testing.T) {
 	srv := sshtest.Start(t, sshtest.Options{User: "u", Password: "pw"})
 	called := false

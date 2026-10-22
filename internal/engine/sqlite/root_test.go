@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,8 +16,17 @@ func TestFileRoot(t *testing.T) {
 	inside := testutil.SQLiteFixture(t)
 	root := filepath.Dir(inside)
 	outside := testutil.SQLiteFixture(t)
+	// t.TempDir directories are siblings, so this walks from inside the root to the other fixture.
+	traversal := filepath.Join(root, "..", "..", filepath.Base(filepath.Dir(filepath.Dir(outside))), "with space", "shop.db")
+	escapes := []string{outside, traversal, "/etc/hosts"}
 	link := filepath.Join(root, "escape.db")
-	if err := os.Symlink(outside, link); err != nil {
+	switch err := os.Symlink(outside, link); {
+	case err == nil:
+		escapes = append(escapes, link)
+	case runtime.GOOS == "windows":
+		// Windows needs a privilege or developer mode for symbolic links.
+		t.Logf("symlink escape not checked: %v", err)
+	default:
 		t.Fatal(err)
 	}
 	open := func(dsn string) error {
@@ -29,9 +39,7 @@ func TestFileRoot(t *testing.T) {
 	if err := open(inside); err != nil {
 		t.Fatalf("inside root: %v", err)
 	}
-	// t.TempDir directories are siblings, so this walks from inside the root to the other fixture.
-	traversal := filepath.Join(root, "..", "..", filepath.Base(filepath.Dir(filepath.Dir(outside))), "with space", "shop.db")
-	for _, dsn := range []string{outside, link, traversal, "/etc/hosts"} {
+	for _, dsn := range escapes {
 		err := open(dsn)
 		if err == nil || !strings.HasPrefix(err.Error(), "error[invalid]: sqlite path is outside the allowed directory") {
 			t.Errorf("%s: %v", dsn, err)

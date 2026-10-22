@@ -23,6 +23,7 @@ qh is a database server for AI agents, written in Go. It serves two MCP tools, `
 | `internal/store` | the store, SQLite (local) or Postgres (shared between instances) |
 | `internal/sqlx` | statement classification for read-only enforcement |
 | `internal/tunnel`, `sshkey`, `secretref`, `netguard` | SSH tunnels, key parsing limits, `env:`/`file:`/`aws-sm://` references, server-mode network policy |
+| `internal/sqliteuri` | the `file:` URIs that the SQLite engine and store pass to the driver, including Windows paths |
 | `bench/` | a separate Go module: the benchmark against dbhub, MCP Toolbox and mongodb-mcp-server |
 
 ## Commands

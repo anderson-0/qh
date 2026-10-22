@@ -1,0 +1,3 @@
+# Tests compare golden files byte for byte, so Git must not change their line
+# endings, for example on a Windows checkout with core.autocrlf.
+*.golden -text

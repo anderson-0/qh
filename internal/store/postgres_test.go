@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/url"
@@ -228,7 +229,8 @@ func TestPostgresPasswordFileUnreadable(t *testing.T) {
 	missing := t.TempDir() + "/no-such-pw"
 	t.Setenv("QH_STORE_PASSWORD_FILE", missing)
 	_, err := store.OpenPostgres(context.Background(), "postgres://qh@127.0.0.1:1/qh")
-	if err == nil || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "no such file") {
+	// The cause's wording differs by OS, so check its identity, not its text.
+	if err == nil || !strings.Contains(err.Error(), missing) || !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("want the path and the cause, got %v", err)
 	}
 }

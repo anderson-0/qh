@@ -10,6 +10,8 @@ All notable changes to qh are listed here. Versions follow [semantic versioning]
 
 - **SQLite cold-schema benchmark.** `-micro-engine sqlite` measures a generated 1,000-table SQLite schema and query latency on Chinook. It runs without Docker when agent runs and token counting are skipped.
 
+- **Key revocation states what it covers.** Revoking a key deletes only that key; keys it created keep working until they are revoked or expire. `qh key rm` prints this notice on stderr after its success line, and `DELETE /api/v1/keys/{id}` sends it in a `QH-Warning` header. The 204 response is otherwise unchanged.
+
 ### Changed
 
 - **Server mode refuses more address ranges and accepts only TCP.** `64:ff9b::/96`, `64:ff9b:1::/48` and `::/96` are denied by default; `--allow-cidr` re-allows them. Other translation prefixes need `--deny-cidr`.

@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/anderson-0/qh/internal/auth"
 )
 
 func TestWorkspaceAndKeyCommands(t *testing.T) {
@@ -35,6 +37,38 @@ func TestWorkspaceAndKeyCommands(t *testing.T) {
 	}
 	if out, _, code := run(t, home, "", "workspace", "rm", "team"); code != 0 || out != "deleted workspace team\n" {
 		t.Fatalf("rm: %d %q", code, out)
+	}
+}
+
+var createdKeyID = regexp.MustCompile(`(?m)^created key (\S+) `)
+
+// key rm prints its success line on stdout and the fixed notice on stderr;
+// a failed revocation prints neither.
+func TestKeyRevokeWarning(t *testing.T) {
+	home := t.TempDir()
+	create := func(args ...string) string {
+		t.Helper()
+		out, errOut, code := run(t, home, "", append([]string{"key", "create"}, args...)...)
+		m := createdKeyID.FindStringSubmatch(out)
+		if code != 0 || m == nil {
+			t.Fatalf("key create: %d %q", code, errOut) // out holds the key; do not print it
+		}
+		return m[1]
+	}
+	for _, verb := range []string{"rm", "revoke"} {
+		id := create("--scopes", "query,manage")
+		out, errOut, code := run(t, home, "", "key", verb, id)
+		if code != 0 || out != "revoked key "+id+"\n" || errOut != auth.RevocationWarning+"\n" {
+			t.Fatalf("key %s: %d %q %q", verb, code, out, errOut)
+		}
+		out, errOut, code = run(t, home, "", "key", verb, id)
+		if code != 1 || out != "" || !strings.HasPrefix(errOut, `error[unknown_source]: no API key with id "`+id+`"`) ||
+			strings.Contains(errOut, auth.RevocationWarning) {
+			t.Fatalf("key %s twice: %d %q %q", verb, code, out, errOut)
+		}
+	}
+	if out, errOut, code := run(t, home, "", "key", "rm"); code != 1 || out != "" || strings.Contains(errOut, auth.RevocationWarning) {
+		t.Fatalf("key rm without id: %d %q %q", code, out, errOut)
 	}
 }
 

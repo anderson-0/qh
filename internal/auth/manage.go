@@ -121,7 +121,15 @@ func ListKeys(ctx context.Context, st store.Store, workspace string, all bool) (
 	return out, nil
 }
 
-// DeleteKey revokes a key.
+// RevocationWarning is the fixed notice shown after every successful
+// revocation: by the CLI on stderr, and by the REST API in the QH-Warning
+// header. Revoking a key deletes that key only; keys it created keep working
+// until they are revoked or expire. The text is the same whether or not such
+// keys exist, so it reveals nothing about other keys.
+const RevocationWarning = "Only the selected key was revoked. Descendant keys may remain valid until individually revoked or expired."
+
+// DeleteKey revokes the key id and only that key. Keys it created are not
+// changed, and authentication never consults a key's creator.
 func DeleteKey(ctx context.Context, st store.Store, id string) error {
 	err := st.DeleteKey(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {

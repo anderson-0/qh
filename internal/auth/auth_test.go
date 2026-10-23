@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -126,6 +127,92 @@ func TestAuthenticateExpiredAndDeleted(t *testing.T) {
 		t.Fatalf("deleted key still works: %v", err)
 	}
 	_ = info
+}
+
+// The approved wording. It also travels in an HTTP header, so it must stay
+// one line of printable ASCII.
+func TestRevocationWarning(t *testing.T) {
+	const want = "Only the selected key was revoked. Descendant keys may remain valid until individually revoked or expired."
+	if RevocationWarning != want {
+		t.Fatalf("RevocationWarning = %q", RevocationWarning)
+	}
+	for i := 0; i < len(RevocationWarning); i++ {
+		if c := RevocationWarning[i]; c < 0x20 || c > 0x7e {
+			t.Fatalf("byte %d is %#x", i, c)
+		}
+	}
+}
+
+// Deleting a key removes its row only. Its child, grandchild and an
+// unrelated root keep authenticating with their own expiry and created_by.
+func TestDeleteKeyRevokesOnlyTheSelectedKey(t *testing.T) {
+	for _, selected := range []string{"parent", "child", "grandchild"} {
+		t.Run(selected, func(t *testing.T) {
+			ctx := context.Background()
+			st := newStore(t)
+			a := NewAuthenticator(st)
+			toks, infos := map[string]string{}, map[string]*KeyInfo{}
+			add := func(name, by string, notAfter *time.Time, expiresIn time.Duration) {
+				t.Helper()
+				tok, info, err := CreateKey(ctx, st, KeyInput{Workspace: "default", Scopes: []string{ScopeQuery, ScopeManage},
+					Name: name, ExpiresIn: expiresIn, NotAfter: notAfter, CreatedBy: by})
+				if err != nil {
+					t.Fatal(err)
+				}
+				toks[name], infos[name] = tok, info
+			}
+			// The chain the HTTP API builds: each child is capped to its creator's expiry.
+			add("parent", "", nil, 72*time.Hour)
+			add("child", infos["parent"].ID, infos["parent"].ExpiresAt, 0)
+			add("grandchild", infos["child"].ID, infos["child"].ExpiresAt, 0)
+			add("root", "", nil, 0)
+			for name, tok := range toks {
+				if _, err := a.Authenticate(ctx, "Bearer "+tok); err != nil {
+					t.Fatalf("%s before revocation: %v", name, err)
+				}
+			}
+			before, err := st.ListAllKeys(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := infos[selected].ID
+			if err := DeleteKey(ctx, st, id); err != nil {
+				t.Fatal(err)
+			}
+			after, err := st.ListAllKeys(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want []*store.APIKey
+			for _, k := range before {
+				if k.ID != id {
+					want = append(want, k)
+				}
+			}
+			if !reflect.DeepEqual(after, want) {
+				t.Fatalf("deleting %s changed other rows: %d rows before, %d after", selected, len(before), len(after))
+			}
+			for name, tok := range toks {
+				p, err := a.Authenticate(ctx, "Bearer "+tok)
+				if name == selected {
+					if err == nil || qerr.From(err).Category != qerr.Auth {
+						t.Fatalf("revoked %s still authenticates: %v", name, err)
+					}
+					continue
+				}
+				if err != nil || p.KeyID != infos[name].ID || !sameExpiry(p.ExpiresAt, infos[name].ExpiresAt) {
+					t.Fatalf("%s after revoking %s: %v", name, selected, err)
+				}
+			}
+			if err := DeleteKey(ctx, st, id); err == nil || qerr.From(err).Category != qerr.UnknownSource {
+				t.Fatalf("second delete: %v", err)
+			}
+		})
+	}
+}
+
+func sameExpiry(a, b *time.Time) bool {
+	return a == nil && b == nil || a != nil && b != nil && a.Equal(*b)
 }
 
 func TestCreateKeyValidation(t *testing.T) {

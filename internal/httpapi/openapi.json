@@ -159,7 +159,10 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KeyInput" } } } },
         "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Key" } } } }, "default": { "$ref": "#/components/responses/problem" } } } },
     "/api/v1/keys/{id}": { "delete": { "summary": "Revoke a key; scope manage",
+      "description": "Deletes only the selected key. Keys it created keep working until they are revoked or expire; authentication never checks a key's creator. A request already authenticated with the revoked key may still finish.",
       "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-      "responses": { "204": { "$ref": "#/components/responses/noContent" }, "default": { "$ref": "#/components/responses/problem" } } } }
+      "responses": { "204": { "description": "Revoked", "headers": { "QH-Warning": { "description": "Fixed notice sent on every successful revocation",
+        "schema": { "type": "string", "const": "Only the selected key was revoked. Descendant keys may remain valid until individually revoked or expired." } } } },
+        "default": { "$ref": "#/components/responses/problem" } } } }
   }
 }

@@ -106,11 +106,13 @@ func keyCmd(with withBackend) *cobra.Command {
 				return w.Flush()
 			})},
 		&cobra.Command{Use: "rm <id>", Aliases: []string{"revoke"}, Short: "Revoke an API key", Args: cobra.ExactArgs(1),
+			Long: "Revokes only the selected key. Keys it created keep working until they are revoked or expire.",
 			RunE: with(func(cmd *cobra.Command, b backend, args []string) error {
 				if err := b.DeleteKey(cmd.Context(), args[0]); err != nil {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "revoked key %s\n", args[0])
+				fmt.Fprintln(cmd.ErrOrStderr(), auth.RevocationWarning)
 				return nil
 			})},
 	)

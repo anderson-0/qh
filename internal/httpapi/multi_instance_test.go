@@ -171,6 +171,25 @@ func TestMultiInstanceSharedStore(t *testing.T) {
 	}
 	expectProblem(t, b.do(t, "POST", "/api/v1/connections/shop/query", k.Key, map[string]any{"query": count}), 401, "auth", "")
 
+	// 3b. Revoking a parent through B refuses it on A at once; the keys it
+	// created keep working on both instances.
+	both := []string{auth.ScopeQuery, auth.ScopeManage}
+	parent := createKeyAs(t, a, admin, map[string]any{"workspace": store.DefaultWorkspace, "scopes": both, "name": "parent"})
+	child := createKeyAs(t, b, parent.Key, map[string]any{"scopes": both, "name": "child"})
+	grand := createKeyAs(t, a, child.Key, map[string]any{"scopes": []string{auth.ScopeQuery}, "name": "grandchild"})
+	if child.CreatedBy != parent.ID || grand.CreatedBy != child.ID {
+		t.Fatalf("created_by chain: %q %q", child.CreatedBy, grand.CreatedBy)
+	}
+	expectRevoked(t, adm(b, "DELETE", "/api/v1/keys/"+parent.ID, nil))
+	expectProblem(t, a.do(t, "GET", "/api/v1/connections", parent.Key, nil), 401, "auth", "")
+	for name, e := range map[string]*env{"A": a, "B": b} {
+		for _, k := range []keyJSON{child, grand} {
+			if r := e.do(t, "GET", "/api/v1/connections", k.Key, nil); r.status != 200 {
+				t.Fatalf("descendant %s on %s: %d %s", k.Name, name, r.status, r.body)
+			}
+		}
+	}
+
 	// 4. A schema change made through A drops B's cached schema.
 	if r := adm(a, "PATCH", "/api/v1/connections/shop", map[string]any{"mode": "rw"}); r.status != 200 {
 		t.Fatalf("make rw on A: %d %s", r.status, r.body)
